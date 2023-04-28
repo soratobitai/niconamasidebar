@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="options.css">
+    <title>ニコ生サイドバーの設定</title>
+</head>
+
+<body>
+    <div class="container">
+
+        <h1>ニコ生サイドバーとは</h1>
+        <p>
+            ニコ生の番組視聴ページにサイドバーを設置します。
+        </p>
+        <p>
+            サイドバーには、フォロー中の番組リストがライブサムネイル付きで表示されます。定期的に自動更新されるので、番組を視聴しながら別の番組を監視できます。
+        </p>
+        
+        <h1>オプション</h1>
+
+        <h2>オートオープン</h2>
+        
+        <p>
+            ページ読み込み時にサイドバーを自動で開くかどうかを設定します。
+        </p>
+
+        <form>
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="isAutoOpen1" name="isAutoOpen" value="1">
+                    <label for="isAutoOpen1">ON</label>
+                </div>
+            </div>
+        
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="isAutoOpen2" name="isAutoOpen" value="0" checked>
+                    <label for="isAutoOpen2">OFF</label>
+                </div>
+            </div>
+        </form>
+
+        <h2>サイドバーサイズ</h2>
+        
+        <p>
+            サイドバーの幅を記憶するかどうかを設定します。
+        </p>
+        
+        <form>
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="isSaveSidebarSize1" name="isSaveSidebarSize" value="1">
+                    <label for="isSaveSidebarSize1">記憶する</label>
+                </div>
+            </div>
+        
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="isSaveSidebarSize2" name="isSaveSidebarSize" value="0" checked>
+                    <label for="isSaveSidebarSize2">記憶しない</label>
+                </div>
+            </div>
+        </form>
+        
+    </div>
+    
+    <script src="options.js"></script>
+</body>
+
+</html>

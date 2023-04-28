@@ -1,0 +1,137 @@
+{
+    "meta": {
+        "status": 200
+    },
+    "data": {
+        "id": "lv341090938",
+        "title": "お久しﾌﾞﾘﾌﾞﾘﾌﾞﾘﾌﾞﾘｭﾘｭﾘｭﾘｭﾘｭﾘｭ！！！！！！ﾌﾞﾂﾁﾁﾌﾞﾌﾞﾌﾞﾁﾁﾁﾁﾌﾞﾘﾘｲﾘﾌﾞﾌﾞﾌﾞブリ大根ですわお前ら。",
+        "description": "雑談配信",
+        "onAirTime": {
+            "beginAt": "2023-04-23T17:56:56+09:00",
+            "endAt": "2023-04-23T19:26:56+09:00"
+        },
+        "showTime": {
+            "beginAt": "2023-04-23T17:56:56+09:00",
+            "endAt": "2023-04-23T19:26:56+09:00"
+        },
+        "viewers": 1256,
+        "comments": 1076,
+        "timeshiftReservedCount": 1,
+        "thumbnailUrl": "https://secure-dcdn.cdn.nimg.jp/comch/community-icon/128x128/co6015020.jpg?1673080828",
+        "liveCycle": "on_air",
+        "providerType": "user",
+        "providerId": "118716498",
+        "creationAccountType": "premiumUser",
+        "socialGroupId": "co6015020",
+        "isChannelRelatedOfficial": false,
+        "isMemberOnly": false,
+        "tags": [
+            {
+                "text": "一般(その他)",
+                "type": "category",
+                "isLocked": true,
+                "isDeletable": false,
+                "isExistNicopedia": true
+            },
+            {
+                "text": "一般",
+                "type": "category",
+                "isLocked": true,
+                "isDeletable": false,
+                "isExistNicopedia": true
+            },
+            {
+                "text": "顔出し",
+                "type": "category",
+                "isLocked": true,
+                "isDeletable": false,
+                "isExistNicopedia": true
+            },
+            {
+                "text": "HD配信",
+                "type": "normal",
+                "isLocked": true,
+                "isDeletable": true,
+                "isExistNicopedia": true
+            },
+            {
+                "text": "スマートフォン配信",
+                "type": "normal",
+                "isLocked": true,
+                "isDeletable": true,
+                "isExistNicopedia": true
+            },
+            {
+                "text": "売名女",
+                "type": "normal",
+                "isLocked": false,
+                "isDeletable": true,
+                "isExistNicopedia": false
+            },
+            {
+                "text": "misaco",
+                "type": "normal",
+                "isLocked": false,
+                "isDeletable": true,
+                "isExistNicopedia": false
+            }
+        ],
+        "isIchibaEditable": true,
+        "isOnlyRegisteredCommentable": false,
+        "isQuotable": false,
+        "isNicocasWebProgram": false,
+        "isDmc": true,
+        "isPayProgram": false,
+        "isDomesticOnly": false,
+        "isNicoAdEnabled": true,
+        "isGiftEnabled": true,
+        "isProductSerialEnabled": false,
+        "broadcastStreamSettings": {
+            "maxQuality": "ultrahigh",
+            "isPortrait": false
+        },
+        "isSemiOfficial": false,
+        "isTagOwnerLock": false,
+        "programType": "unama",
+        "functions": [
+            {
+                "type": "multicamera",
+                "enabled": false,
+                "permission": "premiumUser"
+            },
+            {
+                "type": "overlap_publish",
+                "enabled": true,
+                "permission": "none"
+            }
+        ],
+        "timeshift": {
+            "enabled": true,
+            "status": "before_release"
+        },
+        "deviceFilter": {
+            "isPlayable": true,
+            "isListing": true,
+            "isArchivePlayable": false,
+            "isChasePlayable": true
+        },
+        "liveScreenshotThumbnailUrls": {
+            "large": "https://ssth.dmc.nico/thumbnail/20230423/17/54/nicolive-production-pg44562519163509/nicolive-production-pg44562519163509_800_450.jpg",
+            "middle": "https://ssth.dmc.nico/thumbnail/20230423/17/54/nicolive-production-pg44562519163509/nicolive-production-pg44562519163509_640_360.jpg",
+            "small": "https://ssth.dmc.nico/thumbnail/20230423/17/54/nicolive-production-pg44562519163509/nicolive-production-pg44562519163509_352_198.jpg",
+            "micro": "https://ssth.dmc.nico/thumbnail/20230423/17/54/nicolive-production-pg44562519163509/nicolive-production-pg44562519163509_160_90.jpg"
+        },
+        "contentOwner": {
+            "type": "user",
+            "id": "118716498",
+            "name": "トロピカルしかく",
+            "icon": "https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/11871/118716498.jpg?1676804291",
+            "level": 40
+        },
+        "advertisementType": "normal",
+        "isPremiumAppeal": true,
+        "isEmotionEnabled": true,
+        "isChannelMemberFreeOfficialProgram": false,
+        "isMuted": false
+    }
+}
