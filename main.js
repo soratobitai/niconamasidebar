@@ -2,18 +2,19 @@ const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox.conten
 //const notifyboxAPI = 'https://sp.live.nicovideo.jp/api/relive/notifybox.content.php';
 const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 
-let isAutoOpen = false;
-let isSaveSidebarSize = false;
 const getProgramsInterval = 120; // 秒
 const maxSaveProgramInfos = 100;
+const zappingMinWidth = 180;
+const rootMinWidth = (1024 + 128 + 4);
+const toDolists = [];
+let updataThumbnailInterval = 5; // 秒
+let programContainerWidth = '100%';
+let zappingWidth = zappingMinWidth;
+let isAutoOpen = false;
+let isSaveSidebarSize = false;
 let isZapping = false;
 let isInserting = false;
-const zappingMinWidth = 180;
-let zappingWidth = zappingMinWidth;
-const rootMinWidth = (1024 + 128 + 4);
-let programContainerWidth = '100%';
-
-const toDolists = [];
+let isBetumadokun = false;
 
 window.addEventListener('load', async function () {
 
@@ -29,6 +30,13 @@ window.addEventListener('load', async function () {
             zappingWidth = (options.zappingWidth !== undefined) ? options.zappingWidth : zappingMinWidth;
         }
     }
+
+    // 別窓くん（別窓ポップアップかどうか）
+    // クエリを取得
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    isBetumadokun = (params.get('popup') === 'on');
+
 
     const zapping_line_html = `<div id="zapping_line"><div id="zapping_button"><div id="zapping_arrow"></div></div></div>`;
     document.body.insertAdjacentHTML('afterbegin', zapping_line_html);
@@ -268,10 +276,10 @@ window.addEventListener('load', async function () {
             
             zapping_arrow.classList.add('zapping_arrow_re');
 
-            // サムネイルを更新
-            setTimeout(function () {
-                updataThumbnail();
-            }, 5000);
+            // サムネイル更新間隔を変更
+            // setTimeout(function () {
+            //     updataThumbnailInterval = 20; // 秒
+            // }, 5000);
         } else {
             zapping.style.width = 0;
             zapping.style.minWidth = 0;
@@ -342,7 +350,7 @@ window.addEventListener('load', async function () {
 
 
     // オートオープン
-    if (isAutoOpen) {
+    if (isAutoOpen && !isBetumadokun) {
         zapping_button.click();
     } else {
         getPrograms(100);
@@ -357,14 +365,19 @@ window.addEventListener('load', async function () {
     // 番組情報を取得
     setInterval(function () {
         if (!isZapping) return;
-        if (toDolists.length === 0) return;
+        if (toDolists.length === 0) {
+            updataThumbnailInterval = 20; // 秒
+            return;
+        } else {
+            updataThumbnailInterval = 5; // 秒
+        }
         setProgramInfo(toDolists.shift());
     }, 1000);
 
     // サムネイルを更新
     setInterval(function () {
         updataThumbnail();
-    }, 20000);
+    }, updataThumbnailInterval * 1000);
 });
 
 
@@ -419,13 +432,13 @@ async function getPrograms(rows = 100) {
         // localStorageからサムネ情報を取得
         let programInfos = JSON.parse(localStorage.getItem('programInfos'));
         if (!programInfos) {
-            // なければ初期化
+            // 初期化
             localStorage.setItem('programInfos', JSON.stringify([]));
             programInfos = [];
         }
         // toDolists 更新
         response.data.notifybox_content.map((live) => {
-            const infos = programInfos.filter((info) => info.id === live.id);
+            const infos = programInfos.filter((info) => info.id === `lv${live.id}`);
             if (infos.length === 0) {
                 toDolists.push(live.id);
             }
