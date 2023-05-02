@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "ニコ生サイドバー",
     "description": "ニコ生の番組視聴ページにサイドバーを設置します。",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "author": "MynicoTools",
     "options_ui": {
         "page": "options.html",
@@ -23,6 +23,16 @@
             ],
             "css": [
                 "main.css"
+            ]
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "images/*.gif"
+            ],
+            "matches": [
+                "https://*/*"
             ]
         }
     ],
