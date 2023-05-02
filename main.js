@@ -25,6 +25,10 @@ window.addEventListener('load', async function () {
         options.isSaveSidebarSize !== undefined
     ) {
         isAutoOpen = Number(options.isAutoOpen);
+        if (isAutoOpen === 2) {
+            isAutoOpen = options.isZapping ? Number(options.isZapping) : Number(options.isAutoOpen);
+        }
+        
         isSaveSidebarSize = Number(options.isSaveSidebarSize);
         if (isSaveSidebarSize) {
             zappingWidth = (options.zappingWidth !== undefined) ? options.zappingWidth : zappingMinWidth;
@@ -136,6 +140,7 @@ window.addEventListener('load', async function () {
         scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
         windowWidth = window.innerWidth - scrollbarWidth;
         windowHeight = window.innerHeight;
+        setRootWidth();
         setWatchPageWidth();
     });
 
@@ -232,9 +237,8 @@ window.addEventListener('load', async function () {
                 playerSection.style.width = 'auto';
             }
 
-            // サイドバーサイズを保存
-            // 機能拡張が有効か無効かをチェック
             try {
+                // サイドバーサイズを記憶する場合
                 if (isSaveSidebarSize) {
                     chrome.storage.local.set({ 'zappingWidth': zappingWidth });
                 } else {
@@ -273,22 +277,32 @@ window.addEventListener('load', async function () {
             root.style.maxWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
             root.style.minWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
             root.style.width = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-            
+
             zapping_arrow.classList.add('zapping_arrow_re');
 
-            // サムネイル更新間隔を変更
-            // setTimeout(function () {
-            //     updataThumbnailInterval = 20; // 秒
-            // }, 5000);
+            // コメント欄　スクロールボタンを押す
+            setTimeout(() => {
+                const indicator = playerSection.querySelector('[class*="_indicator_"]');
+                if (indicator) indicator.click();
+            }, 1000);
         } else {
             zapping.style.width = 0;
             zapping.style.minWidth = 0;
-            
+
             root.style.maxWidth = windowWidth + 'px';
             root.style.minWidth = windowWidth + 'px';
             root.style.width = windowWidth + 'px';
-            
+
             zapping_arrow.classList.remove('zapping_arrow_re');
+        }
+
+        try {
+            // サイドバー開閉を記憶する場合
+            if (Number(options.isAutoOpen) === 2) {
+                chrome.storage.local.set({ 'isZapping': isZapping });
+            }
+        } catch (error) {
+
         }
 
         setWatchPageWidth();
@@ -350,7 +364,7 @@ window.addEventListener('load', async function () {
 
 
     // オートオープン
-    if (isAutoOpen && !isBetumadokun) {
+    if (isAutoOpen && Number(options.isZapping) && !isBetumadokun) {
         zapping_button.click();
     } else {
         getPrograms(100);
@@ -375,9 +389,12 @@ window.addEventListener('load', async function () {
     }, 1000);
 
     // サムネイルを更新
-    setInterval(function () {
+    function runUpdataThumbnail() {
         updataThumbnail();
-    }, updataThumbnailInterval * 1000);
+        setTimeout(runUpdataThumbnail, updataThumbnailInterval * 1000);
+    }
+    setTimeout(runUpdataThumbnail, updataThumbnailInterval * 1000);
+
 });
 
 
@@ -538,7 +555,7 @@ async function makeProgramsHtml(program) {
                         </div>
                         <div class="program_thumbnail program-card_">
                             <a href="${program.thumbnail_link_url}">
-                                <img src="${thumbnail_url}">
+                                <img src="${thumbnail_url}" onerror="this.src='${chrome.runtime.getURL('images/loading.gif')}'; this.removeAttribute('onerror'); this.removeAttribute('onload');" onload="this.removeAttribute('onerror'); this.removeAttribute('onload');">
                             </a>
                         </div>
                         <div class="program_title">
@@ -557,9 +574,11 @@ function updataThumbnail() {
     if (!programInfos) return;
 
     const program_thumbnails = document.querySelectorAll('.program_thumbnail');
+    
+    let program_thumbnail = '';
+    for (let i = 0; i < program_thumbnails.length; i++) {
 
-    for (const program_thumbnail of program_thumbnails) {
-
+        program_thumbnail = program_thumbnails[i];
         const thumbnail_url = program_thumbnail.querySelector('img').getAttribute('src');
 
         if (thumbnail_url.includes('?cache=')) {
@@ -567,12 +586,12 @@ function updataThumbnail() {
         } else {
             // ライブサムネが取得済みなら差し替える
             const programInfo_ = programInfos.filter((info) => info.id === `lv${program_thumbnail.parentElement.id}`);
-            if (programInfo_.length === 0) break;
+            if (programInfo_.length === 0) continue;
 
             let programInfo = programInfo_[0];
 
             // コミュ限 または チャンネル方法　はスルー
-            if (programInfo.isMemberOnly || programInfo.isChannelRelatedOfficial) break;
+            if (programInfo.isMemberOnly || programInfo.isChannelRelatedOfficial) continue;
 
             let thumbnail_url_ = '';
             if (programInfo.large640x360ThumbnailUrl) {
