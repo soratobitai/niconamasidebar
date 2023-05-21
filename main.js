@@ -15,6 +15,7 @@ let isSaveSidebarSize = false;
 let isZapping = false;
 let isInserting = false;
 let isBetumadokun = false;
+let isWatchPage = true;
 
 window.addEventListener('load', async function () {
 
@@ -64,6 +65,10 @@ window.addEventListener('load', async function () {
     const zapping_line = document.getElementById('zapping_line');
     const zapping_container = document.getElementById('zapping_container');
     const root = document.getElementById('root');
+    if (!root) {
+        isWatchPage = false;
+        document.querySelector('header').style.display = 'none';
+    }
 
     const watchPage = document.evaluate(
         '//div[contains(@class, \'_watch-page_\')]',
@@ -172,6 +177,8 @@ window.addEventListener('load', async function () {
     // ウィンドウサイズの変更に伴ってページのスタイルを設定
     function setWatchPageWidth() {
 
+        if (!isWatchPage) return;
+
         setTimeout(() => {
             
             let maxWidth = 1024 + 'px';
@@ -274,24 +281,30 @@ window.addEventListener('load', async function () {
             zapping.style.minWidth = zappingWidth + 'px';
             zapping_container.style.width = zappingWidth + 'px';
 
-            root.style.maxWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-            root.style.minWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-            root.style.width = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
+            if (isWatchPage) {
+                root.style.maxWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
+                root.style.minWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
+                root.style.width = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
+
+                // コメント欄　スクロールボタンを押す
+                setTimeout(() => {
+                    const indicator = playerSection.querySelector('[class*="_indicator_"]');
+                    if (indicator) indicator.click();
+                }, 1000);
+            }
 
             zapping_arrow.classList.add('zapping_arrow_re');
 
-            // コメント欄　スクロールボタンを押す
-            setTimeout(() => {
-                const indicator = playerSection.querySelector('[class*="_indicator_"]');
-                if (indicator) indicator.click();
-            }, 1000);
+            
         } else {
             zapping.style.width = 0;
             zapping.style.minWidth = 0;
 
-            root.style.maxWidth = windowWidth + 'px';
-            root.style.minWidth = windowWidth + 'px';
-            root.style.width = windowWidth + 'px';
+            if (isWatchPage) {
+                root.style.maxWidth = windowWidth + 'px';
+                root.style.minWidth = windowWidth + 'px';
+                root.style.width = windowWidth + 'px';
+            }
 
             zapping_arrow.classList.remove('zapping_arrow_re');
         }
@@ -427,7 +440,7 @@ function set_program_container_width() {
 
         const program_thumbnail = element.querySelector('.program_thumbnail');
         program_thumbnail.style.width = programContainerWidth + 'px';
-        program_thumbnail.style.maxHeight = element.clientWidth * (8.5 / 16) + 'px';
+        //program_thumbnail.style.maxHeight = element.clientWidth * (8.5 / 16) + 'px';
     });
 } 
 
