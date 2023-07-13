@@ -519,16 +519,22 @@ async function setProgramInfo(liveId) {
 
 async function insertProgramContainer(programs) {
     try {
-        // 番組数更新
-        program_count.textContent = programs.length ? programs.length : 0;
+        // HTML作成
+        let html = '';
+        programs.forEach(function (program) {
+            html += makeProgramsHtml(program);
+        });
 
         // 一旦すべての番組を取り除く
         const liveProgramContainer = document.getElementById('liveProgramContainer');
         liveProgramContainer.innerText = '';
 
-        programs.forEach(async function (program) {
-            liveProgramContainer.insertAdjacentHTML('beforeend', await makeProgramsHtml(program));
-        });
+        // 挿入
+        liveProgramContainer.insertAdjacentHTML('beforeend', html);
+
+        // 番組数更新
+        program_count.textContent = programs.length ? programs.length : 0;
+
     } catch (error) {
         console.log(error);
         return false;
@@ -536,7 +542,7 @@ async function insertProgramContainer(programs) {
     return true;
 }
 
-async function makeProgramsHtml(program) {
+function makeProgramsHtml(program) {
 
     let user_page_url = '';
     let thumbnail_url = program.thumbnail_url;
