@@ -1,7 +1,7 @@
 *,
 *:before,
 *:after {
-    box-sizing: border-box;
+    /* box-sizing: border-box; */
 }
 
 body {
@@ -64,6 +64,7 @@ body {
     color: #ccc;
     overflow: auto;
     scrollbar-width: none;
+    box-sizing: border-box;
 }
 #zapping::-webkit-scrollbar {
     display: none;
@@ -77,6 +78,7 @@ body {
     right: 0;
     width: 100%;
     padding: 20px 8px 70px 8px;
+    box-sizing: border-box;
 }
 #liveProgramContainer {
     display: flex;
@@ -90,6 +92,7 @@ body {
     font-weight: bold;
     display: flex;
     align-items: center;
+    box-sizing: border-box;
 }
 #program_count {
     margin-left: 10px;
@@ -102,12 +105,14 @@ body {
     background-color: #f00;
     border-radius: 30px;
     display: inline-block;
+    box-sizing: border-box;
 }
 
 .program_container {
     margin-bottom: 10px;
     padding: 5px;
     overflow: hidden;
+    box-sizing: border-box;
 }
 
 .program_container .community {
@@ -132,6 +137,7 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     flex-grow: 1;
+    box-sizing: border-box;
 }
 
 .program_container .program_thumbnail {
