@@ -378,7 +378,9 @@ window.addEventListener('load', async function () {
 
     // オートオープン
     if (isAutoOpen && Number(options.isZapping) && !isBetumadokun) {
-        zapping_button.click();
+        setTimeout(() => {
+            zapping_button.click();
+        }, 2000);
     } else {
         getPrograms(100);
     }
