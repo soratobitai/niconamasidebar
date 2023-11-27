@@ -7,7 +7,9 @@ const maxSaveProgramInfos = 100;
 const zappingMinWidth = 180;
 const rootMinWidth = (1024 + 128 + 4);
 const toDolists = [];
-let updataThumbnailInterval = 5; // 秒
+const getProgramInfoInterval = 1; // 秒
+const updateThumbnailInterval = 20; // 秒
+let updateThumbnailInterval_ = updateThumbnailInterval;
 let programContainerWidth = '100%';
 let zappingWidth = zappingMinWidth;
 let isAutoOpen = false;
@@ -65,6 +67,7 @@ window.addEventListener('load', async function () {
     const zapping_line = document.getElementById('zapping_line');
     const zapping_container = document.getElementById('zapping_container');
     const root = document.getElementById('root');
+
     if (!root) {
         isWatchPage = false;
         document.querySelector('header').style.display = 'none';
@@ -72,66 +75,66 @@ window.addEventListener('load', async function () {
 
     const watchPage = document.evaluate(
         '//div[contains(@class, \'_watch-page_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
 
     const playerSection = document.evaluate(
         '//div[contains(@class, \'_player-section_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
 
     const gaNsProgramSummary = document.evaluate(
         '//div[contains(@class, \'ga-ns-program-summary\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
     
     const programInformationBodyArea = document.evaluate(
         '//div[contains(@class, \'_program-information-body-area_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
 
     const siteFooterUtility = document.evaluate(
         '//nav[contains(@class, \'_site-footer-utility_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
 
     const feedbackAnchor = document.evaluate(
         '//a[contains(@class, \'_feedback-anchor_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     ).snapshotItem(0);
 
     const fullscreenButton = document.evaluate(
         '//button[contains(@class, \'_fullscreen-button_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     );
 
     const theaterButton = document.evaluate(
         '//button[contains(@class, \'_theater-button_\')]',
-        document, // 開始する要素
-        null, // 名前空間の接頭辞
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, // 戻り値の種類
-        null, //既に存在するXPathResult
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null,
     );
 
     /**
@@ -148,6 +151,9 @@ window.addEventListener('load', async function () {
         setRootWidth();
         setWatchPageWidth();
     });
+
+    // タブのアクティブを監視
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     // フルスクリーンモード切り替え時に実行
     for (let i = 0; i < fullscreenButton.snapshotLength; i++) {
@@ -395,20 +401,20 @@ window.addEventListener('load', async function () {
     setInterval(function () {
         if (!isZapping) return;
         if (toDolists.length === 0) {
-            updataThumbnailInterval = 20; // 秒
+            updateThumbnailInterval_ = updateThumbnailInterval;
             return;
         } else {
-            updataThumbnailInterval = 5; // 秒
+            updateThumbnailInterval_ = 1; // 秒
         }
         setProgramInfo(toDolists.shift());
-    }, 1000);
+    }, getProgramInfoInterval * 1000);
 
     // サムネイルを更新
-    function runUpdataThumbnail() {
-        updataThumbnail();
-        setTimeout(runUpdataThumbnail, updataThumbnailInterval * 1000);
+    function runUpdateThumbnail() {
+        updateThumbnail();
+        setTimeout(runUpdateThumbnail, updateThumbnailInterval_ * 1000);
     }
-    setTimeout(runUpdataThumbnail, updataThumbnailInterval * 1000);
+    setTimeout(runUpdateThumbnail, updateThumbnailInterval_ * 1000);
 
 });
 
@@ -586,7 +592,7 @@ function makeProgramsHtml(program) {
     return html;
 }
 
-function updataThumbnail() {
+function updateThumbnail() {
     if (!isZapping) return;
     if (isInserting) return;
 
@@ -625,5 +631,12 @@ function updataThumbnail() {
                 program_thumbnail.querySelector('img').src = thumbnail_url_;
             }
         }
+    }
+}
+
+// タブがアクティブになったら幅をセット
+function handleVisibilityChange() {
+    if (document.visibilityState === 'visible') {
+        setWatchPageWidth();
     }
 }
