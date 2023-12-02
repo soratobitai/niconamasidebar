@@ -8,8 +8,7 @@ const zappingMinWidth = 180;
 const rootMinWidth = (1024 + 128 + 4);
 const toDolists = [];
 const getProgramInfoInterval = 1; // 秒
-const updateThumbnailInterval = 20; // 秒
-let updateThumbnailInterval_ = updateThumbnailInterval;
+let updateThumbnailInterval = 1; // 秒
 let programContainerWidth = '100%';
 let zappingWidth = zappingMinWidth;
 let isAutoOpen = false;
@@ -20,6 +19,9 @@ let isBetumadokun = false;
 let isWatchPage = true;
 
 window.addEventListener('load', async function () {
+
+    // 初期化
+    localStorage.setItem('programInfos', JSON.stringify([]));
 
     // 設定を取得
     const options = await chrome.storage.local.get();
@@ -151,9 +153,6 @@ window.addEventListener('load', async function () {
         setRootWidth();
         setWatchPageWidth();
     });
-
-    // タブのアクティブを監視
-    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     // フルスクリーンモード切り替え時に実行
     for (let i = 0; i < fullscreenButton.snapshotLength; i++) {
@@ -400,11 +399,12 @@ window.addEventListener('load', async function () {
     // 番組情報を取得
     setInterval(function () {
         if (!isZapping) return;
+        
         if (toDolists.length === 0) {
-            updateThumbnailInterval_ = updateThumbnailInterval;
+            updateThumbnailInterval = 1; // 秒
             return;
         } else {
-            updateThumbnailInterval_ = 1; // 秒
+            updateThumbnailInterval = 1; // 秒
         }
         setProgramInfo(toDolists.shift());
     }, getProgramInfoInterval * 1000);
@@ -412,9 +412,20 @@ window.addEventListener('load', async function () {
     // サムネイルを更新
     function runUpdateThumbnail() {
         updateThumbnail();
-        setTimeout(runUpdateThumbnail, updateThumbnailInterval_ * 1000);
+        setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
     }
-    setTimeout(runUpdateThumbnail, updateThumbnailInterval_ * 1000);
+    setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+
+
+    // // タブがアクティブになったら幅をセット
+    // function handleVisibilityChange() {
+    //     if (document.visibilityState === 'visible') {
+    //         setWatchPageWidth();
+    //     }
+    // }
+
+    // // タブのアクティブを監視
+    // document.addEventListener('visibilitychange', handleVisibilityChange);
 
 });
 
@@ -634,9 +645,3 @@ function updateThumbnail() {
     }
 }
 
-// タブがアクティブになったら幅をセット
-function handleVisibilityChange() {
-    if (document.visibilityState === 'visible') {
-        setWatchPageWidth();
-    }
-}
