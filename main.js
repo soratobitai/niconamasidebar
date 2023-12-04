@@ -20,7 +20,7 @@ let isBetumadokun = false;
 let isWatchPage = true;
 
 // 初期化（開発用）
-localStorage.setItem('programInfos', JSON.stringify([]));
+// localStorage.setItem('programInfos', JSON.stringify([]));
 
 window.addEventListener('load', async function () {
 
