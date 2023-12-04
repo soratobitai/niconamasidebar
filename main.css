@@ -171,20 +171,25 @@ body {
     text-align: center;
     display: none;
 }
+#api_error a {
+    color: #388bff;
+}
+
 .api_error_active {
     display: block !important;
 }
 #reload_programs {
-    padding: 1px 20px;
-    font-size: 0.7rem;
-    color: #aaa;
-    border: solid 1px #aaa;
-    border-radius: 20px;
+    min-width: 40px;
     cursor: pointer;
-    display: inline-block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
-#reload_programs:hover {
-    color: #ccc;
-    border: solid 1px #ccc;
+#reload_programs img {
+    height: 18px;
+    filter: invert(59%) sepia(3%) saturate(11%) hue-rotate(22deg) brightness(91%) contrast(93%);
+}
+#reload_programs:hover img {
+    filter: invert(63%) sepia(98%) saturate(12%) hue-rotate(70deg) brightness(109%) contrast(92%);
 }
 

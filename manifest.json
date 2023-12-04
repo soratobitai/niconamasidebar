@@ -29,7 +29,8 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "images/*.gif"
+                "images/*.gif",
+                "images/*.png"
             ],
             "matches": [
                 "https://*/*"

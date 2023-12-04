@@ -2,13 +2,14 @@ const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox.conten
 //const notifyboxAPI = 'https://sp.live.nicovideo.jp/api/relive/notifybox.content.php';
 const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 
-const getProgramsInterval = 120; // 秒
+const getProgramsInterval = 60; // 秒
 const maxSaveProgramInfos = 100;
 const zappingMinWidth = 180;
 const rootMinWidth = (1024 + 128 + 4);
 const toDolists = [];
-const getProgramInfoInterval = 1; // 秒
-let updateThumbnailInterval = 1; // 秒
+const getProgramInfoInterval = 0.3; // 秒
+const updateThumbnailInterval = 20; // 秒
+let _updateThumbnailInterval = getProgramInfoInterval;
 let programContainerWidth = '100%';
 let zappingWidth = zappingMinWidth;
 let isAutoOpen = false;
@@ -18,10 +19,10 @@ let isInserting = false;
 let isBetumadokun = false;
 let isWatchPage = true;
 
-window.addEventListener('load', async function () {
+// 初期化（開発用）
+//localStorage.setItem('programInfos', JSON.stringify([]));
 
-    // 初期化
-    localStorage.setItem('programInfos', JSON.stringify([]));
+window.addEventListener('load', async function () {
 
     // 設定を取得
     const options = await chrome.storage.local.get();
@@ -55,9 +56,12 @@ window.addEventListener('load', async function () {
                                 <div class="program_info">
                                     フォロー中の番組
                                     <div id="program_count"></div>
+                                    <div id="reload_programs">
+                                        <img src='${chrome.runtime.getURL('images/reload.png')}'>
+                                    </div>
                                 </div>
                                 <div id="api_error">
-                                    <div id="reload_programs">再読み込み</div>
+                                    <a href="https://account.nicovideo.jp/login">ログイン</a>
                                 </div>
                                 <div id="liveProgramContainer">
                                 </div>
@@ -399,22 +403,24 @@ window.addEventListener('load', async function () {
     // 番組情報を取得
     setInterval(function () {
         if (!isZapping) return;
+        if (toDolists.length === 0) return;
+
+        setProgramInfo(toDolists.shift());
         
         if (toDolists.length === 0) {
-            updateThumbnailInterval = 1; // 秒
-            return;
+            _updateThumbnailInterval = updateThumbnailInterval;
         } else {
-            updateThumbnailInterval = 1; // 秒
+            _updateThumbnailInterval = getProgramInfoInterval;
         }
-        setProgramInfo(toDolists.shift());
+
     }, getProgramInfoInterval * 1000);
 
     // サムネイルを更新
     function runUpdateThumbnail() {
         updateThumbnail();
-        setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+        setTimeout(runUpdateThumbnail, _updateThumbnailInterval * 1000);
     }
-    setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+    setTimeout(runUpdateThumbnail, _updateThumbnailInterval * 1000);
 
 
     // // タブがアクティブになったら幅をセット
@@ -496,6 +502,14 @@ async function getPrograms(rows = 100) {
         // 番組挿入へ
         const res = await insertProgramContainer(response.data.notifybox_content);
         if (res) set_program_container_width();
+
+
+        if (toDolists.length === 0) {
+            _updateThumbnailInterval = updateThumbnailInterval;
+        } else {
+            _updateThumbnailInterval = getProgramInfoInterval;
+        }
+
     } catch (error) {
         isInserting = false;
         console.log(error);
@@ -614,6 +628,7 @@ function updateThumbnail() {
     const program_thumbnails = document.querySelectorAll('.program_thumbnail');
     
     let program_thumbnail = '';
+    let thumbnail_url_ = '';
     for (let i = 0; i < program_thumbnails.length; i++) {
 
         program_thumbnail = program_thumbnails[i];
@@ -631,7 +646,6 @@ function updateThumbnail() {
             // コミュ限 または チャンネル方法　はスルー
             if (programInfo.isMemberOnly || programInfo.isChannelRelatedOfficial) continue;
 
-            let thumbnail_url_ = '';
             if (programInfo.large640x360ThumbnailUrl) {
                 thumbnail_url_ = `${programInfo.large640x360ThumbnailUrl}`;
             }
