@@ -20,7 +20,7 @@ let isBetumadokun = false;
 let isWatchPage = true;
 
 // 初期化（開発用）
-//localStorage.setItem('programInfos', JSON.stringify([]));
+localStorage.setItem('programInfos', JSON.stringify([]));
 
 window.addEventListener('load', async function () {
 
@@ -396,13 +396,13 @@ window.addEventListener('load', async function () {
 
     // 番組リストを定期取得
     setInterval(function () {
-        if (!isZapping) return;
+        // if (!isZapping) return;
         getPrograms(100);
     }, getProgramsInterval * 1000);
 
     // 番組情報を取得
     setInterval(function () {
-        if (!isZapping) return;
+        // if (!isZapping) return;
         if (toDolists.length === 0) return;
 
         setProgramInfo(toDolists.shift());
