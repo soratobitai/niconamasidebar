@@ -79,6 +79,15 @@ window.addEventListener('load', async function () {
         document.querySelector('header').style.display = 'none';
     }
 
+    /* const watchPage = document.querySelector('[class*="_watch-page_"]');
+    const playerSection = document.querySelector('[class*="_player-section_"]');
+    const gaNsProgramSummary = document.querySelector('[class*="ga-ns-program-summary"]');
+    const programInformationBodyArea = document.querySelector('[class*="_program-information-body-area_"]');
+    const siteFooterUtility = document.querySelector('nav[class*="_site-footer-utility_"]');
+    const feedbackAnchor = document.querySelector('a[class*="_feedback-anchor_"]');
+    const fullscreenButton = document.querySelectorAll('button[class*="_fullscreen-button_"]');
+    const theaterButton = document.querySelectorAll('button[class*="_theater-button_"]'); */
+
     const watchPage = document.evaluate(
         '//div[contains(@class, \'_watch-page_\')]',
         document,
@@ -112,7 +121,7 @@ window.addEventListener('load', async function () {
     ).snapshotItem(0);
 
     const siteFooterUtility = document.evaluate(
-        '//nav[contains(@class, \'_site-footer-utility_\')]',
+        '//nav[contains(@class, \'_site-utility-footer_\')]',
         document,
         null,
         XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
