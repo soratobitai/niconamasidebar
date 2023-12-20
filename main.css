@@ -1,19 +1,4 @@
-*,
-*:before,
-*:after {
-    /* box-sizing: border-box; */
-}
-
-body {
-    position: relative;
-    display: flex;
-}
-#root {
-    flex-grow: 1;
-    /* overflow: hidden; */
-}
-
-#zapping_line {
+#sidebar_line {
     position: sticky;
     top: 0;
     width: 3px;
@@ -27,7 +12,7 @@ body {
     /* z-index: 1000000; */
 }
 
-#zapping_button {
+#sidebar_button {
     position: relative;
     top: 44%;
     right: 0;
@@ -42,7 +27,7 @@ body {
     align-items: center;
     justify-content: center;
 }
-#zapping_arrow {
+#sidebar_arrow {
     width: 10px;
     height: 10px;
     border-top: solid 2px #ccc;
@@ -50,11 +35,11 @@ body {
     transform: rotate(45deg);
     transition: all 0.5s;
 }
-.zapping_arrow_re {
+.sidebar_arrow_re {
     transform: rotate(-135deg) !important;
 }
 
-#zapping {
+#sidebar {
     position: sticky;
     top: 0;
     width: 0px;
@@ -66,13 +51,13 @@ body {
     scrollbar-width: none;
     box-sizing: border-box;
 }
-#zapping::-webkit-scrollbar {
+#sidebar::-webkit-scrollbar {
     display: none;
 }
-.zapping_transition {
+.sidebar_transition {
     transition: all 0.5s;
 }
-#zapping_container {
+#sidebar_container {
     position: absolute;
     top: 0;
     right: 0;

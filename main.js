@@ -4,185 +4,92 @@ const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 
 const getProgramsInterval = 60; // 秒
 const maxSaveProgramInfos = 100;
-const zappingMinWidth = 180;
-const rootMinWidth = (1024 + 128 + 4);
-const toDolists = [];
 const getProgramInfoInterval = 0.3; // 秒
 const updateThumbnailInterval = 20; // 秒
+const toDolists = [];
+
+const rootMinWidth = (1024 + 128 + 4);
+const sidebarMinWidth = 180;
+let sidebarWidth = sidebarMinWidth;
 let _updateThumbnailInterval = getProgramInfoInterval;
 let programContainerWidth = '100%';
-let zappingWidth = zappingMinWidth;
+let scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+let windowWidth = window.innerWidth - scrollbarWidth;
+let windowHeight = window.innerHeight;
+
 let isAutoOpen = false;
 let isSaveSidebarSize = false;
-let isZapping = false;
+let isSidebar = false;
 let isInserting = false;
-let isBetumadokun = false;
-let isWatchPage = true;
+
+let options = {};
+let elems = {};
 
 // 初期化（開発用）
 // localStorage.setItem('programInfos', JSON.stringify([]));
 
+// 各要素を定義
+const setElems = () => {
+    elems.root = document.getElementById('root');
+    elems.watchPage = document.querySelector('[class*="_watch-page_"]');
+    elems.playerSection = document.querySelector('[class*="_player-section_"]');
+    elems.gaNsProgramSummary = document.querySelector('[class*="ga-ns-program-summary"]');
+    elems.programInformationBodyArea = document.querySelector('[class*="_program-information-body-area_"]');
+    elems.siteFooterUtility = document.querySelector('nav[class*="_site-utility-footer_"]');
+    elems.feedbackAnchor = document.querySelector('a[class*="_feedback-anchor_"]');
+    elems.fullscreenButtons = document.querySelectorAll('button[class*="_fullscreen-button_"]');
+    elems.theaterButtons = document.querySelectorAll('button[class*="_theater-button_"]');
+    elems.enquetePlaceholder = document.getElementById('enquete-placeholder');
+};
+
+const url = new URL(window.location.href);
+const params = url.searchParams;
+
 window.addEventListener('load', async function () {
 
-    // 設定を取得
-    const options = await chrome.storage.local.get();
-    if (options &&
-        options.isAutoOpen !== undefined &&
-        options.isSaveSidebarSize !== undefined
-    ) {
-        isAutoOpen = Number(options.isAutoOpen);
-        if (isAutoOpen === 2) {
-            isAutoOpen = options.isZapping ? Number(options.isZapping) : Number(options.isAutoOpen);
-        }
-        
-        isSaveSidebarSize = Number(options.isSaveSidebarSize);
-        if (isSaveSidebarSize) {
-            zappingWidth = (options.zappingWidth !== undefined) ? options.zappingWidth : zappingMinWidth;
-        }
-    }
+    // 別窓くんポップアップ時は終了
+    if (params.get('popup') === 'on') return;
 
-    // 別窓くん（別窓ポップアップかどうか）
-    // クエリを取得
-    const url = new URL(window.location.href);
-    const params = url.searchParams;
-    isBetumadokun = (params.get('popup') === 'on');
+    // オプションを取得
+    options = await getOptions();
 
+    // 各要素を定義
+    setElems();
 
-    const zapping_line_html = `<div id="zapping_line"><div id="zapping_button"><div id="zapping_arrow"></div></div></div>`;
-    document.body.insertAdjacentHTML('afterbegin', zapping_line_html);
+    if (!elems.root) return; // root要素が存在しない場合は終了
 
-    const zappingHtml = `<div id="zapping" class="zapping_transition">
-                            <div id="zapping_container">
-                                <div class="program_info">
-                                    フォロー中の番組
-                                    <div id="program_count"></div>
-                                    <div id="reload_programs">
-                                        <img src='${chrome.runtime.getURL('images/reload.png')}'>
-                                    </div>
-                                </div>
-                                <div id="api_error">
-                                    <a href="https://account.nicovideo.jp/login">ログイン</a>
-                                </div>
-                                <div id="liveProgramContainer">
-                                </div>
-                            </div>
-                        </div>`;
-    document.body.insertAdjacentHTML('afterbegin', zappingHtml);
-    
-    const zapping = document.getElementById('zapping');
-    const zapping_line = document.getElementById('zapping_line');
-    const zapping_container = document.getElementById('zapping_container');
-    const root = document.getElementById('root');
+    // サイドバーを挿入
+    insrertSidebarHTML();
 
-    if (!root) {
-        isWatchPage = false;
-        document.querySelector('header').style.display = 'none';
-    }
+    // Watchページの幅を設定
+    setWatchPageWidth();
 
-    /* const watchPage = document.querySelector('[class*="_watch-page_"]');
-    const playerSection = document.querySelector('[class*="_player-section_"]');
-    const gaNsProgramSummary = document.querySelector('[class*="ga-ns-program-summary"]');
-    const programInformationBodyArea = document.querySelector('[class*="_program-information-body-area_"]');
-    const siteFooterUtility = document.querySelector('nav[class*="_site-footer-utility_"]');
-    const feedbackAnchor = document.querySelector('a[class*="_feedback-anchor_"]');
-    const fullscreenButton = document.querySelectorAll('button[class*="_fullscreen-button_"]');
-    const theaterButton = document.querySelectorAll('button[class*="_theater-button_"]'); */
-
-    const watchPage = document.evaluate(
-        '//div[contains(@class, \'_watch-page_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-
-    const playerSection = document.evaluate(
-        '//div[contains(@class, \'_player-section_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-
-    const gaNsProgramSummary = document.evaluate(
-        '//div[contains(@class, \'ga-ns-program-summary\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-    
-    const programInformationBodyArea = document.evaluate(
-        '//div[contains(@class, \'_program-information-body-area_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-
-    const siteFooterUtility = document.evaluate(
-        '//nav[contains(@class, \'_site-utility-footer_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-
-    const feedbackAnchor = document.evaluate(
-        '//a[contains(@class, \'_feedback-anchor_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    ).snapshotItem(0);
-
-    const fullscreenButton = document.evaluate(
-        '//button[contains(@class, \'_fullscreen-button_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    );
-
-    const theaterButton = document.evaluate(
-        '//button[contains(@class, \'_theater-button_\')]',
-        document,
-        null,
-        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-        null,
-    );
-
-    /**
-     * ウィンドウサイズを常に監視、取得
-     */
-    let scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    let windowWidth = window.innerWidth - scrollbarWidth;
-    let windowHeight = window.innerHeight;
-
+    // ウィンドウサイズの変更に伴ってページのスタイルを設定
     window.addEventListener('resize', function () {
         scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
         windowWidth = window.innerWidth - scrollbarWidth;
         windowHeight = window.innerHeight;
+
         setRootWidth();
         setWatchPageWidth();
     });
 
     // フルスクリーンモード切り替え時に実行
-    for (let i = 0; i < fullscreenButton.snapshotLength; i++) {
-        fullscreenButton.snapshotItem(i).addEventListener('click', function () {
-            if (isZapping) zapping_button.click();
+    for (let i = 0; i < elems.fullscreenButtons.length; i++) {
+        elems.fullscreenButtons[i].addEventListener('click', function () {
+            if (isSidebar) sidebar_button.click();
             setWatchPageWidth();
         });
     }
 
     // シアターモード切り替え時に実行
-    for (let i = 0; i < theaterButton.snapshotLength; i++) {
-        theaterButton.snapshotItem(i).addEventListener('click', function () {
+    for (let i = 0; i < elems.theaterButtons.length; i++) {
+        elems.theaterButtons[i].addEventListener('click', function () {
             setWatchPageWidth();
         });
     }
 
-    // フルスクリーン固定、自動切り替え時に実行するためにクリックで発火
+    // フルスクリーン固定、自動切り替え時に実行するために画面クリックで発火
     document.addEventListener('click', function (e) {
         setWatchPageWidth();
     }, false);
@@ -192,230 +99,42 @@ window.addEventListener('load', async function () {
         getPrograms(100);
     });
 
-    // ウィンドウサイズの変更に伴ってページのスタイルを設定
-    function setWatchPageWidth() {
-
-        if (!isWatchPage) return;
-
-        setTimeout(() => {
-            
-            let maxWidth = 1024 + 'px';
-            let minWidth = 1024 + 'px';
-            let width = 1024 + 'px';
-
-            if (isScreenSizeAuto()) {
-
-                if (root.clientWidth > (1152) && root.clientWidth < (1500)) {
-                    maxWidth = (root.clientWidth - 128) + 'px';
-                    minWidth = 1024 + 'px';
-                    width = ((windowHeight * 1.777778) - 3.55556) + 'px';
-                }
-                if (root.clientWidth > (1500) && root.clientWidth < (1792)) {
-                    maxWidth = (root.clientWidth - 128) + 'px';
-                    minWidth = 1024 + 'px';
-                    width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-                }
-                if (root.clientWidth > (1792)) {
-                    maxWidth = 1664 + 'px';
-                    minWidth = 1024 + 'px';
-                    width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-                }
-            }
-
-            if (isFullScreenAttr()) {
-                root.style.maxWidth = '100%';
-                maxWidth = '100%';
-                minWidth = '100%';
-                width = '100%';
-            }
-
-            // プレイヤー幅など設定
-            playerSection.style.maxWidth = maxWidth;
-            playerSection.style.minWidth = minWidth;
-            playerSection.style.width = width;
-            programInformationBodyArea.style.maxWidth = maxWidth;
-            programInformationBodyArea.style.minWidth = minWidth;
-            programInformationBodyArea.style.width = width;
-            siteFooterUtility.style.maxWidth = maxWidth;
-            siteFooterUtility.style.minWidth = minWidth;
-            siteFooterUtility.style.width = width;
-            gaNsProgramSummary.style.maxWidth = maxWidth;
-            gaNsProgramSummary.style.minWidth = minWidth;
-            gaNsProgramSummary.style.width = width;
-            document.getElementById('enquete-placeholder').style.maxWidth = maxWidth;
-            document.getElementById('enquete-placeholder').style.minWidth = minWidth;
-            document.getElementById('enquete-placeholder').style.width = width;
-
-            // ニコ生画面　全体幅を設定
-            setRootWidth();
-
-            // メールアイコン
-            if (root.clientWidth > (1792)) {
-                feedbackAnchor.style.right = ((root.clientWidth * 0.5) - 832) + 'px';
-            } else {
-                feedbackAnchor.style.right = 64 + 'px';
-            }
-
-            // シアターモード時
-            if (watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
-                playerSection.style.maxWidth = 'none';
-                playerSection.style.width = 'auto';
-            }
-
-            try {
-                // サイドバーサイズを記憶する場合
-                if (isSaveSidebarSize) {
-                    chrome.storage.local.set({ 'zappingWidth': zappingWidth });
-                } else {
-                    chrome.storage.local.set({ 'zappingWidth': zappingMinWidth });
-                }
-            } catch (error) {
-                
-            }
-            
-        }, 500);
-    }
-
-     // ニコ生画面　全体幅を設定
-    function setRootWidth() {
-        const rootWidth = windowWidth - (zapping.clientWidth + zapping_line.clientWidth);
-        root.style.maxWidth = rootWidth + 'px';
-        root.style.minWidth = rootWidth + 'px';
-        root.style.width = rootWidth + 'px';
-    }
-
-    // ザッピングボタン ON OFF
-    zapping_button.addEventListener('click', function (e) {
+    // サイドバーOPEN/CLOSEボタン
+    sidebar_button.addEventListener('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
 
-        isZapping = !isZapping;
-        
-        if (isZapping) {
-            getPrograms(100);
-
-            if (zappingWidth < zappingMinWidth) zappingWidth = zappingMinWidth;
-            zapping.style.width = zappingWidth + 'px';
-            zapping.style.minWidth = zappingWidth + 'px';
-            zapping_container.style.width = zappingWidth + 'px';
-
-            if (isWatchPage) {
-                root.style.maxWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-                root.style.minWidth = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-                root.style.width = windowWidth - (zappingWidth + zapping_line.clientWidth) + 'px';
-
-                // コメント欄　スクロールボタンを押す
-                setTimeout(() => {
-                    const indicator = playerSection.querySelector('[class*="_indicator_"]');
-                    if (indicator) indicator.click();
-                }, 1000);
-            }
-
-            zapping_arrow.classList.add('zapping_arrow_re');
-
-            
-        } else {
-            zapping.style.width = 0;
-            zapping.style.minWidth = 0;
-
-            if (isWatchPage) {
-                root.style.maxWidth = windowWidth + 'px';
-                root.style.minWidth = windowWidth + 'px';
-                root.style.width = windowWidth + 'px';
-            }
-
-            zapping_arrow.classList.remove('zapping_arrow_re');
-        }
-
-        try {
-            // サイドバー開閉を記憶する場合
-            if (Number(options.isAutoOpen) === 2) {
-                chrome.storage.local.set({ 'isZapping': isZapping });
-            }
-        } catch (error) {
-
-        }
-
+        toggleSidebar();
         setWatchPageWidth();
-
-    }, false);
-
-    /**
-     * ザッピングLINE　ドラッグ変更
-     */
-    var startX, startWidth;
-
-    zapping_line.addEventListener('mousedown', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        zapping.classList.remove('zapping_transition');
-
-        startX = e.clientX;
-        startWidth = parseInt(document.defaultView.getComputedStyle(zapping).width, 10);
-        document.documentElement.addEventListener('mousemove', onMouseMove);
-        document.documentElement.addEventListener('mouseup', onMouseUp);
     });
 
-    function onMouseMove(e) {
+    // サイドバー境界線ドラッグ可能にする
+    changeSidebarLine();
 
-        if (e.target.id === 'zapping_button') return;
-
-        let width = startWidth + (e.clientX - startX);
-
-        // const maxWidth = windowWidth - rootMinWidth;
-        // if (width > maxWidth) {
-        //     width = maxWidth;
-        // }
-
-        if (width < zappingMinWidth) {
-            width = zappingMinWidth;
-        }
-
-        zapping.style.width = width + 'px';
-        zapping.style.maxWidth = width + 'px';
-        zapping.style.minWidth = width + 'px';
-        zapping_container.style.width = width + 'px';
-        zappingWidth = width;
-
-        // ニコ生画面　全体幅を設定
-        setRootWidth();
-        
-        setWatchPageWidth();
-        set_program_container_width();
-    }
-
-    function onMouseUp(e) {
-
-        zapping.classList.add('zapping_transition');
-
-        document.documentElement.removeEventListener('mousemove', onMouseMove);
-        document.documentElement.removeEventListener('mouseup', onMouseUp);
-    }
-
-
-    // オートオープン
-    if (isAutoOpen && Number(options.isZapping) && !isBetumadokun) {
+    // サイドバー　オートオープン
+    if (isAutoOpen && Number(options.isSidebar)) {
         setTimeout(() => {
-            zapping_button.click();
+            sidebar_button.click();
         }, 2000);
-    } else {
-        getPrograms(100);
     }
+
+
+
+
+    // 番組リストを取得
+    getPrograms(100);
 
     // 番組リストを定期取得
     setInterval(function () {
-        // if (!isZapping) return;
         getPrograms(100);
     }, getProgramsInterval * 1000);
 
     // 番組情報を取得
     setInterval(function () {
-        // if (!isZapping) return;
         if (toDolists.length === 0) return;
 
         setProgramInfo(toDolists.shift());
-        
+
         if (toDolists.length === 0) {
             _updateThumbnailInterval = updateThumbnailInterval;
         } else {
@@ -444,6 +163,248 @@ window.addEventListener('load', async function () {
 
 });
 
+// オプションを取得
+const getOptions = async () => {
+
+    const _options = await chrome.storage.local.get();
+
+    if (_options &&
+        _options.isAutoOpen !== undefined &&
+        _options.isSaveSidebarSize !== undefined
+    ) {
+        isAutoOpen = Number(_options.isAutoOpen);
+        if (isAutoOpen === 2) {
+            isAutoOpen = _options.isSidebar ? Number(_options.isSidebar) : Number(_options.isAutoOpen);
+        }
+
+        isSaveSidebarSize = Number(_options.isSaveSidebarSize);
+        if (isSaveSidebarSize) {
+            sidebarWidth = (_options.sidebarWidth !== undefined) ? _options.sidebarWidth : sidebarMinWidth;
+        }
+    }
+    return _options;
+};
+
+// サイドバー要素を挿入
+const insrertSidebarHTML = async () => {
+
+    const sidebarHtml = `<div id="sidebar" class="sidebar_transition">
+                            <div id="sidebar_container">
+                                <div class="program_info">
+                                    フォロー中の番組
+                                    <div id="program_count"></div>
+                                    <div id="reload_programs">
+                                        <img src='${chrome.runtime.getURL('images/reload.png')}'>
+                                    </div>
+                                </div>
+                                <div id="api_error">
+                                    <a href="https://account.nicovideo.jp/login">ログイン</a>
+                                </div>
+                                <div id="liveProgramContainer">
+                                </div>
+                            </div>
+                        </div>`;
+    const sidebar_line_html = `<div id="sidebar_line"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`;
+    
+    document.body.insertAdjacentHTML('afterbegin', sidebarHtml + sidebar_line_html);
+
+    // 各要素を定義
+    elems.sidebar = document.getElementById('sidebar');
+    elems.sidebar_line = document.getElementById('sidebar_line');
+    elems.sidebar_container = document.getElementById('sidebar_container');
+
+    // body要素にスタイルを設定
+    document.body.style.position = 'relative';
+    document.body.style.display = 'flex';
+
+    // #root要素にスタイルを設定
+    elems.root.style.flexGrow = '1';
+
+};
+
+const setWatchPageWidth = () => {
+
+    setTimeout(() => {
+
+        let maxWidth = 1024 + 'px';
+        let minWidth = 1024 + 'px';
+        let width = 1024 + 'px';
+        let targetElems = [
+            elems.playerSection,
+            elems.programInformationBodyArea,
+            elems.siteFooterUtility,
+            elems.gaNsProgramSummary,
+            elems.enquetePlaceholder
+        ]
+
+        if (isScreenSizeAuto()) {
+
+            if (elems.root.clientWidth > (1152) && elems.root.clientWidth < (1500)) {
+                maxWidth = (elems.root.clientWidth - 128) + 'px';
+                minWidth = 1024 + 'px';
+                width = ((windowHeight * 1.777778) - 3.55556) + 'px';
+            }
+            if (elems.root.clientWidth > (1500) && elems.root.clientWidth < (1792)) {
+                maxWidth = (elems.root.clientWidth - 128) + 'px';
+                minWidth = 1024 + 'px';
+                width = ((windowHeight * 1.777778) - 220.44444) + 'px';
+            }
+            if (elems.root.clientWidth > (1792)) {
+                maxWidth = 1664 + 'px';
+                minWidth = 1024 + 'px';
+                width = ((windowHeight * 1.777778) - 220.44444) + 'px';
+            }
+        }
+
+        if (isFullScreenAttr()) {
+            elems.root.style.maxWidth = '100%';
+            maxWidth = '100%';
+            minWidth = '100%';
+            width = '100%';
+        }
+
+        // プレイヤー幅など設定
+        targetElems.forEach((elem) => {
+            elem.style.maxWidth = maxWidth;
+            elem.style.minWidth = minWidth;
+            elem.style.width = width;
+        });
+
+        // ニコ生画面　全体幅を設定
+        setRootWidth();
+
+        // メールアイコン
+        if (elems.root.clientWidth > (1792)) {
+            elems.feedbackAnchor.style.right = ((elems.root.clientWidth * 0.5) - 832) + 'px';
+        } else {
+            elems.feedbackAnchor.style.right = 64 + 'px';
+        }
+
+        // シアターモード時
+        if (elems.watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
+            elems.playerSection.style.maxWidth = 'none';
+            elems.playerSection.style.width = 'auto';
+        }
+
+        try {
+            // サイドバーサイズを記憶する場合
+            if (isSaveSidebarSize) {
+                chrome.storage.local.set({ 'sidebarWidth': sidebarWidth });
+            } else {
+                chrome.storage.local.set({ 'sidebarWidth': sidebarMinWidth });
+            }
+        } catch (error) {
+
+        }
+
+    }, 500);
+};
+
+// ニコ生画面　全体幅を設定
+const setRootWidth = () => {
+    const rootWidth = windowWidth - (elems.sidebar.clientWidth + elems.sidebar_line.clientWidth);
+    elems.root.style.maxWidth = rootWidth + 'px';
+    elems.root.style.minWidth = rootWidth + 'px';
+    elems.root.style.width = rootWidth + 'px';
+};
+
+// サイドバーOPEN/CLOSE
+const toggleSidebar = () => {
+
+    isSidebar = !isSidebar;
+
+    if (isSidebar) {
+
+        if (sidebarWidth < sidebarMinWidth) sidebarWidth = sidebarMinWidth;
+        elems.sidebar.style.width = sidebarWidth + 'px';
+        elems.sidebar.style.minWidth = sidebarWidth + 'px';
+        elems.sidebar_container.style.width = sidebarWidth + 'px';
+
+        elems.root.style.maxWidth = windowWidth - (sidebarWidth + elems.sidebar_line.clientWidth) + 'px';
+        elems.root.style.minWidth = windowWidth - (sidebarWidth + elems.sidebar_line.clientWidth) + 'px';
+        elems.root.style.width = windowWidth - (sidebarWidth + elems.sidebar_line.clientWidth) + 'px';
+
+        sidebar_arrow.classList.add('sidebar_arrow_re');
+
+    } else {
+        elems.sidebar.style.width = 0;
+        elems.sidebar.style.minWidth = 0;
+        elems.root.style.maxWidth = windowWidth + 'px';
+        elems.root.style.minWidth = windowWidth + 'px';
+        elems.root.style.width = windowWidth + 'px';
+
+        sidebar_arrow.classList.remove('sidebar_arrow_re');
+    }
+
+    // コメント欄　スクロールボタンを押す
+    setTimeout(() => {
+        const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
+        if (indicator) indicator.click();
+    }, 1000);
+
+    try {
+        // サイドバー開閉を記憶する場合
+        if (Number(options.isAutoOpen) === 2) {
+            chrome.storage.local.set({ 'isSidebar': isSidebar });
+        }
+    } catch (error) {
+
+    }
+};
+
+// サイドバー境界線　ドラッグ変更
+const changeSidebarLine = () => {
+
+    let startX, startWidth;
+
+    elems.sidebar_line.addEventListener('mousedown', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        elems.sidebar.classList.remove('sidebar_transition');
+
+        startX = e.clientX;
+        startWidth = parseInt(document.defaultView.getComputedStyle(elems.sidebar).width, 10);
+        document.documentElement.addEventListener('mousemove', onMouseMove);
+        document.documentElement.addEventListener('mouseup', onMouseUp);
+    });
+
+    function onMouseMove(e) {
+
+        if (e.target.id === 'sidebar_button') return;
+
+        let width = startWidth + (e.clientX - startX);
+
+        // const maxWidth = windowWidth - rootMinWidth;
+        // if (width > maxWidth) {
+        //     width = maxWidth;
+        // }
+
+        if (width < sidebarMinWidth) {
+            width = sidebarMinWidth;
+        }
+
+        elems.sidebar.style.width = width + 'px';
+        elems.sidebar.style.maxWidth = width + 'px';
+        elems.sidebar.style.minWidth = width + 'px';
+        elems.sidebar_container.style.width = width + 'px';
+        sidebarWidth = width;
+
+        // ニコ生画面　全体幅を設定
+        setRootWidth();
+
+        setWatchPageWidth();
+        set_program_container_width();
+    }
+
+    function onMouseUp(e) {
+
+        elems.sidebar.classList.add('sidebar_transition');
+
+        document.documentElement.removeEventListener('mousemove', onMouseMove);
+        document.documentElement.removeEventListener('mouseup', onMouseUp);
+    }
+};
 
 // プレーヤーサイズが固定かどうか
 function isScreenSizeAuto() {
@@ -460,14 +421,14 @@ function isFullScreenAttr() {
 
 function set_program_container_width() {
 
-    if (zappingWidth < 300) programContainerWidth = 100 + '%';
-    if (zappingWidth > 300) programContainerWidth = 100 / 2 + '%';
-    if (zappingWidth > 500) programContainerWidth = 100 / 3 + '%';
-    if (zappingWidth > 700) programContainerWidth = 100 / 4 + '%';
-    if (zappingWidth > 900) programContainerWidth = 100 / 5 + '%';
-    if (zappingWidth > 1100) programContainerWidth = 100 / 6 + '%';
-    if (zappingWidth > 1300) programContainerWidth = 100 / 7 + '%';
-    if (zappingWidth > 1500) programContainerWidth = 100 / 8 + '%';
+    if (sidebarWidth < 300) programContainerWidth = 100 + '%';
+    if (sidebarWidth > 300) programContainerWidth = 100 / 2 + '%';
+    if (sidebarWidth > 500) programContainerWidth = 100 / 3 + '%';
+    if (sidebarWidth > 700) programContainerWidth = 100 / 4 + '%';
+    if (sidebarWidth > 900) programContainerWidth = 100 / 5 + '%';
+    if (sidebarWidth > 1100) programContainerWidth = 100 / 6 + '%';
+    if (sidebarWidth > 1300) programContainerWidth = 100 / 7 + '%';
+    if (sidebarWidth > 1500) programContainerWidth = 100 / 8 + '%';
 
     document.querySelectorAll('.program_container').forEach(element => {
         element.style.width = programContainerWidth;
@@ -627,7 +588,7 @@ function makeProgramsHtml(program) {
 }
 
 function updateThumbnail() {
-    if (!isZapping) return;
+    if (!isSidebar) return;
     if (isInserting) return;
 
     // localStorageから番組情報を取得
