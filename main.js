@@ -2,26 +2,28 @@ const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox.conten
 //const notifyboxAPI = 'https://sp.live.nicovideo.jp/api/relive/notifybox.content.php';
 const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 
+const toDolists = [];
+const rootMinWidth = (1024 + 128 + 4);
+const sidebarMinWidth = 180;
 const getProgramsInterval = 60; // 秒
 const maxSaveProgramInfos = 100;
 const getProgramInfoInterval = 0.3; // 秒
-const updateThumbnailInterval = 20; // 秒
-const toDolists = [];
+let updateThumbnailInterval = 1; // 秒
 
-const rootMinWidth = (1024 + 128 + 4);
-const sidebarMinWidth = 180;
-let sidebarWidth = sidebarMinWidth;
-let _updateThumbnailInterval = getProgramInfoInterval;
 let programContainerWidth = '100%';
 let scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
 let windowWidth = window.innerWidth - scrollbarWidth;
 let windowHeight = window.innerHeight;
-
-let isAutoOpen = false;
-let isSaveSidebarSize = false;
-let isSidebar = false;
+let sidebarWidth = sidebarMinWidth;
+let isOpenSidebar = false;
 let isInserting = false;
 
+let defaultOptions = {
+    autoOpen: '3',
+    updateThumbnailInterval: 60, // 秒
+    sidebarWidth: sidebarWidth,
+    isOpenSidebar: isOpenSidebar,
+};
 let options = {};
 let elems = {};
 
@@ -45,6 +47,9 @@ const setElems = () => {
 const url = new URL(window.location.href);
 const params = url.searchParams;
 
+const loadingImageURL = chrome.runtime.getURL('images/loading.gif');
+const reloadImageURL = chrome.runtime.getURL('images/reload.png');
+
 window.addEventListener('load', async function () {
 
     // 別窓くんポップアップ時は終了
@@ -52,6 +57,7 @@ window.addEventListener('load', async function () {
 
     // オプションを取得
     options = await getOptions();
+    sidebarWidth = options.sidebarWidth;
 
     // 各要素を定義
     setElems();
@@ -59,39 +65,39 @@ window.addEventListener('load', async function () {
     if (!elems.root) return; // root要素が存在しない場合は終了
 
     // サイドバーを挿入
-    insrertSidebarHTML();
+    await insrertSidebarHTML();
 
     // Watchページの幅を設定
-    setWatchPageWidth();
+    await setWatchPageWidth();
 
     // ウィンドウサイズの変更に伴ってページのスタイルを設定
-    window.addEventListener('resize', function () {
+    window.addEventListener('resize', async function () {
         scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
         windowWidth = window.innerWidth - scrollbarWidth;
         windowHeight = window.innerHeight;
 
         setRootWidth();
-        setWatchPageWidth();
+        await setWatchPageWidth();
     });
 
     // フルスクリーンモード切り替え時に実行
     for (let i = 0; i < elems.fullscreenButtons.length; i++) {
-        elems.fullscreenButtons[i].addEventListener('click', function () {
-            if (isSidebar) sidebar_button.click();
-            setWatchPageWidth();
+        elems.fullscreenButtons[i].addEventListener('click', async function () {
+            if (isOpenSidebar) sidebar_button.click();
+            await setWatchPageWidth();
         });
     }
 
     // シアターモード切り替え時に実行
     for (let i = 0; i < elems.theaterButtons.length; i++) {
-        elems.theaterButtons[i].addEventListener('click', function () {
-            setWatchPageWidth();
+        elems.theaterButtons[i].addEventListener('click', async function () {
+            await setWatchPageWidth();
         });
     }
 
     // フルスクリーン固定、自動切り替え時に実行するために画面クリックで発火
-    document.addEventListener('click', function (e) {
-        setWatchPageWidth();
+    document.addEventListener('click', async function (e) {
+        await setWatchPageWidth();
     }, false);
 
     // 再読み込みボタン
@@ -100,24 +106,23 @@ window.addEventListener('load', async function () {
     });
 
     // サイドバーOPEN/CLOSEボタン
-    sidebar_button.addEventListener('click', function (e) {
+    sidebar_button.addEventListener('click', async function (e) {
         e.preventDefault();
         e.stopPropagation();
 
-        toggleSidebar();
-        setWatchPageWidth();
+        await toggleSidebar();
+        await setWatchPageWidth();
     });
 
     // サイドバー境界線ドラッグ可能にする
     changeSidebarLine();
 
     // サイドバー　オートオープン
-    if (isAutoOpen && Number(options.isSidebar)) {
+    if (options.autoOpen === '1' || (options.autoOpen === '3' && options.isOpenSidebar)) {
         setTimeout(() => {
             sidebar_button.click();
         }, 2000);
     }
-
 
 
 
@@ -135,26 +140,20 @@ window.addEventListener('load', async function () {
 
         setProgramInfo(toDolists.shift());
 
-        if (toDolists.length === 0) {
-            _updateThumbnailInterval = updateThumbnailInterval;
-        } else {
-            _updateThumbnailInterval = getProgramInfoInterval;
-        }
-
     }, getProgramInfoInterval * 1000);
 
     // サムネイルを更新
     function runUpdateThumbnail() {
         updateThumbnail();
-        setTimeout(runUpdateThumbnail, _updateThumbnailInterval * 1000);
+        setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
     }
-    setTimeout(runUpdateThumbnail, _updateThumbnailInterval * 1000);
+    setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
 
 
     // // タブがアクティブになったら幅をセット
-    // function handleVisibilityChange() {
+    // async function handleVisibilityChange() {
     //     if (document.visibilityState === 'visible') {
-    //         setWatchPageWidth();
+    //         await setWatchPageWidth();
     //     }
     // }
 
@@ -163,38 +162,36 @@ window.addEventListener('load', async function () {
 
 });
 
+// データが変更されたときのイベントリスナー
+chrome.storage.onChanged.addListener(function (changes) {
+    if (changes.autoOpen) options.autoOpen = changes.autoOpen.newValue;
+    if (changes.updateThumbnailInterval) options.updateThumbnailInterval = changes.updateThumbnailInterval.newValue;
+});
+
 // オプションを取得
 const getOptions = async () => {
 
-    const _options = await chrome.storage.local.get();
+    const options_ = await chrome.storage.local.get();
 
-    if (_options &&
-        _options.isAutoOpen !== undefined &&
-        _options.isSaveSidebarSize !== undefined
-    ) {
-        isAutoOpen = Number(_options.isAutoOpen);
-        if (isAutoOpen === 2) {
-            isAutoOpen = _options.isSidebar ? Number(_options.isSidebar) : Number(_options.isAutoOpen);
-        }
+    if (!options_) return defaultOptions;
 
-        isSaveSidebarSize = Number(_options.isSaveSidebarSize);
-        if (isSaveSidebarSize) {
-            sidebarWidth = (_options.sidebarWidth !== undefined) ? _options.sidebarWidth : sidebarMinWidth;
-        }
-    }
-    return _options;
+    if (options_.autoOpen === undefined) options_.autoOpen = defaultOptions.autoOpen;
+    if (options_.updateThumbnailInterval === undefined) options_.updateThumbnailInterval = Number(defaultOptions.updateThumbnailInterval);
+    if (options_.sidebarWidth === undefined) options_.sidebarWidth = defaultOptions.sidebarWidth;
+    if (options_.isOpenSidebar === undefined) options_.isOpenSidebar = defaultOptions.isOpenSidebar;
+
+    return options_;
 };
 
 // サイドバー要素を挿入
 const insrertSidebarHTML = async () => {
-
     const sidebarHtml = `<div id="sidebar" class="sidebar_transition">
                             <div id="sidebar_container">
                                 <div class="program_info">
                                     フォロー中の番組
                                     <div id="program_count"></div>
                                     <div id="reload_programs">
-                                        <img src='${chrome.runtime.getURL('images/reload.png')}'>
+                                        <img src='${reloadImageURL}'>
                                     </div>
                                 </div>
                                 <div id="api_error">
@@ -222,9 +219,9 @@ const insrertSidebarHTML = async () => {
 
 };
 
-const setWatchPageWidth = () => {
+const setWatchPageWidth = async () => {
 
-    setTimeout(() => {
+    setTimeout(async () => {
 
         let maxWidth = 1024 + 'px';
         let minWidth = 1024 + 'px';
@@ -286,17 +283,6 @@ const setWatchPageWidth = () => {
             elems.playerSection.style.width = 'auto';
         }
 
-        try {
-            // サイドバーサイズを記憶する場合
-            if (isSaveSidebarSize) {
-                chrome.storage.local.set({ 'sidebarWidth': sidebarWidth });
-            } else {
-                chrome.storage.local.set({ 'sidebarWidth': sidebarMinWidth });
-            }
-        } catch (error) {
-
-        }
-
     }, 500);
 };
 
@@ -309,11 +295,11 @@ const setRootWidth = () => {
 };
 
 // サイドバーOPEN/CLOSE
-const toggleSidebar = () => {
+const toggleSidebar = async () => {
 
-    isSidebar = !isSidebar;
+    isOpenSidebar = !isOpenSidebar;
 
-    if (isSidebar) {
+    if (isOpenSidebar) {
 
         if (sidebarWidth < sidebarMinWidth) sidebarWidth = sidebarMinWidth;
         elems.sidebar.style.width = sidebarWidth + 'px';
@@ -342,13 +328,9 @@ const toggleSidebar = () => {
         if (indicator) indicator.click();
     }, 1000);
 
-    try {
-        // サイドバー開閉を記憶する場合
-        if (Number(options.isAutoOpen) === 2) {
-            chrome.storage.local.set({ 'isSidebar': isSidebar });
-        }
-    } catch (error) {
-
+    // サイドバー開閉を記憶する場合
+    if (options.autoOpen === '3') {
+        await chrome.storage.local.set({ 'isOpenSidebar': isOpenSidebar });
     }
 };
 
@@ -369,17 +351,11 @@ const changeSidebarLine = () => {
         document.documentElement.addEventListener('mouseup', onMouseUp);
     });
 
-    function onMouseMove(e) {
+    async function onMouseMove(e) {
 
         if (e.target.id === 'sidebar_button') return;
 
         let width = startWidth + (e.clientX - startX);
-
-        // const maxWidth = windowWidth - rootMinWidth;
-        // if (width > maxWidth) {
-        //     width = maxWidth;
-        // }
-
         if (width < sidebarMinWidth) {
             width = sidebarMinWidth;
         }
@@ -393,7 +369,7 @@ const changeSidebarLine = () => {
         // ニコ生画面　全体幅を設定
         setRootWidth();
 
-        setWatchPageWidth();
+        await setWatchPageWidth();
         set_program_container_width();
     }
 
@@ -403,6 +379,8 @@ const changeSidebarLine = () => {
 
         document.documentElement.removeEventListener('mousemove', onMouseMove);
         document.documentElement.removeEventListener('mouseup', onMouseUp);
+
+        chrome.storage.local.set({ 'sidebarWidth': sidebarWidth });
     }
 };
 
@@ -472,13 +450,6 @@ async function getPrograms(rows = 100) {
         // 番組挿入へ
         const res = await insertProgramContainer(response.data.notifybox_content);
         if (res) set_program_container_width();
-
-
-        if (toDolists.length === 0) {
-            _updateThumbnailInterval = updateThumbnailInterval;
-        } else {
-            _updateThumbnailInterval = getProgramInfoInterval;
-        }
 
     } catch (error) {
         isInserting = false;
@@ -577,7 +548,7 @@ function makeProgramsHtml(program) {
                         </div>
                         <div class="program_thumbnail program-card_">
                             <a href="${program.thumbnail_link_url}">
-                                <img src="${thumbnail_url}" onerror="this.src='${chrome.runtime.getURL('images/loading.gif')}'; this.removeAttribute('onerror'); this.removeAttribute('onload');" onload="this.removeAttribute('onerror'); this.removeAttribute('onload');">
+                                <img src="${thumbnail_url}" onerror="this.src='${loadingImageURL}'; this.removeAttribute('onerror'); this.removeAttribute('onload');" onload="this.removeAttribute('onerror'); this.removeAttribute('onload');">
                             </a>
                         </div>
                         <div class="program_title">
@@ -588,7 +559,7 @@ function makeProgramsHtml(program) {
 }
 
 function updateThumbnail() {
-    if (!isSidebar) return;
+    if (!isOpenSidebar) return;
     if (isInserting) return;
 
     // localStorageから番組情報を取得
@@ -627,5 +598,10 @@ function updateThumbnail() {
             }
         }
     }
-}
 
+    if (toDolists.length === 0) {
+        updateThumbnailInterval = options.updateThumbnailInterval;
+    } else {
+        updateThumbnailInterval = 1;
+    }
+}

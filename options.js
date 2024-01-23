@@ -1,71 +1,49 @@
 document.addEventListener('DOMContentLoaded', async function () {
 
     // デフォルト値
-    let isAutoOpen = '0';
-    let isSaveSidebarSize = '0';
+    let autoOpen = '3';
+    let updateThumbnailInterval = '60';
 
-    // 保存されている値を取得
+    // オプション取得
     let options = await chrome.storage.local.get();
+
     if (options) {
-        isAutoOpen = options.isAutoOpen || isAutoOpen;
-        isSaveSidebarSize = options.isSaveSidebarSize || isSaveSidebarSize;
-    } else {
-        options = {
-            'isAutoOpen': isAutoOpen,
-            'isSaveSidebarSize': isSaveSidebarSize,
-        };
+        if (options.autoOpen === undefined) options.autoOpen = autoOpen;
+        if (options.updateThumbnailInterval === undefined) options.updateThumbnailInterval = updateThumbnailInterval;
     }
 
     /**
-     * オートオープン
+     * オプション内容を反映
      */
 
-    // オートオープン設定のInput要素の取得
-    const isAutoOpens = document.getElementsByName('isAutoOpen');
-
-    // 保存されている値を設定
-    for (let i = 0; i < isAutoOpens.length; i++) {
-        if (isAutoOpens[i].value === isAutoOpen) {
-            isAutoOpens[i].checked = true;
-            break;
+    // オートオープン
+    document.getElementsByName('autoOpen').forEach(item => {
+        if (item.value === options.autoOpen) {
+            item.checked = true;
+        } else {
+            item.checked = false;
         }
-    }
+    });
 
-    // 変更があれば保存
-    for (let i = 0; i < isAutoOpens.length; i++) {
-        isAutoOpens[i].addEventListener('change', async function () {
-            saveOptions();
-        });
-    }
-
-    /**
-     * サイドバーサイズ
-     */
-
-    // 設定のInput要素の取得
-    const isSaveSidebarSizes = document.getElementsByName('isSaveSidebarSize');
-
-    // 保存されている値を設定
-    for (let i = 0; i < isSaveSidebarSizes.length; i++) {
-        if (isSaveSidebarSizes[i].value === isSaveSidebarSize) {
-            isSaveSidebarSizes[i].checked = true;
-            break;
+    // サムネ更新間隔
+    document.getElementsByName('updateThumbnailInterval').forEach(item => {
+        if (item.value === options.updateThumbnailInterval) {
+            item.checked = true;
+        } else {
+            item.checked = false;
         }
-    }
+    });
 
-    // 変更があれば保存
-    for (let i = 0; i < isSaveSidebarSizes.length; i++) {
-        isSaveSidebarSizes[i].addEventListener('change', async function () {
-            saveOptions();
-        });
-    }
+    // フォームに変更があったら保存する
+    document.getElementById('optionForm').addEventListener('change', function (event) {
+        saveOptions();
+    });
 
+    async function saveOptions() {
+        options.autoOpen = document.querySelector('input[name="autoOpen"]:checked').value;
+        options.updateThumbnailInterval = document.querySelector('input[name="updateThumbnailInterval"]:checked').value;
+
+        await chrome.storage.local.set(options);
+    }
 });
 
-function saveOptions() {
-    const options = {
-        'isAutoOpen': document.querySelector('input[name="isAutoOpen"]:checked').value,
-        'isSaveSidebarSize': document.querySelector('input[name="isSaveSidebarSize"]:checked').value,
-    };
-    chrome.storage.local.set(options);
-}

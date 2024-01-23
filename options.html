@@ -19,71 +19,71 @@
         <p>
             サイドバーには、フォロー中の番組リストがライブサムネイル付きで表示されます。定期的に自動更新されるので、番組を視聴しながら別の番組を監視できます。
         </p>
-        
-        <h4>更新間隔</h4>
-        <ul>
-            <li>
-                番組リスト：120秒
-            </li>
-            <li>
-                ライブサムネイル：ニコ生側の仕様による（20~60秒）
-            </li>
-        </ul>
+
         <h1>オプション</h1>
 
-        <h2>オートオープン</h2>
-        
-        <p>
-            ページ読み込み時にサイドバーを自動で開くかどうかを設定します。
-        </p>
+        <form id="optionForm">
 
-        <form>
+            <h2>オートオープン</h2>
+
+            <p>
+                ページ読み込み時にサイドバーを自動で開くかどうかを設定します。
+            </p>
+
+
             <div class="setbox flex">
                 <div class="inputbox flex">
-                    <input type="radio" id="isAutoOpen1" name="isAutoOpen" value="1">
-                    <label for="isAutoOpen1">ON</label>
-                </div>
-            </div>
-        
-            <div class="setbox flex">
-                <div class="inputbox flex">
-                    <input type="radio" id="isAutoOpen2" name="isAutoOpen" value="0" checked>
-                    <label for="isAutoOpen2">OFF</label>
+                    <input type="radio" id="autoOpen1" name="autoOpen" value="1">
+                    <label for="autoOpen1">ON</label>
                 </div>
             </div>
 
             <div class="setbox flex">
                 <div class="inputbox flex">
-                    <input type="radio" id="isAutoOpen3" name="isAutoOpen" value="2" checked>
-                    <label for="isAutoOpen3">閉じる前の状態を反映する</label>
+                    <input type="radio" id="autoOpen2" name="autoOpen" value="2">
+                    <label for="autoOpen2">OFF</label>
                 </div>
             </div>
+
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="autoOpen3" name="autoOpen" value="3" checked>
+                    <label for="autoOpen3">ページを閉じる前の状態を記憶</label>
+                </div>
+            </div>
+
+            <h2>サムネイル更新間隔</h2>
+
+            <p>
+                サイドバー内の番組サムネイルの更新間隔を設定します。<br>
+                実際の更新間隔は時間帯など（ニコ生側の仕様）により決まります。（20~60秒）
+            </p>
+
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="updateThumbnailInterval1" name="updateThumbnailInterval" value="20">
+                    <label for="updateThumbnailInterval1">20秒</label>
+                </div>
+            </div>
+
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="updateThumbnailInterval2" name="updateThumbnailInterval" value="40">
+                    <label for="updateThumbnailInterval2">40秒</label>
+                </div>
+            </div>
+
+            <div class="setbox flex">
+                <div class="inputbox flex">
+                    <input type="radio" id="updateThumbnailInterval3" name="updateThumbnailInterval" value="60" checked>
+                    <label for="updateThumbnailInterval3">60秒</label>
+                </div>
+            </div>
+            
         </form>
 
-        <h2>サイドバーサイズ</h2>
-        
-        <p>
-            サイドバーの幅を記憶するかどうかを設定します。
-        </p>
-        
-        <form>
-            <div class="setbox flex">
-                <div class="inputbox flex">
-                    <input type="radio" id="isSaveSidebarSize1" name="isSaveSidebarSize" value="1">
-                    <label for="isSaveSidebarSize1">記憶する</label>
-                </div>
-            </div>
-        
-            <div class="setbox flex">
-                <div class="inputbox flex">
-                    <input type="radio" id="isSaveSidebarSize2" name="isSaveSidebarSize" value="0" checked>
-                    <label for="isSaveSidebarSize2">記憶しない</label>
-                </div>
-            </div>
-        </form>
-        
     </div>
-    
+
     <script src="options.js"></script>
 </body>
 
