@@ -9,7 +9,8 @@
     background-color: #f00;
     cursor: col-resize;
     z-index: 999;
-    /* z-index: 1000000; */
+    /* display: table-cell; */
+    display: none;
 }
 
 #sidebar_button {
@@ -50,12 +51,17 @@
     overflow: auto;
     scrollbar-width: none;
     box-sizing: border-box;
+    /* display: table-cell; */
+    display: none;
 }
 #sidebar::-webkit-scrollbar {
     display: none;
 }
 .sidebar_transition {
     transition: all 0.5s;
+}
+.sidebar_display_none {
+    display: none;
 }
 #sidebar_container {
     position: absolute;
