@@ -2,14 +2,14 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // デフォルト値
     let autoOpen = '3';
-    let updateThumbnailInterval = '60';
+    let updateProgramsInterval = '120';
 
     // オプション取得
     let options = await chrome.storage.local.get();
 
     if (options) {
         if (options.autoOpen === undefined) options.autoOpen = autoOpen;
-        if (options.updateThumbnailInterval === undefined) options.updateThumbnailInterval = updateThumbnailInterval;
+        if (options.updateProgramsInterval === undefined) options.updateProgramsInterval = updateProgramsInterval;
     }
 
     /**
@@ -26,8 +26,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     });
 
     // サムネ更新間隔
-    document.getElementsByName('updateThumbnailInterval').forEach(item => {
-        if (item.value === options.updateThumbnailInterval) {
+    document.getElementsByName('updateProgramsInterval').forEach(item => {
+        if (item.value === options.updateProgramsInterval) {
             item.checked = true;
         } else {
             item.checked = false;
@@ -41,7 +41,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     async function saveOptions() {
         options.autoOpen = document.querySelector('input[name="autoOpen"]:checked').value;
-        options.updateThumbnailInterval = document.querySelector('input[name="updateThumbnailInterval"]:checked').value;
+        options.updateProgramsInterval = document.querySelector('input[name="updateProgramsInterval"]:checked').value;
 
         await chrome.storage.local.set(options);
     }

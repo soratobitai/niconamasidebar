@@ -6,7 +6,7 @@ const toDolists = [];
 // const rootMinWidth = (1024 + 128 + 4);
 const sidebarMinWidth = 180;
 const maxSaveProgramInfos = 100;
-const getProgramsInterval = 120; // 秒
+const updateThumbnailInterval = 20; // 秒
 const toDolistsInterval = 0.3; // 秒
 
 let programContainerWidth = '100%';
@@ -20,7 +20,7 @@ let isInserting = false;
 
 let defaultOptions = {
     autoOpen: '3',
-    updateThumbnailInterval: 60, // 秒
+    updateProgramsInterval: 120, // 秒
     sidebarWidth: sidebarWidth,
     isOpenSidebar: isOpenSidebar,
 };
@@ -80,40 +80,43 @@ window.addEventListener('load', async function () {
     // ウィンドウサイズの変更時
     window.addEventListener('resize', function () {
         getWindowSize();
+        // adjustHtmlWidth();
     });
 
     // watchPageサイズ変更時
     const resizeObserver_watchPage = new ResizeObserver((e) => {
         adjust_WatchPage_child();
+        // adjustHtmlWidth();
     });
     resizeObserver_watchPage.observe(elems.watchPage);
 
     // サイドバーのサイズ変更時
     const resizeObserver_sidebar = new ResizeObserver((e) => {
         set_program_container_width();
+        // adjustHtmlWidth();
     });
     resizeObserver_sidebar.observe(elems.sidebar);
 
 
     // フルスクリーンモード切り替え時に実行
-    document.addEventListener("fullscreenchange", function () {
-        if (document.fullscreenElement) {
-            console.log("フルスクリーンに入りました");
-        } else {
-            console.log("フルスクリーンが解除されました");
+    // document.addEventListener("fullscreenchange", function () {
+    //     if (document.fullscreenElement) {
+    //         console.log("フルスクリーンに入りました");
+    //     } else {
+    //         console.log("フルスクリーンが解除されました");
 
-            setTimeout(() => {
-                // adjustHtmlWidth();
-            }, 2000);
-        }
-    });
+    //         setTimeout(() => {
+    //             // adjustHtmlWidth();
+    //         }, 2000);
+    //     }
+    // });
 
-    // フルスクリーンモード切り替え時に実行
-    for (let i = 0; i < elems.fullscreenButtons.length; i++) {
-        elems.fullscreenButtons[i].addEventListener('click', function () {
-            if (isOpenSidebar) toggleSidebar();
-        });
-    }
+    // // フルスクリーンモード切り替え時に実行
+    // for (let i = 0; i < elems.fullscreenButtons.length; i++) {
+    //     elems.fullscreenButtons[i].addEventListener('click', function () {
+    //         if (isOpenSidebar) toggleSidebar();
+    //     });
+    // }
 
     // シアターモード切り替え時に実行
     // for (let i = 0; i < elems.theaterButtons.length; i++) {
@@ -122,14 +125,9 @@ window.addEventListener('load', async function () {
     //     });
     // }
 
-    // フルスクリーン固定、自動切り替え時に実行するために画面クリックで発火
-    // document.addEventListener('click', function (e) {
-    //     adjust_WatchPage_child();
-    // }, false);
-
     // 再読み込みボタン
-    reload_programs.addEventListener('click', async function () {
-        await updateSidebar();
+    reload_programs.addEventListener('click', function () {
+        updateSidebar();
     });
 
     // サイドバーOPEN/CLOSEボタン
@@ -147,7 +145,7 @@ window.addEventListener('load', async function () {
     if (options.autoOpen === '1' || (options.autoOpen === '3' && options.isOpenSidebar)) {
         setTimeout(() => {
             sidebar_button.click();
-        }, 2000);
+        }, 0);
     }
 
 
@@ -158,9 +156,9 @@ window.addEventListener('load', async function () {
     // サムネイル定期更新を開始
     function runUpdateThumbnail() {
         updateThumbnail();
-        setTimeout(runUpdateThumbnail, options.updateThumbnailInterval * 1000);
+        setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
     }
-    setTimeout(runUpdateThumbnail, options.updateThumbnailInterval * 1000);
+    setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
 
     // todoリストを実行
     setInterval(function () {
@@ -171,36 +169,24 @@ window.addEventListener('load', async function () {
     // 番組リストを取得（定期実行）
     setInterval(async function () {
         await updateSidebar();
-    }, getProgramsInterval * 1000);
-
-    // // タブがアクティブになったら幅をセット
-    // async function handleVisibilityChange() {
-    //     if (document.visibilityState === 'visible') {
-    //         adjust_WatchPage_child();
-    //     }
-    // }
-
-    // // タブのアクティブを監視
-    // document.addEventListener('visibilitychange', handleVisibilityChange);
+    }, options.updateProgramsInterval * 1000);
 
 });
 
 // データが変更されたときのイベントリスナー
 chrome.storage.onChanged.addListener(function (changes) {
     if (changes.autoOpen) options.autoOpen = changes.autoOpen.newValue;
-    if (changes.updateThumbnailInterval) options.updateThumbnailInterval = changes.updateThumbnailInterval.newValue;
+    if (changes.updateProgramsInterval) options.updateProgramsInterval = changes.updateProgramsInterval.newValue;
 });
 
 // サムネ取得エラー時
 function onThumbnailError() {
     document.querySelectorAll('.program_thumbnail_img').forEach(function (element) {
         element.addEventListener('error', function () {
-            // this.src = loadingImageURL;
-            if (this.dataset['data-src'] && this.src !== this.dataset['data-src']) {
-                // data-src が存在し、かつエラーが発生した画像が data-src で指定されたものでない場合
-                this.src = this.dataset['data-src'];
+            const dataSrc = this.getAttribute("data-src");
+            if (dataSrc && this.src !== dataSrc) {
+                this.src = dataSrc;
             } else {
-                // 別のURLをセットする
                 this.src = loadingImageURL;
             }
         });
@@ -221,7 +207,7 @@ const getOptions = async () => {
     if (!options_) return defaultOptions;
 
     if (options_.autoOpen === undefined) options_.autoOpen = defaultOptions.autoOpen;
-    if (options_.updateThumbnailInterval === undefined) options_.updateThumbnailInterval = Number(defaultOptions.updateThumbnailInterval);
+    if (options_.updateProgramsInterval === undefined) options_.updateProgramsInterval = Number(defaultOptions.updateProgramsInterval);
     if (options_.sidebarWidth === undefined) options_.sidebarWidth = defaultOptions.sidebarWidth;
     if (options_.isOpenSidebar === undefined) options_.isOpenSidebar = defaultOptions.isOpenSidebar;
 
@@ -232,11 +218,15 @@ const getOptions = async () => {
 const insertSidebar = () => {
     const sidebarHtml = `<div id="sidebar" class="sidebar_transition">
                             <div id="sidebar_container">
-                                <div class="program_info">
-                                    フォロー中の番組
-                                    <div id="program_count"></div>
-                                    <div id="reload_programs">
-                                        <img src='${reloadImageURL}'>
+                                <div class="sidebar_header">
+                                    <div class="sidebar_header_item">
+                                        フォロー中の番組
+                                        <div id="program_count"></div>
+                                    </div>
+                                    <div class="sidebar_header_item">
+                                        <div class="sidebar_header_item_col" id="reload_programs">
+                                            <img src='${reloadImageURL}'>
+                                        </div>
                                     </div>
                                 </div>
                                 <div id="api_error">
@@ -326,30 +316,22 @@ const adjust_WatchPage_child = () => {
 };
 
 // ニコ生画面　全体幅を設定
-const adjustHtmlWidth = () => {
+// const adjustHtmlWidth = () => {
 
-    getWindowSize();
+//     getWindowSize();
 
-    // HTMLの幅を設定
-    document.documentElement.style.width = (windowWidth - scrollbarWidth - 3) + 'px';
+//     // HTMLの幅を設定
+//     document.documentElement.style.width = (windowWidth - scrollbarWidth - 3) + 'px';
+//     // watchPageの幅を設定
+//     const watchPage = windowWidth - (elems.sidebar.clientWidth + elems.sidebar_line.clientWidth + scrollbarWidth);
+//     elems.watchPage.style.width = watchPage + 'px';
 
-    const watchPage = windowWidth - (elems.sidebar.clientWidth + elems.sidebar_line.clientWidth + scrollbarWidth);
-    elems.watchPage.style.width = watchPage + 'px';
-
-    setTimeout(() => {
-        document.documentElement.removeAttribute('style');
-        elems.watchPage.removeAttribute('style');
-    }, 2000);
-
-    console.log('windowWidth:', windowWidth);
-    console.log('HTML       :', document.documentElement.clientWidth);
-    console.log('root       :', elems.root.clientWidth);
-    console.log('watchPage  :', elems.watchPage.clientWidth);
-    console.log('diff       :', windowWidth - elems.root.clientWidth);
-    console.log('scrollbar  :', scrollbarWidth);
-    console.log('sidebar    :', elems.sidebar.clientWidth);
-    console.log('sidebarline:', elems.sidebar_line.clientWidth);
-};
+//     setTimeout(() => {
+//         // セットしたスタイルを削除
+//         document.documentElement.removeAttribute('style');
+//         elems.watchPage.removeAttribute('style');
+//     }, 2000);
+// };
 
 // サイドバーOPEN/CLOSE
 const toggleSidebar = async () => {
