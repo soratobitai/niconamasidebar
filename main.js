@@ -47,6 +47,10 @@ const setElems = () => {
     elems.fullscreenButtons = document.querySelectorAll('button[class*="_fullscreen-button_"]');
     elems.theaterButtons = document.querySelectorAll('button[class*="_theater-button_"]');
     elems.enquetePlaceholder = document.getElementById('enquete-placeholder');
+
+    // へもツール対策用
+    elems.playerDisplay = document.querySelector('[class*="_player-display_"]');
+    elems.playerStatusPanel = document.querySelector('[class*="_player-status-panel_"]');
 };
 
 const url = new URL(window.location.href);
@@ -72,7 +76,7 @@ window.addEventListener('load', async function () {
     getWindowSize();
 
     // サイドバーを挿入
-    insertSidebar();
+    await insertSidebar();
 
     // Watchページの幅を設定
     adjust_WatchPage_child();
@@ -80,13 +84,19 @@ window.addEventListener('load', async function () {
     // ウィンドウサイズの変更時
     window.addEventListener('resize', function () {
         getWindowSize();
+        adjust_WatchPage_child();
         // adjustHtmlWidth();
     });
 
-    // watchPageサイズ変更時
-    const resizeObserver_watchPage = new ResizeObserver((e) => {
-        adjust_WatchPage_child();
-        // adjustHtmlWidth();
+    // watchPageサイズ変更時（幅のみ監視）
+    let watchPageWidth = elems.watchPage.clientWidth;
+    const resizeObserver_watchPage = new ResizeObserver((entries) => {
+        entries.forEach(function (entry) {
+            if (entry.contentRect.width !== watchPageWidth) {
+                adjust_WatchPage_child();
+                watchPageWidth = entry.contentRect.width;
+            }
+        });
     });
     resizeObserver_watchPage.observe(elems.watchPage);
 
@@ -96,7 +106,6 @@ window.addEventListener('load', async function () {
         // adjustHtmlWidth();
     });
     resizeObserver_sidebar.observe(elems.sidebar);
-
 
     // フルスクリーンモード切り替え時に実行
     // document.addEventListener("fullscreenchange", function () {
@@ -253,7 +262,7 @@ const insertSidebar = () => {
 };
 
 const adjust_WatchPage_child = () => {
-    
+
     setTimeout(() => {
 
         let maxWidth = 1024 + 'px';
@@ -312,6 +321,10 @@ const adjust_WatchPage_child = () => {
             const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
             if (indicator) indicator.click();
         }, 1000);
+
+        // へもツール対策
+        elems.playerDisplay.removeAttribute('style');
+        // elems.playerStatusPanel.removeAttribute('style');
     }, 0);
 };
 
