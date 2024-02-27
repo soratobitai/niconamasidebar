@@ -154,7 +154,7 @@ window.addEventListener('load', async function () {
     if (options.autoOpen === '1' || (options.autoOpen === '3' && options.isOpenSidebar)) {
         setTimeout(() => {
             sidebar_button.click();
-        }, 0);
+        }, 1000);
     }
 
 
@@ -263,69 +263,66 @@ const insertSidebar = () => {
 
 const adjust_WatchPage_child = () => {
 
+    let maxWidth = 1024 + 'px';
+    let minWidth = 1024 + 'px';
+    let width = 1024 + 'px';
+    let watchPage_child = [
+        elems.playerSection,
+        elems.programInformationBodyArea,
+        elems.siteFooterUtility,
+        elems.gaNsProgramSummary,
+        elems.enquetePlaceholder
+    ]
+
+    const watchPageWidth = elems.watchPage.clientWidth;
+
+    if (isScreenSizeAuto()) {
+
+        if (watchPageWidth > (1152) && watchPageWidth < (1500)) {
+            maxWidth = (watchPageWidth - 128) + 'px';
+            minWidth = 1024 + 'px';
+            width = ((windowHeight * 1.777778) - 3.55556) + 'px';
+        }
+        if (watchPageWidth > (1500) && watchPageWidth < (1792)) {
+            maxWidth = (watchPageWidth - 128) + 'px';
+            minWidth = 1024 + 'px';
+            width = ((windowHeight * 1.777778) - 220.44444) + 'px';
+        }
+        if (watchPageWidth > (1792)) {
+            maxWidth = 1664 + 'px';
+            minWidth = 1024 + 'px';
+            width = ((windowHeight * 1.777778) - 220.44444) + 'px';
+        }
+    }
+
+    if (isFullScreen()) {
+        maxWidth = '100%';
+        minWidth = '100%';
+        width = '100%';
+    }
+
+    // プレイヤー幅など設定
+    watchPage_child.forEach((elem) => {
+        elem.style.maxWidth = maxWidth;
+        elem.style.minWidth = minWidth;
+        elem.style.width = width;
+    });
+
+    // シアターモード時
+    if (elems.watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
+        elems.playerSection.style.maxWidth = 'none';
+        elems.playerSection.style.width = 'auto';
+    }
+
+    // コメント欄　スクロールボタンを押す
     setTimeout(() => {
+        const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
+        if (indicator) indicator.click();
+    }, 1000);
 
-        let maxWidth = 1024 + 'px';
-        let minWidth = 1024 + 'px';
-        let width = 1024 + 'px';
-        let watchPage_child = [
-            elems.playerSection,
-            elems.programInformationBodyArea,
-            elems.siteFooterUtility,
-            elems.gaNsProgramSummary,
-            elems.enquetePlaceholder
-        ]
-
-        const watchPageWidth = elems.watchPage.clientWidth;
-
-        if (isScreenSizeAuto()) {
-
-            if (watchPageWidth > (1152) && watchPageWidth < (1500)) {
-                maxWidth = (watchPageWidth - 128) + 'px';
-                minWidth = 1024 + 'px';
-                width = ((windowHeight * 1.777778) - 3.55556) + 'px';
-            }
-            if (watchPageWidth > (1500) && watchPageWidth < (1792)) {
-                maxWidth = (watchPageWidth - 128) + 'px';
-                minWidth = 1024 + 'px';
-                width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-            }
-            if (watchPageWidth > (1792)) {
-                maxWidth = 1664 + 'px';
-                minWidth = 1024 + 'px';
-                width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-            }
-        }
-
-        if (isFullScreen()) {
-            maxWidth = '100%';
-            minWidth = '100%';
-            width = '100%';
-        }
-
-        // プレイヤー幅など設定
-        watchPage_child.forEach((elem) => {
-            elem.style.maxWidth = maxWidth;
-            elem.style.minWidth = minWidth;
-            elem.style.width = width;
-        });
-
-        // シアターモード時
-        if (elems.watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
-            elems.playerSection.style.maxWidth = 'none';
-            elems.playerSection.style.width = 'auto';
-        }
-
-        // コメント欄　スクロールボタンを押す
-        setTimeout(() => {
-            const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
-            if (indicator) indicator.click();
-        }, 1000);
-
-        // へもツール対策
-        elems.playerDisplay.removeAttribute('style');
-        // elems.playerStatusPanel.removeAttribute('style');
-    }, 0);
+    // へもツール対策
+    elems.playerDisplay.removeAttribute('style');
+    // elems.playerStatusPanel.removeAttribute('style');
 };
 
 // ニコ生画面　全体幅を設定
@@ -557,6 +554,7 @@ function makeProgramsHtml(data) {
     let community_name = '';
     let thumbnail_link_url = '';
     let thumbnail_url = '';
+    let icon_url = '';
     let live_thumbnail_url = '';
     
     if (data.id.includes('lv')) {
@@ -564,6 +562,7 @@ function makeProgramsHtml(data) {
         community_name = data.contentOwner.name;
         thumbnail_link_url = `https://live.nicovideo.jp/watch/${data.id}`;
         thumbnail_url = data.thumbnailUrl;
+        icon_url = data.contentOwner.icon;
 
         if (data.providerType === 'user') {
             live_thumbnail_url = data.thumbnailUrl;
@@ -580,6 +579,7 @@ function makeProgramsHtml(data) {
         community_name = data.community_name;
         thumbnail_link_url = data.thumbnail_link_url;
         thumbnail_url = data.thumbnail_url;
+        icon_url = data.thumbnail_url;
         live_thumbnail_url = data.thumbnail_url;
 
         // ユーザーページのURLを取得
@@ -590,9 +590,9 @@ function makeProgramsHtml(data) {
     return `<div id="${id}" class="program_container">
                 <div class="community">
                     <a href="${user_page_url}" target="_blank">
-                        <img src="${thumbnail_url}">
+                        <img src="${icon_url}">
                     </a>
-                    <div class="community_name">
+                    <div class="community_name" title="${community_name}">
                         ${community_name}
                     </div>
                 </div>
@@ -601,7 +601,7 @@ function makeProgramsHtml(data) {
                         <img class="program_thumbnail_img" src="${live_thumbnail_url}" data-src="${thumbnail_url}">
                     </a>
                 </div>
-                <div class="program_title">
+                <div class="program_title" title="${data.title}">
                     ${data.title}
                 </div>
             </div>`;
