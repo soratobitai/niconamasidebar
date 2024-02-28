@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "ニコ生サイドバー",
     "description": "ニコ生の番組視聴ページにサイドバーを設置します。",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "author": "MynicoTools",
     "options_ui": {
         "page": "options.html",

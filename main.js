@@ -148,13 +148,11 @@ window.addEventListener('load', async function () {
     });
 
     // サイドバー境界線ドラッグ可能にする
-    changeSidebarLine();
+    enableSidebarLine();
 
     // サイドバー　オートオープン
     if (options.autoOpen === '1' || (options.autoOpen === '3' && options.isOpenSidebar)) {
-        setTimeout(() => {
-            sidebar_button.click();
-        }, 1000);
+        sidebar_button.click();
     }
 
 
@@ -313,7 +311,7 @@ const adjust_WatchPage_child = () => {
         elems.playerSection.style.maxWidth = 'none';
         elems.playerSection.style.width = 'auto';
     }
-
+    
     // コメント欄　スクロールボタンを押す
     setTimeout(() => {
         const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
@@ -380,13 +378,16 @@ const closeSidebar = () => {
 };
 
 // サイドバー境界線　ドラッグ変更
-const changeSidebarLine = () => {
+const enableSidebarLine = () => {
 
     let startX, startWidth;
 
     elems.sidebar_line.addEventListener('mousedown', function (e) {
         e.preventDefault();
         e.stopPropagation();
+
+        if (!isOpenSidebar) return;
+        if (e.target.id === 'sidebar_button' || e.target.id === 'sidebar_arrow') return;
 
         elems.sidebar.classList.remove('sidebar_transition');
 
@@ -397,9 +398,7 @@ const changeSidebarLine = () => {
     });
 
     function onMouseMove(e) {
-
-        if (e.target.id === 'sidebar_button') return;
-
+        
         let width = startWidth + (e.clientX - startX);
         if (width < sidebarMinWidth) {
             width = sidebarMinWidth;
