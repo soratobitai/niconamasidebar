@@ -40,6 +40,7 @@ const setElems = () => {
     elems.root = document.getElementById('root');
     elems.watchPage = document.getElementById('watchPage');
     elems.playerSection = document.querySelector('[class*="_player-section_"]');
+    elems.leoPlayer = document.querySelector('[class*="_leo-player_"]');
     elems.gaNsProgramSummary = document.querySelector('[class*="ga-ns-program-summary"]');
     elems.programInformationBodyArea = document.querySelector('[class*="_program-information-body-area_"]');
     elems.siteFooterUtility = document.querySelector('nav[class*="_site-utility-footer_"]');
@@ -50,7 +51,6 @@ const setElems = () => {
 
     // へもツール対策用
     elems.playerDisplay = document.querySelector('[class*="_player-display_"]');
-    elems.playerStatusPanel = document.querySelector('[class*="_player-status-panel_"]');
 };
 
 const url = new URL(window.location.href);
@@ -104,6 +104,9 @@ window.addEventListener('load', async function () {
     const resizeObserver_sidebar = new ResizeObserver((e) => {
         set_program_container_width();
         // adjustHtmlWidth();
+
+        // ウィンドウリサイズイベントを発行（シークポジションのズレ対策）
+        window.dispatchEvent(new Event('resize'));
     });
     resizeObserver_sidebar.observe(elems.sidebar);
 
@@ -128,11 +131,11 @@ window.addEventListener('load', async function () {
     // }
 
     // シアターモード切り替え時に実行
-    // for (let i = 0; i < elems.theaterButtons.length; i++) {
-    //     elems.theaterButtons[i].addEventListener('click', function () {
-    //         adjust_WatchPage_child();
-    //     });
-    // }
+    for (let i = 0; i < elems.theaterButtons.length; i++) {
+        elems.theaterButtons[i].addEventListener('click', function () {
+            adjust_WatchPage_child();
+        });
+    }
 
     // 再読み込みボタン
     reload_programs.addEventListener('click', function () {
@@ -310,6 +313,9 @@ const adjust_WatchPage_child = () => {
     if (elems.watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
         elems.playerSection.style.maxWidth = 'none';
         elems.playerSection.style.width = 'auto';
+        elems.leoPlayer.style.height = ((elems.root.clientWidth * 0.5625) - 164) + 'px';
+    } else {
+        elems.leoPlayer.style.height = 'auto';
     }
     
     // コメント欄　スクロールボタンを押す
@@ -320,7 +326,6 @@ const adjust_WatchPage_child = () => {
 
     // へもツール対策
     elems.playerDisplay.removeAttribute('style');
-    // elems.playerStatusPanel.removeAttribute('style');
 };
 
 // ニコ生画面　全体幅を設定
@@ -367,6 +372,7 @@ const openSidebar = () => {
     elems.sidebar_container.style.width = sidebarWidth + 'px';
 
     sidebar_arrow.classList.add('sidebar_arrow_re');
+    elems.sidebar_line.classList.add('col_resize');
 };
 // サイドバーCLOSE
 const closeSidebar = () => {
@@ -375,6 +381,7 @@ const closeSidebar = () => {
     elems.sidebar.style.minWidth = 0 + 'px';
 
     sidebar_arrow.classList.remove('sidebar_arrow_re');
+    elems.sidebar_line.classList.remove('col_resize');
 };
 
 // サイドバー境界線　ドラッグ変更

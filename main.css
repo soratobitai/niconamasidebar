@@ -7,9 +7,12 @@
     max-height: 100%;
     min-height: 100%;
     background-color: #f00;
-    cursor: col-resize;
     z-index: 999;
     /* display: table-cell; */
+}
+
+.col_resize {
+    cursor: col-resize;
 }
 
 #sidebar_button {
