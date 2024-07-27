@@ -61,6 +61,8 @@ const reloadImageURL = chrome.runtime.getURL('images/reload.png');
 
 window.addEventListener('load', async function () {
 
+    return;
+    
     // 別窓くんポップアップ時は終了
     if (params.get('popup') === 'on') return;
 
