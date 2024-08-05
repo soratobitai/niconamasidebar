@@ -48,8 +48,9 @@ const setElems = () => {
     elems.fullscreenButtons = document.querySelectorAll('button[class*="_fullscreen-button_"]');
     elems.theaterButtons = document.querySelectorAll('button[class*="_theater-button_"]');
     elems.enquetePlaceholder = document.getElementById('enquete-placeholder');
+    elems.playerScreenSizeSelectMenu = document.querySelector('[class*="_player-screen-size-select-menu_"]');
 
-    // へもツール対策用
+    // 他ツール対策用
     elems.playerDisplay = document.querySelector('[class*="_player-display_"]');
 };
 
@@ -60,8 +61,6 @@ const loadingImageURL = chrome.runtime.getURL('images/loading.gif');
 const reloadImageURL = chrome.runtime.getURL('images/reload.png');
 
 window.addEventListener('load', async function () {
-
-    return;
     
     // 別窓くんポップアップ時は終了
     if (params.get('popup') === 'on') return;
@@ -142,6 +141,11 @@ window.addEventListener('load', async function () {
     // 再読み込みボタン
     reload_programs.addEventListener('click', function () {
         updateSidebar();
+    });
+    
+    // 画面サイズ（固定・自動）切替時（変更時サイズが変更されないため強制する）
+    document.addEventListener('click', function () {
+        window.dispatchEvent(new Event('resize'));
     });
 
     // サイドバーOPEN/CLOSEボタン
@@ -326,7 +330,7 @@ const adjust_WatchPage_child = () => {
         if (indicator) indicator.click();
     }, 1000);
 
-    // へもツール対策
+    // 他ツール対策
     elems.playerDisplay.removeAttribute('style');
 };
 
