@@ -604,8 +604,8 @@ function makeProgramsHtml(data) {
                     <a href="${user_page_url}" target="_blank">
                         <img src="${icon_url}">
                     </a>
-                    <div class="community_name" title="${community_name}">
-                        ${community_name}
+                    <div class="community_name" title="${escapeHtml(community_name)}">
+                        ${escapeHtml(community_name)}
                     </div>
                 </div>
                 <div class="program_thumbnail program-card_">
@@ -613,8 +613,8 @@ function makeProgramsHtml(data) {
                         <img class="program_thumbnail_img" src="${live_thumbnail_url}" data-src="${thumbnail_url}">
                     </a>
                 </div>
-                <div class="program_title" title="${data.title}">
-                    ${data.title}
+                <div class="program_title" title="${escapeHtml(data.title)}">
+                    ${escapeHtml(data.title)}
                 </div>
             </div>`;
 }
@@ -656,4 +656,16 @@ function updateThumbnail() {
             }
         }
     });
+}
+
+// HTMLエスケープ
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, function (m) { return map[m]; });
 }
