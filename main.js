@@ -438,7 +438,7 @@ const enableSidebarLine = () => {
 // プレーヤーサイズが固定かどうか
 function isScreenSizeAuto() {
     const value = localStorage.getItem('LeoPlayer_ScreenSizeStore_kind');
-    if (!value) return false;
+    if (!value) return true;
     return value.includes('auto');
 }
 
@@ -475,6 +475,10 @@ async function getLivePrograms(rows = 100) {
 
         if (response.meta?.status !== 200 || !response.data) throw new Error('APIエラー');
         if (!response.data.notifybox_content) return false;
+
+        if (elems.apiErrorElement.classList.contains('api_error_active')) {
+            elems.apiErrorElement.classList.remove('api_error_active');
+        }
 
         return response.data.notifybox_content;
 
