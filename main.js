@@ -21,7 +21,7 @@ let isInserting = false;
 let defaultOptions = {
     autoOpen: '3',
     updateProgramsInterval: 120, // 秒
-    sidebarWidth: sidebarWidth,
+    sidebarWidth: 350,
     isOpenSidebar: isOpenSidebar,
 };
 let options = {};
@@ -59,6 +59,7 @@ const params = url.searchParams;
 
 const loadingImageURL = chrome.runtime.getURL('images/loading.gif');
 const reloadImageURL = chrome.runtime.getURL('images/reload.png');
+const optionsImageURL = chrome.runtime.getURL('images/options.png');
 
 window.addEventListener('load', async function () {
     
@@ -111,6 +112,12 @@ window.addEventListener('load', async function () {
     });
     resizeObserver_sidebar.observe(elems.sidebar);
 
+    // コメント欄　スクロールボタンを押す
+    setTimeout(() => {
+        const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
+        if (indicator) indicator.click();
+    }, 1000);
+
     // フルスクリーンモード切り替え時に実行
     // document.addEventListener("fullscreenchange", function () {
     //     if (document.fullscreenElement) {
@@ -141,6 +148,16 @@ window.addEventListener('load', async function () {
     // 再読み込みボタン
     reload_programs.addEventListener('click', function () {
         updateSidebar();
+    });
+
+    // オプションボタン
+    setting_options.addEventListener('click', () => {
+        const currentHeight = getComputedStyle(optionContainer).height;
+        if (currentHeight === '0px') {
+            optionContainer.style.height = 'auto';
+        } else {
+            optionContainer.style.height = '0';
+        }
     });
     
     // 画面サイズ（固定・自動）切替時（変更時サイズが変更されないため強制する）
@@ -236,25 +253,105 @@ const insertSidebar = () => {
                             <div id="sidebar_container">
                                 <div class="sidebar_header">
                                     <div class="sidebar_header_item">
-                                        フォロー中の番組
-                                        <div id="program_count"></div>
+                                        <a href="https://live.nicovideo.jp/follow" title="フォロー中の番組ページへ">
+                                            フォロー中の番組
+                                            <div id="program_count"></div>
+                                        </a>
                                     </div>
                                     <div class="sidebar_header_item">
-                                        <div class="sidebar_header_item_col" id="reload_programs">
-                                            <img src='${reloadImageURL}'>
+                                        <div class="sidebar_header_item_col" id="reload_programs" title="更新">
+                                            <img src='${reloadImageURL}' alt="更新">
+                                        </div>
+                                        <div class="sidebar_header_item_col" id="setting_options" title="オプション">
+                                            <img src='${optionsImageURL}' alt="オプション">
                                         </div>
                                     </div>
                                 </div>
-                                <div id="api_error">
-                                    <a href="https://account.nicovideo.jp/login">ログイン</a>
-                                </div>
-                                <div id="liveProgramContainer">
+                                <div class="sidebar_body">
+                                    <div id="api_error">
+                                        <a href="https://account.nicovideo.jp/login">ログイン</a>
+                                    </div>
+                                    <div id="optionContainer">
+                                    </div>
+                                    <div id="liveProgramContainer">
+                                    </div>
                                 </div>
                             </div>
                         </div>`;
     const sidebar_line_html = `<div id="sidebar_line"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`;
+
+    const optionHtml = `
+<div class="container">
+
+    <h1>オプション</h1>
+
+    <form id="optionForm">
+
+        <h2>更新間隔</h2>
+
+        <p>
+            番組リストを指定秒数で自動更新します。（サイドバー内の更新ボタンで手動で更新することもできます）<br>
+            サムネイル画像はこの設定とは関係なく自動更新されます。（20~60秒）
+        </p>
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="updateProgramsInterval1" name="updateProgramsInterval" value="60">
+                <label for="updateProgramsInterval1">60秒</label>
+            </div>
+        </div>
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="updateProgramsInterval2" name="updateProgramsInterval" value="120" checked>
+                <label for="updateProgramsInterval2">120秒</label>
+            </div>
+        </div>
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="updateProgramsInterval3" name="updateProgramsInterval" value="180">
+                <label for="updateProgramsInterval3">180秒</label>
+            </div>
+        </div>
+
+        <h2>オートオープン</h2>
+
+        <p>
+            サイドバーを自動で開くかどうかを設定します。
+        </p>
+
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="autoOpen1" name="autoOpen" value="1">
+                <label for="autoOpen1">ON</label>
+            </div>
+        </div>
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="autoOpen2" name="autoOpen" value="2">
+                <label for="autoOpen2">OFF</label>
+            </div>
+        </div>
+
+        <div class="setbox flex">
+            <div class="inputbox flex">
+                <input type="radio" id="autoOpen3" name="autoOpen" value="3" checked>
+                <label for="autoOpen3">ページを閉じる前の状態を記憶</label>
+            </div>
+        </div>
+
+    </form>
+
+</div>
+`;
     
     document.body.insertAdjacentHTML('afterbegin', sidebarHtml + sidebar_line_html);
+
+    optionContainer.insertAdjacentHTML('beforeend', optionHtml);
+    reflectOptions();
 
     // 各要素を定義
     elems.sidebar = document.getElementById('sidebar');
@@ -323,12 +420,6 @@ const adjust_WatchPage_child = () => {
     } else {
         elems.leoPlayer.style.height = 'auto';
     }
-    
-    // コメント欄　スクロールボタンを押す
-    setTimeout(() => {
-        const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
-        if (indicator) indicator.click();
-    }, 1000);
 
     // 他ツール対策
     elems.playerDisplay.removeAttribute('style');
@@ -474,19 +565,15 @@ async function getLivePrograms(rows = 100) {
         response = await response.json();
 
         if (response.meta?.status !== 200 || !response.data) throw new Error('APIエラー');
-        if (!response.data.notifybox_content) return false;
+        if (!response.data.notifybox_content) throw new Error('APIエラー');
 
-        if (elems.apiErrorElement.classList.contains('api_error_active')) {
-            elems.apiErrorElement.classList.remove('api_error_active');
-        }
+        elems.apiErrorElement.style.display = 'none';
 
         return response.data.notifybox_content;
 
     } catch (error) {
         console.log(error);
-        if (!elems.apiErrorElement.classList.contains('api_error_active')) {
-            elems.apiErrorElement.classList.add('api_error_active');
-        }
+        elems.apiErrorElement.style.display = 'block';
         return false;
     }
 }
@@ -554,6 +641,10 @@ async function updateSidebar() {
 
     // 挿入
     liveProgramContainer.insertAdjacentHTML('beforeend', html);
+
+    // ソート
+    // sortProgramsByViewers();
+
     set_program_container_width();
     isInserting = false;
 
@@ -603,11 +694,15 @@ function makeProgramsHtml(data) {
         if (match) user_page_url = `https://www.nicovideo.jp/user/${match[1]}`;
     }
 
-    return `<div id="${id}" class="program_container">
+    let userIconHtml = ``;
+    if (user_page_url) {
+        userIconHtml = `<a href="${user_page_url}" target="_blank"><img src="${icon_url}"></a>`;
+    } else {
+        userIconHtml = `<img src="${icon_url}">`;
+    }
+    return `<div id="${id}" class="program_container" data-viewers="${data.viewers}">
                 <div class="community">
-                    <a href="${user_page_url}" target="_blank">
-                        <img src="${icon_url}">
-                    </a>
+                    ${userIconHtml}
                     <div class="community_name" title="${escapeHtml(community_name)}">
                         ${escapeHtml(community_name)}
                     </div>
@@ -672,4 +767,55 @@ function escapeHtml(text) {
         "'": '&#039;'
     };
     return text.replace(/[&<>"']/g, function (m) { return map[m]; });
+}
+
+/**
+ * オプション内容を反映
+ */
+const reflectOptions = async () => {
+
+    // オートオープン
+    document.getElementsByName('autoOpen').forEach(item => {
+        if (item.value === options.autoOpen) {
+            item.checked = true;
+        } else {
+            item.checked = false;
+        }
+    });
+
+    // サムネ更新間隔
+    document.getElementsByName('updateProgramsInterval').forEach(item => {
+        if (item.value == options.updateProgramsInterval) {
+            item.checked = true;
+        } else {
+            item.checked = false;
+        }
+    });
+
+    // フォームに変更があったら保存する
+    document.getElementById('optionForm').addEventListener('change', function (event) {
+        saveOptions();
+    });
+
+    async function saveOptions() {
+        options.autoOpen = document.querySelector('input[name="autoOpen"]:checked').value;
+        options.updateProgramsInterval = document.querySelector('input[name="updateProgramsInterval"]:checked').value;
+
+        await chrome.storage.local.set(options);
+    }
+}
+
+function sortProgramsByViewers() {
+    const container = document.getElementById('liveProgramContainer')
+    const programs = Array.from(container.getElementsByClassName('program_container'))
+
+    // data-viewersに基づいてソート
+    programs.sort((a, b) => {
+        const viewersA = parseInt(a.getAttribute('data-viewers'), 10)
+        const viewersB = parseInt(b.getAttribute('data-viewers'), 10)
+        return viewersB - viewersA // 降順
+    })
+
+    // ソート後の要素をコンテナに再追加
+    programs.forEach(program => container.appendChild(program))
 }
