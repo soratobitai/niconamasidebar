@@ -21,7 +21,7 @@ let oneTimeFlag = true;
 let defaultOptions = {
     programsSort: 'newest',
     autoOpen: '3',
-    updateProgramsInterval: 120, // 秒
+    updateProgramsInterval: '120', // 秒
     sidebarWidth: 360,
     isOpenSidebar: isOpenSidebar,
 };
@@ -158,7 +158,7 @@ window.addEventListener('load', async function () {
     enableSidebarLine();
 
     // サイドバー　オートオープン
-    if (options.autoOpen === '1' || (options.autoOpen === '3' && options.isOpenSidebar)) {
+    if (options.autoOpen == '1' || (options.autoOpen == '3' && options.isOpenSidebar)) {
         sidebar_button.click();
     }
 
@@ -190,7 +190,7 @@ window.addEventListener('load', async function () {
     // 番組リストを取得（定期実行）
     function updateSidebarInterval() {
         updateSidebar();
-        setTimeout(updateSidebarInterval, options.updateProgramsInterval * 1000);
+        setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
     }
     updateSidebarInterval();
 
@@ -239,7 +239,7 @@ const getOptions = async () => {
     // デフォルトオプションを補完
     if (options.autoOpen === undefined) options.autoOpen = defaultOptions.autoOpen;
     if (options.programsSort === undefined) options.programsSort = defaultOptions.programsSort;
-    if (options.updateProgramsInterval === undefined) options.updateProgramsInterval = Number(defaultOptions.updateProgramsInterval);
+    if (options.updateProgramsInterval === undefined) options.updateProgramsInterval = defaultOptions.updateProgramsInterval;
     if (options.sidebarWidth === undefined) options.sidebarWidth = defaultOptions.sidebarWidth;
     if (options.isOpenSidebar === undefined) options.isOpenSidebar = defaultOptions.isOpenSidebar;
 
