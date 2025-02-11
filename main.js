@@ -50,9 +50,6 @@ const setElems = () => {
     elems.theaterButtons = document.querySelectorAll('button[class*="_theater-button_"]');
     elems.enquetePlaceholder = document.getElementById('enquete-placeholder');
     elems.playerScreenSizeSelectMenu = document.querySelector('[class*="_player-screen-size-select-menu_"]');
-
-    // 他ツール対策用
-    elems.playerDisplay = document.querySelector('[class*="_player-display_"]');
 };
 
 const url = new URL(window.location.href);
@@ -194,6 +191,12 @@ window.addEventListener('load', async function () {
     }
     updateSidebarInterval();
 
+
+    // レイアウト崩れ対策用
+    const feedbackAnchor = document.querySelector('[class*="_feedback-anchor_"]');
+    if (feedbackAnchor) {
+        feedbackAnchor.style.right = 0;
+    }
 });
 
 // データが変更されたときのイベントリスナー
@@ -429,7 +432,10 @@ const adjust_WatchPage_child = () => {
     }
 
     // 他ツール対策
-    elems.playerDisplay.removeAttribute('style');
+    const playerDisplay = document.querySelector('[class*="_player-display_"]');
+    if (playerDisplay) {
+        playerDisplay.removeAttribute('style');
+    }
 };
 
 // サイドバーOPEN/CLOSE
