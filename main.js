@@ -59,7 +59,7 @@ const loadingImageURL = chrome.runtime.getURL('images/loading.gif');
 const reloadImageURL = chrome.runtime.getURL('images/reload.png');
 const optionsImageURL = chrome.runtime.getURL('images/options.png');
 
-window.addEventListener('load', async function () {
+document.addEventListener('DOMContentLoaded', async () => {
     
     // 別窓くんポップアップ時は終了
     if (params.get('popup') === 'on') return;
