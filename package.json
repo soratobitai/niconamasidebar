@@ -1,0 +1,19 @@
+{
+  "name": "niconamasidebar",
+  "version": "1.5.5",
+  "description": "ニコ生の番組視聴ページにサイドバーを設置します。",
+  "author": "MynicoTools",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rimraf dist",
+    "watch": "vite build --watch"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "rimraf": "^5.0.0"
+  },
+  "dependencies": {}
+}

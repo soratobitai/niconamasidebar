@@ -18,7 +18,7 @@
                 "main.js"
             ],
             "css": [
-                "main.css"
+                "style.css"
             ],
             "run_at": "document_start"
         }
