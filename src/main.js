@@ -1,15 +1,16 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-
-const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox.content.php';
-//const notifyboxAPI = 'https://sp.live.nicovideo.jp/api/relive/notifybox.content.php';
-const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
+import { sidebarMinWidth, maxSaveProgramInfos, updateThumbnailInterval, toDolistsInterval } from './config/constants.js'
+import { liveStatusPollInterval } from './config/constants.js'
+import { debounce } from './utils/dom.js'
+import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, getProgramInfos as getProgramInfosFromStorage, upsertProgramInfo as upsertProgramInfoFromStorage } from './services/storage.js'
+import { fetchLivePrograms, fetchProgramInfo } from './services/api.js'
+import { makeProgramsHtml, calculateActivePoint, attachThumbnailErrorHandlers, updateThumbnailsFromStorage, sortProgramsByActivePoint, buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
+import { createSidebarControl } from './ui/sidebarControl.js'
+import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
+import { checkLiveStatus } from './services/status.js'
 
 const toDolists = [];
-const sidebarMinWidth = 180;
-const maxSaveProgramInfos = 200;
-const updateThumbnailInterval = 20; // 秒
-const toDolistsInterval = 0.3; // 秒
 
 // タイマー管理用変数
 let thumbnailUpdateTimer = null;
@@ -18,15 +19,14 @@ let sidebarUpdateTimer = null;
 let resizeObserver_watchPage = null;
 let resizeObserver_sidebar = null;
 
-let programContainerWidth = '100%';
-let scrollbarWidth = 0;
-let windowWidth = 0;
-let windowHeight = 0;
 let sidebarWidth = sidebarMinWidth;
-let sidebarWidth_cache = 0;
 let isOpenSidebar = false;
 let isInserting = false;
 let oneTimeFlag = true;
+let onResizeHandler = null;
+let liveStatusTimer = null;
+let autoNextCountdownTimer = null;
+let autoNextScheduled = false;
 
 let defaultOptions = {
     programsSort: 'newest',
@@ -34,6 +34,7 @@ let defaultOptions = {
     updateProgramsInterval: '120', // 秒
     sidebarWidth: 360,
     isOpenSidebar: isOpenSidebar,
+    autoNextProgram: 'off',
 };
 let options = {};
 let elems = {};
@@ -76,13 +77,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // オプションを取得
     options = await getOptions();
     sidebarWidth = options.sidebarWidth;
+    isOpenSidebar = !!options.isOpenSidebar;
 
     // 各要素を定義
     setElems();
     if (!elems.root) return; // root要素が存在しない場合は終了
-
-    // ウィンドウサイズを取得
-    getWindowSize();
 
     setup();
 });
@@ -95,63 +94,133 @@ const setup = async () => {
     reflectOptions();
 
     // Watchページの幅を設定
-    adjust_WatchPage_child();
+    adjustWatchPageChild(elems);
 
     // ウィンドウサイズの変更時
-    window.addEventListener('resize', function () {
-        getWindowSize();
-        adjust_WatchPage_child();
-        setRootWidth();
-    });
+    onResizeHandler = debounce(() => {
+        adjustWatchPageChild(elems);
+        sidebarControl.setRootWidth();
+        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+    }, 150);
+    window.addEventListener('resize', onResizeHandler);
 
     // watchPageサイズ変更時（幅のみ監視）
-    let watchPageWidth = elems.watchPage.clientWidth;
+    let watchPageWidth = elems.watchPage ? elems.watchPage.clientWidth : 0;
     resizeObserver_watchPage = new ResizeObserver((entries) => {
         entries.forEach(function (entry) {
             if (entry.contentRect.width !== watchPageWidth) {
-                adjust_WatchPage_child();
+                adjustWatchPageChild(elems);
                 watchPageWidth = entry.contentRect.width;
             }
         });
     });
-    resizeObserver_watchPage.observe(elems.watchPage);
+    if (elems.watchPage) {
+    if (elems.watchPage) {
+        resizeObserver_watchPage.observe(elems.watchPage);
+    }
+    }
 
     // サイドバーのサイズ変更時
     resizeObserver_sidebar = new ResizeObserver((e) => {
-        set_program_container_width();
+        const width = elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth;
+        setProgramContainerWidth(elems, width);
 
         // ウィンドウリサイズイベントを発行（シークポジションのズレ対策）
         window.dispatchEvent(new Event('resize'));
     });
-    resizeObserver_sidebar.observe(elems.sidebar);
+    if (elems.sidebar) {
+        resizeObserver_sidebar.observe(elems.sidebar);
+    }
 
     // コメント欄　スクロールボタンを押す
     setTimeout(() => {
-        const indicator = elems.playerSection.querySelector('[class*="_indicator_"]');
+        const indicator = elems.playerSection ? elems.playerSection.querySelector('[class*="_indicator_"]') : null;
         if (indicator) indicator.click();
     }, 1000);
 
     // シアターモード切り替え時に実行
     for (let i = 0; i < elems.theaterButtons.length; i++) {
         elems.theaterButtons[i].addEventListener('click', function () {
-            adjust_WatchPage_child();
+            adjustWatchPageChild(elems);
         });
     }
 
     // 再読み込みボタン
-    reload_programs.addEventListener('click', function () {
-        updateSidebar();
-    });
+    const reloadBtn = document.getElementById('reload_programs');
+    if (reloadBtn) {
+        reloadBtn.addEventListener('click', function () {
+            updateSidebar();
+        });
+    }
 
-    // オプションボタン
-    setting_options.addEventListener('click', () => {
-        const currentHeight = getComputedStyle(optionContainer).height;
-        if (currentHeight === '0px') {
-            optionContainer.style.height = 'auto';
-        } else {
-            optionContainer.style.height = '0';
-        }
-    });
+    // オプションボタン（ポップアップ）
+    const optionsBtn = document.getElementById('setting_options');
+    const optionContainerEl2 = document.getElementById('optionContainer');
+    if (optionsBtn && optionContainerEl2) {
+        const placePopup = () => {
+            if (!optionContainerEl2.classList.contains('show')) return;
+            const btnRect = optionsBtn.getBoundingClientRect();
+            const popupRect = optionContainerEl2.querySelector('.container')?.getBoundingClientRect();
+
+            const margin = 6; // ボタンのすぐ下に余白
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+
+            const popupWidth = popupRect ? popupRect.width : 320;
+            const popupHeight = popupRect ? popupRect.height : 300;
+
+            let left = Math.min(btnRect.left, viewportWidth - popupWidth - margin);
+            let top = btnRect.bottom + margin;
+
+            // 下方向に収まらない場合、上に出す
+            if (top + popupHeight > viewportHeight - margin) {
+                const topCandidate = btnRect.top - margin - popupHeight;
+                if (topCandidate >= margin) top = topCandidate;
+            }
+
+            optionContainerEl2.style.left = Math.max(margin, left) + 'px';
+            optionContainerEl2.style.top = Math.max(margin, top) + 'px';
+        };
+
+        const openPopup = () => {
+            optionContainerEl2.classList.add('show');
+            placePopup();
+            // 位置再計算リスナー
+            window.addEventListener('resize', placePopup);
+            window.addEventListener('scroll', placePopup, true);
+            if (elems.sidebar) elems.sidebar.addEventListener('scroll', placePopup, { passive: true });
+            document.addEventListener('keydown', onKeydown, true);
+            document.addEventListener('click', onDocClick, true);
+        };
+
+        const closePopup = () => {
+            optionContainerEl2.classList.remove('show');
+            optionContainerEl2.style.left = '-9999px';
+            optionContainerEl2.style.top = '-9999px';
+            window.removeEventListener('resize', placePopup);
+            window.removeEventListener('scroll', placePopup, true);
+            if (elems.sidebar) elems.sidebar.removeEventListener('scroll', placePopup, { passive: true });
+            document.removeEventListener('keydown', onKeydown, true);
+            document.removeEventListener('click', onDocClick, true);
+        };
+
+        const onKeydown = (e) => {
+            if (e.key === 'Escape') closePopup();
+        };
+
+        const onDocClick = (e) => {
+            if (!optionContainerEl2.classList.contains('show')) return;
+            if (optionContainerEl2.contains(e.target) || optionsBtn.contains(e.target)) return;
+            closePopup();
+        };
+
+        optionsBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (optionContainerEl2.classList.contains('show')) closePopup();
+            else openPopup();
+        });
+    }
 
     // 画面サイズ（固定・自動）切替時（変更時サイズが変更されないため強制する）
     document.addEventListener('click', function () {
@@ -159,34 +228,49 @@ const setup = async () => {
     });
 
     // サイドバーOPEN/CLOSEボタン
-    sidebar_button.addEventListener('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
+    const state = {
+        sidebarWidth: { value: sidebarWidth },
+        isOpenSidebar: { value: isOpenSidebar },
+    };
+    const sidebarControl = createSidebarControl(elems, state);
+    const sidebarBtn = document.getElementById('sidebar_button');
+    if (sidebarBtn) {
+        sidebarBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
 
-        toggleSidebar();
-    });
-
-    // サイドバー境界線ドラッグ可能にする
-    enableSidebarLine();
-
-    // サイドバー　オートオープン
-    if (options.autoOpen == '1' || (options.autoOpen == '3' && options.isOpenSidebar)) {
-        sidebar_button.click();
+            sidebarControl.toggleSidebar();
+            setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+        });
     }
 
-    // 番組リストを取得
-    await updateSidebar();
+    // サイドバー境界線ドラッグ可能にする
+    sidebarControl.enableSidebarLine();
 
-    // サムネイル定期更新を開始
-    startThumbnailUpdate();
+    // 初期開閉状態の適用（直接open/close）
+    const shouldOpenAtStart = (options.autoOpen == '1') || (options.autoOpen == '3' && !!options.isOpenSidebar);
+    if (shouldOpenAtStart) {
+        state.isOpenSidebar.value = true;
+        isOpenSidebar = true;
+        options.isOpenSidebar = true;
+        sidebarControl.openSidebar();
+        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+        await handleSidebarOpenStateChange(true);
+    } else {
+        state.isOpenSidebar.value = false;
+        isOpenSidebar = false;
+        options.isOpenSidebar = false;
+        sidebarControl.closeSidebar();
+        setProgramContainerWidth(elems, 0);
+        handleSidebarOpenStateChange(false);
+    }
 
-    // todoリストを実行
-    startToDoListUpdate();
+    sidebarControl.setRootWidth();
 
-    // 番組リストを取得（定期実行）
-    startSidebarUpdate();
-
-    setRootWidth();
+    // 自動移動ウォッチャー開始（必要なら）
+    if (options.autoNextProgram === 'on') {
+        startLiveStatusWatcher();
+    }
 
     // レイアウト崩れ対策用
     const feedbackAnchor = document.querySelector('[class*="_feedback-anchor_"]');
@@ -214,6 +298,14 @@ const cleanup = () => {
         clearTimeout(sidebarUpdateTimer);
         sidebarUpdateTimer = null;
     }
+    if (liveStatusTimer) {
+        clearInterval(liveStatusTimer);
+        liveStatusTimer = null;
+    }
+    if (autoNextCountdownTimer) {
+        clearInterval(autoNextCountdownTimer);
+        autoNextCountdownTimer = null;
+    }
 
     // ResizeObserverを切断
     if (resizeObserver_watchPage) {
@@ -223,6 +315,44 @@ const cleanup = () => {
     if (resizeObserver_sidebar) {
         resizeObserver_sidebar.disconnect();
         resizeObserver_sidebar = null;
+    }
+    teardownThumbnailVisibilityObserver();
+    if (onResizeHandler) {
+        window.removeEventListener('resize', onResizeHandler);
+        onResizeHandler = null;
+    }
+    hideAutoNextModal();
+}
+
+// すべての更新タイマーを停止
+function stopAllTimers() {
+    if (thumbnailUpdateTimer) {
+        clearTimeout(thumbnailUpdateTimer);
+        thumbnailUpdateTimer = null;
+    }
+    if (toDoListTimer) {
+        clearInterval(toDoListTimer);
+        toDoListTimer = null;
+    }
+    if (sidebarUpdateTimer) {
+        clearTimeout(sidebarUpdateTimer);
+        sidebarUpdateTimer = null;
+    }
+}
+
+// 開いたときに即時更新しつつ、各タイマーを開始
+async function handleSidebarOpenStateChange(open) {
+    if (open) {
+        // すばやく最新化
+        await updateSidebar();
+        updateThumbnail();
+        initThumbnailVisibilityObserver();
+        if (!thumbnailUpdateTimer) startThumbnailUpdate();
+        if (!toDoListTimer) startToDoListUpdate();
+        if (!sidebarUpdateTimer) startSidebarUpdate();
+    } else {
+        stopAllTimers();
+        teardownThumbnailVisibilityObserver();
     }
 }
 
@@ -258,6 +388,133 @@ const startSidebarUpdate = () => {
     sidebarUpdateTimer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
 }
 
+// 自動次番組モーダル生成と表示/非表示
+function ensureAutoNextModal() {
+    let modal = document.getElementById('auto_next_modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'auto_next_modal';
+    modal.innerHTML = `
+<div class="backdrop"></div>
+<div class="dialog">
+  <div class="title">ニコ生サイドバーによる自動移動</div>
+  <div class="message"><span id="auto_next_count">10</span>秒後に次の番組へ移動します。</div>
+  <div class="preview">
+    <div id="auto_next_provider" class="preview-provider"></div>
+    <div class="thumb"><img id="auto_next_thumb" alt=""></div>
+    <div id="auto_next_title" class="preview-title"></div>
+  </div>
+  <div class="actions">
+    <button id="auto_next_cancel">キャンセル</button>
+  </div>
+</div>`;
+    document.body.appendChild(modal);
+    return modal;
+}
+
+function showAutoNextModal(seconds, preview, onCancel) {
+    const modal = ensureAutoNextModal();
+    const countEl = modal.querySelector('#auto_next_count');
+    const cancelBtn = modal.querySelector('#auto_next_cancel');
+    if (countEl) countEl.textContent = String(seconds);
+
+    // プレビュー設定
+    try {
+        const thumbEl = modal.querySelector('#auto_next_thumb');
+        const titleEl = modal.querySelector('#auto_next_title');
+        const providerEl = modal.querySelector('#auto_next_provider');
+        if (thumbEl && preview && preview.thumb) thumbEl.src = preview.thumb;
+        if (titleEl && preview && typeof preview.title === 'string') titleEl.textContent = preview.title;
+        if (providerEl && preview && typeof preview.provider === 'string') providerEl.textContent = preview.provider;
+    } catch (_e) {}
+    modal.classList.add('show');
+    const onCancelHandler = (e) => {
+        e.preventDefault();
+        hideAutoNextModal();
+        if (typeof onCancel === 'function') onCancel();
+    };
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', onCancelHandler, { once: true });
+    }
+}
+
+function hideAutoNextModal() {
+    const modal = document.getElementById('auto_next_modal');
+    if (modal) modal.classList.remove('show');
+}
+
+function scheduleAutoNextNavigation(nextHref, preview) {
+    let remaining = 10;
+    showAutoNextModal(remaining, preview, () => {
+        if (autoNextCountdownTimer) {
+            clearInterval(autoNextCountdownTimer);
+            autoNextCountdownTimer = null;
+        }
+        autoNextScheduled = true;
+    });
+    const modal = ensureAutoNextModal();
+    const countEl = modal.querySelector('#auto_next_count');
+    autoNextCountdownTimer = setInterval(() => {
+        remaining -= 1;
+        if (countEl) countEl.textContent = String(Math.max(0, remaining));
+        if (remaining <= 0) {
+            clearInterval(autoNextCountdownTimer);
+            autoNextCountdownTimer = null;
+            hideAutoNextModal();
+            try { location.assign(nextHref); } catch (_e) {}
+        }
+    }, 1000);
+}
+
+// 視聴中番組の終了監視
+function startLiveStatusWatcher() {
+    stopLiveStatusWatcher();
+    liveStatusTimer = setInterval(async () => {
+        try {
+            const status = await checkLiveStatus();
+            if (status === 'ON_AIR') {
+                autoNextScheduled = false;
+                return;
+            }
+            if (!status || status === 'ERROR') return;
+            if (autoNextScheduled) return;
+
+            await updateSidebar();
+            const firstLink = document.querySelector('#liveProgramContainer .program_container .program_thumbnail a');
+            if (firstLink && firstLink.href && location.href !== firstLink.href) {
+                autoNextScheduled = true;
+                // プレビュー情報抽出
+                let preview = null;
+                try {
+                    const card = firstLink.closest('.program_container');
+                    const imgEl = card ? card.querySelector('.program_thumbnail_img') : null;
+                    const titleEl = card ? card.querySelector('.program_title') : null;
+                    const providerEl = card ? card.querySelector('.community_name') : null;
+                    preview = {
+                        href: firstLink.href,
+                        thumb: imgEl && imgEl.src ? imgEl.src : '',
+                        title: titleEl && titleEl.textContent ? titleEl.textContent.trim() : '',
+                        provider: providerEl && providerEl.textContent ? providerEl.textContent.trim() : '',
+                    };
+                } catch (_e) {}
+                scheduleAutoNextNavigation(firstLink.href, preview);
+            }
+        } catch (_e) {}
+    }, liveStatusPollInterval * 1000);
+}
+
+function stopLiveStatusWatcher() {
+    if (liveStatusTimer) {
+        clearInterval(liveStatusTimer);
+        liveStatusTimer = null;
+    }
+    if (autoNextCountdownTimer) {
+        clearInterval(autoNextCountdownTimer);
+        autoNextCountdownTimer = null;
+    }
+    hideAutoNextModal();
+}
+
 // データが変更されたときのイベントリスナー
 chrome.storage.onChanged.addListener(function (changes) {
     let needsRestart = false;
@@ -271,10 +528,17 @@ chrome.storage.onChanged.addListener(function (changes) {
     if (changes.isOpenSidebar) {
         options.isOpenSidebar = changes.isOpenSidebar.newValue;
         isOpenSidebar = changes.isOpenSidebar.newValue;
+        // 開閉に応じて停止/再開・即時更新
+        handleSidebarOpenStateChange(isOpenSidebar);
     }
     if (changes.sidebarWidth) {
         options.sidebarWidth = changes.sidebarWidth.newValue;
         sidebarWidth = changes.sidebarWidth.newValue;
+    }
+    if (changes.autoNextProgram) {
+        options.autoNextProgram = changes.autoNextProgram.newValue;
+        if (options.autoNextProgram === 'on') startLiveStatusWatcher();
+        else stopLiveStatusWatcher();
     }
 
     // 更新間隔が変更された場合はタイマーを再起動
@@ -292,169 +556,19 @@ const restartSidebarUpdate = () => {
     startSidebarUpdate();
 }
 
-// サムネ取得エラー時
-function onThumbnailError() {
-    // 既存のエラーイベントリスナーを削除（重複を防ぐ）
-    document.querySelectorAll('.program_thumbnail_img').forEach(function (element) {
-        // 既存のイベントリスナーを削除
-        element.removeEventListener('error', handleThumbnailError);
-        // 新しいイベントリスナーを追加
-        element.addEventListener('error', handleThumbnailError);
-    });
-}
-
-// サムネイルエラーハンドラー（関数として分離）
-function handleThumbnailError() {
-    const dataSrc = this.getAttribute("data-src");
-    if (dataSrc && this.src !== dataSrc) {
-        this.src = dataSrc;
-    } else {
-        this.src = loadingImageURL;
-    }
-}
-
-// ウィンドウサイズを取得
-const getWindowSize = () => {
-    scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    windowWidth = window.innerWidth;
-    windowHeight = window.innerHeight;
-};
-
 // オプションを取得
-const getOptions = async () => {
-    try {
-        const options = await new Promise((resolve, reject) => {
-            chrome.storage.local.get((result) => {
-                if (chrome.runtime.lastError) {
-                    reject(chrome.runtime.lastError);
-                } else {
-                    resolve(result);
-                }
-            });
-        });
-
-        // デフォルトオプションを補完
-        const mergedOptions = { ...defaultOptions, ...options };
-
-        // 補完後のオプションを保存
-        await new Promise((resolve, reject) => {
-            chrome.storage.local.set(mergedOptions, () => {
-                if (chrome.runtime.lastError) {
-                    reject(chrome.runtime.lastError);
-                } else {
-                    resolve();
-                }
-            });
-        });
-
-        return mergedOptions;
-    } catch (error) {
-        // console.error('オプション取得エラー:', error);
-        return defaultOptions;
-    }
-};
+const getOptions = async () => getOptionsFromStorage(defaultOptions);
 
 // サイドバー要素を挿入
 const insertSidebar = () => {
-    const sidebarHtml = `<div id="sidebar" class="sidebar_transition">
-                            <div id="sidebar_container">
-                                <div class="sidebar_header">
-                                    <div class="sidebar_header_item">
-                                        <a href="https://live.nicovideo.jp/follow" title="フォロー中の番組ページへ">
-                                            フォロー中の番組
-                                            <div id="program_count"></div>
-                                        </a>
-                                    </div>
-                                    <div class="sidebar_header_item">
-                                        <div class="sidebar_header_item_col" id="reload_programs" title="更新">
-                                            <img src='${reloadImageURL}' alt="更新">
-                                        </div>
-                                        <div class="sidebar_header_item_col" id="setting_options" title="オプション">
-                                            <img src='${optionsImageURL}' alt="オプション">
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="sidebar_body">
-                                    <div id="api_error">
-                                        <a href="https://account.nicovideo.jp/login">ログイン</a>
-                                    </div>
-                                    <div id="optionContainer">
-                                    </div>
-                                    <div id="liveProgramContainer">
-                                    </div>
-                                </div>
-                            </div>
-                        </div>`;
-    
-    const sidebar_line_html = `<div id="sidebar_line"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`;
-
-    const optionHtml = `<div class="container">
-                            <h1>オプション</h1>
-                            <form id="optionForm">
-                                <h2>表示順序</h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="programsSort1" name="programsSort" value="newest">
-                                        <label for="programsSort1">新着順</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="programsSort2" name="programsSort" value="active">
-                                        <label for="programsSort2">人気順</label>
-                                    </div>
-                                </div>
-                                <h2>自動更新</h2>
-                                <p>
-                                    番組リストを指定秒数で自動更新します。（サイドバー内の更新ボタンで手動で更新することもできます）<br>
-                                    サムネイル画像はこの設定とは関係なく自動更新されます。（20~60秒）
-                                </p>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval1" name="updateProgramsInterval" value="60">
-                                        <label for="updateProgramsInterval1">60秒</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval2" name="updateProgramsInterval" value="120">
-                                        <label for="updateProgramsInterval2">120秒</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval3" name="updateProgramsInterval" value="180">
-                                        <label for="updateProgramsInterval3">180秒</label>
-                                    </div>
-                                </div>
-                                <h2>オートオープン</h2>
-                                <p>
-                                    サイドバーを自動で開くかどうかを設定します。
-                                </p>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen1" name="autoOpen" value="1">
-                                        <label for="autoOpen1">ON</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen2" name="autoOpen" value="2">
-                                        <label for="autoOpen2">OFF</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen3" name="autoOpen" value="3">
-                                        <label for="autoOpen3">ページを閉じる前の状態を記憶</label>
-                                    </div>
-                                </div>
-                            </form>
-                        </div>`;
-    
-    document.body.insertAdjacentHTML('afterbegin', sidebarHtml + sidebar_line_html);
-
-    optionContainer.insertAdjacentHTML('beforeend', optionHtml);
+    const { sidebarHtml, sidebarLine, optionHtml } = buildSidebarShell({ reloadImageURL, optionsImageURL });
+    document.body.insertAdjacentHTML('afterbegin', sidebarHtml + sidebarLine);
+    const optionContainerEl = document.getElementById('optionContainer');
+    if (optionContainerEl) {
+        optionContainerEl.insertAdjacentHTML('beforeend', optionHtml);
+        // サイドバー外にはみ出しても見えるように、body直下へ移動
+        document.body.appendChild(optionContainerEl);
+    }
 
     // 各要素を定義
     elems.sidebar = document.getElementById('sidebar');
@@ -468,246 +582,23 @@ const insertSidebar = () => {
     elems.root.style.flexGrow = '1';
 };
 
-const adjust_WatchPage_child = () => {
-
-    let maxWidth = 1024 + 'px';
-    let minWidth = 1024 + 'px';
-    let width = 1024 + 'px';
-    let watchPage_child = [
-        elems.playerSection,
-        elems.programInformationBodyArea,
-        elems.siteFooterUtility,
-        elems.gaNsProgramSummary,
-        elems.enquetePlaceholder
-    ]
-
-    const watchPageWidth = elems.watchPage.clientWidth;
-
-    if (isScreenSizeAuto()) {
-
-        if (watchPageWidth > (1152) && watchPageWidth < (1500)) {
-            maxWidth = (watchPageWidth - 128) + 'px';
-            minWidth = 1024 + 'px';
-            width = ((windowHeight * 1.777778) - 3.55556) + 'px';
-        }
-        if (watchPageWidth > (1500) && watchPageWidth < (1792)) {
-            maxWidth = (watchPageWidth - 128) + 'px';
-            minWidth = 1024 + 'px';
-            width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-        }
-        if (watchPageWidth > (1792)) {
-            maxWidth = 1664 + 'px';
-            minWidth = 1024 + 'px';
-            width = ((windowHeight * 1.777778) - 220.44444) + 'px';
-        }
-    }
-
-    if (isFullScreen()) {
-        maxWidth = '100%';
-        minWidth = '100%';
-        width = '100%';
-    }
-
-    // プレイヤー幅など設定
-    watchPage_child.forEach((elem) => {
-        elem.style.maxWidth = maxWidth;
-        elem.style.minWidth = minWidth;
-        elem.style.width = width;
-    });
-
-    // シアターモード時
-    if (elems.watchPage.hasAttribute('data-player-layout-mode') && isScreenSizeAuto()) {
-        elems.playerSection.style.maxWidth = 'none';
-        elems.playerSection.style.width = 'auto';
-        elems.leoPlayer.style.height = ((elems.root.clientWidth * 0.5625) - 164) + 'px';
-    } else {
-        elems.leoPlayer.style.height = 'auto';
-    }
-
-    // 他ツール対策
-    const playerDisplay = document.querySelector('[class*="_player-display_"]');
-    if (playerDisplay) {
-        playerDisplay.removeAttribute('style');
-    }
-};
-
-// サイドバーOPEN/CLOSE
-const toggleSidebar = () => {
-
-    isOpenSidebar = !isOpenSidebar;
-    options.isOpenSidebar = isOpenSidebar; // optionsも更新
-
-    if (isOpenSidebar) {
-        openSidebar();
-    } else {
-        closeSidebar();
-    }
-
-    // サイドバー開閉を記憶
-    chrome.storage.local.set({ 'isOpenSidebar': isOpenSidebar });
-};
-
-// サイドバーOPEN
-const openSidebar = () => {
-    if (sidebarWidth < sidebarMinWidth) sidebarWidth = sidebarMinWidth;
-    elems.sidebar.style.width = sidebarWidth + 'px';
-    elems.sidebar.style.maxWidth = sidebarWidth + 'px';
-    elems.sidebar.style.minWidth = sidebarWidth + 'px';
-    elems.sidebar_container.style.width = sidebarWidth + 'px';
-
-    sidebar_arrow.classList.add('sidebar_arrow_re');
-    elems.sidebar_line.classList.add('col_resize');
-    setRootWidth();
-};
-// サイドバーCLOSE
-const closeSidebar = () => {
-    elems.sidebar.style.width = 0 + 'px';
-    elems.sidebar.style.maxWidth = 0 + 'px';
-    elems.sidebar.style.minWidth = 0 + 'px';
-
-    sidebar_arrow.classList.remove('sidebar_arrow_re');
-    elems.sidebar_line.classList.remove('col_resize');
-    setRootWidth();
-};
-
-// サイドバー境界線　ドラッグ変更
-const enableSidebarLine = () => {
-
-    let startX, startWidth;
-
-    elems.sidebar_line.addEventListener('mousedown', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (!isOpenSidebar) return;
-        if (e.target.id === 'sidebar_button' || e.target.id === 'sidebar_arrow') return;
-
-        elems.sidebar.classList.remove('sidebar_transition');
-
-        startX = e.clientX;
-        startWidth = parseInt(document.defaultView.getComputedStyle(elems.sidebar).width, 10);
-        document.documentElement.addEventListener('mousemove', onMouseMove);
-        document.documentElement.addEventListener('mouseup', onMouseUp);
-    });
-
-    function onMouseMove(e) {
-        
-        let width = startWidth + (e.clientX - startX);
-        if (width < sidebarMinWidth) {
-            width = sidebarMinWidth;
-        }
-
-        elems.sidebar.style.width = width + 'px';
-        elems.sidebar.style.maxWidth = width + 'px';
-        elems.sidebar.style.minWidth = width + 'px';
-        elems.sidebar_container.style.width = width + 'px';
-        sidebarWidth = width;
-    }
-
-    function onMouseUp(e) {
-        elems.sidebar.classList.add('sidebar_transition');
-        document.documentElement.removeEventListener('mousemove', onMouseMove);
-        document.documentElement.removeEventListener('mouseup', onMouseUp);
-        options.sidebarWidth = sidebarWidth; // optionsも更新
-        chrome.storage.local.set({ 'sidebarWidth': sidebarWidth });
-        setRootWidth();
-    }
-};
-
-// rootの幅を設定する関数
-const setRootWidth = () => {
-    if (!elems.root || !elems.sidebar) return;
-    
-    const actualSidebarWidth = elems.sidebar.offsetWidth;
-    const calculatedWidth = windowWidth - actualSidebarWidth - 20;
-    elems.root.style.width = calculatedWidth + 'px';
-    elems.root.style.maxWidth = calculatedWidth + 'px';
-};
-
-// プレーヤーサイズが固定かどうか
-function isScreenSizeAuto() {
-    const value = localStorage.getItem('LeoPlayer_ScreenSizeStore_kind');
-    if (!value) return true;
-    return value.includes('auto');
-}
-
-// フルスクリーンがONかどうか
-function isFullScreen() {
-    const htmlTag = document.getElementsByTagName('html')[0];
-    return htmlTag.hasAttribute('data-browser-fullscreen');
-}
-
-function set_program_container_width() {
-
-    if (sidebarWidth < 300) programContainerWidth = 100 + '%';
-    if (sidebarWidth > 300) programContainerWidth = 100 / 2 + '%';
-    if (sidebarWidth > 500) programContainerWidth = 100 / 3 + '%';
-    if (sidebarWidth > 700) programContainerWidth = 100 / 4 + '%';
-    if (sidebarWidth > 900) programContainerWidth = 100 / 5 + '%';
-    if (sidebarWidth > 1100) programContainerWidth = 100 / 6 + '%';
-    if (sidebarWidth > 1300) programContainerWidth = 100 / 7 + '%';
-    if (sidebarWidth > 1500) programContainerWidth = 100 / 8 + '%';
-
-    document.querySelectorAll('.program_container').forEach(element => {
-        element.style.width = programContainerWidth;
-
-        const program_thumbnail = element.querySelector('.program_thumbnail');
-        program_thumbnail.style.width = programContainerWidth + 'px';
-    });
-} 
-
 async function getLivePrograms(rows = 100) {
-    try {
-        let response = await fetch(`${notifyboxAPI}?rows=${rows}`, { credentials: 'include' });
-        response = await response.json();
-
-        if (response.meta?.status !== 200 || !response.data) throw new Error('APIエラー');
-        if (!response.data.notifybox_content) throw new Error('APIエラー');
-
-        elems.apiErrorElement.style.display = 'none';
-
-        return response.data.notifybox_content;
-
-    } catch (error) {
-        // console.log(error);
-        elems.apiErrorElement.style.display = 'block';
-        return false;
+    const result = await fetchLivePrograms(rows);
+    if (elems.apiErrorElement) {
+        elems.apiErrorElement.style.display = result ? 'none' : 'block';
     }
+    return result;
 }
 
 async function getProgramInfo_and_saveLocalStorage(liveId) {
     try {
-        let response = await fetch(`${liveInfoAPI}/lv${liveId}`);
-        response = await response.json();
-        if (response.meta?.status !== 200 || !response.data) return;
-
-        // サムネがセットされていない場合はスルー
-        if (response.data.providerType === 'user' &&
-            !response.data.liveScreenshotThumbnailUrls) return;
-
-        // localStorageからサムネ情報を取得
-        let programInfos = JSON.parse(localStorage.getItem('programInfos')) || [];
-
-        // 既存のデータに同じ id がある場合は入れ替え
-        const existingIndex = programInfos.findIndex((info) => info.id === `lv${liveId}`);
-        if (existingIndex !== -1) {
-            programInfos[existingIndex] = response.data; // 上書き
-        } else {
-            programInfos.push(response.data); // 新規追加
-        }
-
-        // localStorageに保存されたprogramInfosがmaxSaveProgramInfosを超えたら削除
-        while (programInfos.length > maxSaveProgramInfos) {
-            programInfos.shift();
-        }
-
-        // localStorageに保存
-        localStorage.setItem('programInfos', JSON.stringify(programInfos));
-
+        const data = await fetchProgramInfo(liveId);
+        if (!data) return;
+        if (data.providerType === 'user' && !data.liveScreenshotThumbnailUrls) return;
+        upsertProgramInfoFromStorage(data);
         updateThumbnail();
-
-    } catch (error) {
-        // console.log(error);
+    } catch (_e) {
+        // no-op
     }
 }
 
@@ -716,34 +607,46 @@ async function updateSidebar() {
     isInserting = true;
 
     // localStorageから番組情報を取得
-    const programInfos = JSON.parse(localStorage.getItem('programInfos')) || [];
+    const programInfos = getProgramInfosFromStorage();
 
     const livePrograms = await getLivePrograms(100);
     if (!livePrograms) return;
 
-    let html = '';
+    const container = document.getElementById('liveProgramContainer');
+    const frag = document.createDocumentFragment();
+    const existingMap = new Map();
+    if (container) {
+        Array.from(container.children).forEach((el) => {
+            if (el && el.id) existingMap.set(el.id, el);
+        });
+    }
+
     livePrograms.forEach(function (program) {
-        // データの整合性チェック
-        if (!program || !program.id) {
-            // console.warn('Invalid program data:', program);
-            return;
-        }
+        if (!program || !program.id) return;
 
         const data = programInfos.find((info) => info.id === `lv${program.id}`);
+        const id = String(program.id);
+        const existing = existingMap.get(id);
 
-        // HTML作成
-        if (data) {
-            html += makeProgramsHtml(data);
+        if (existing) {
+            // 軽い更新（属性・タイトル・リンク先）
+            existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
+            const titleEl = existing.querySelector('.program_title');
+            if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
+            const linkEl = existing.querySelector('.program_thumbnail a');
+            if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
+            frag.appendChild(existing);
         } else {
-            html += makeProgramsHtml(program);
+            const html = data ? makeProgramsHtml(data, loadingImageURL) : makeProgramsHtml(program, loadingImageURL);
+            const temp = document.createElement('div');
+            temp.innerHTML = html;
+            if (temp.firstElementChild) frag.appendChild(temp.firstElementChild);
         }
 
-        // todoリストを更新
         if (!toDolists.includes(program.id)) {
             toDolists.push(program.id);
-            // toDolistsのサイズ制限（メモリリーク防止）
             if (toDolists.length > maxSaveProgramInfos) {
-                toDolists.shift(); // 古いものから削除
+                toDolists.shift();
             }
         }
     });
@@ -756,15 +659,18 @@ async function updateSidebar() {
         return;
     }
     
-    liveProgramContainer.innerText = '';
-
-    // 挿入
-    liveProgramContainer.insertAdjacentHTML('beforeend', html);
+    // 挿入（置き換え）
+    liveProgramContainer.replaceChildren(frag);
+    // 監視対象を更新
+    refreshThumbnailObservations();
 
     // ソート
-    if (options.programsSort === 'active') sortProgramsByActivePoint();
+    if (options.programsSort === 'active') {
+        const container = document.getElementById('liveProgramContainer');
+        if (container) sortProgramsByActivePoint(container);
+    }
 
-    set_program_container_width();
+    setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
     isInserting = false;
 
     // 番組数更新
@@ -773,156 +679,15 @@ async function updateSidebar() {
         programCountElement.textContent = livePrograms.length ? livePrograms.length : 0;
     }
 
-    onThumbnailError();
-}
-
-function makeProgramsHtml(data) {
-    // データの整合性チェック
-    if (!data) {
-        // console.warn('makeProgramsHtml: data is null or undefined');
-        return '';
-    }
-
-    // 必須プロパティのチェック
-    if (!data.id) {
-        // console.warn('makeProgramsHtml: data.id is missing', data);
-        return '';
-    }
-
-    const id = data.id.replace('lv', '');
-    let user_page_url = '';
-    let community_name = '';
-    let thumbnail_link_url = '';
-    let thumbnail_url = '';
-    let icon_url = '';
-    let live_thumbnail_url = '';
-    let title = data.title || 'タイトル不明';
-    
-    if (data.id.includes('lv')) {
-        // contentOwnerの存在チェック
-        if (data.contentOwner && data.contentOwner.id) {
-            user_page_url = `https://www.nicovideo.jp/user/${data.contentOwner.id}`;
-        }
-        community_name = data.contentOwner?.name || 'コミュニティ名不明';
-        thumbnail_link_url = `https://live.nicovideo.jp/watch/${data.id}`;
-        thumbnail_url = data.thumbnailUrl || '';
-        icon_url = data.contentOwner?.icon || '';
-
-        if (data.providerType === 'user') {
-            live_thumbnail_url = data.thumbnailUrl || '';
-            if (data.liveScreenshotThumbnailUrls && data.liveScreenshotThumbnailUrls.middle) {
-                live_thumbnail_url = `${data.liveScreenshotThumbnailUrls.middle}?cache=${Date.now()}`;
-            }
-        }
-        if (data.providerType === 'channel') {
-            if (data.contentOwner && data.contentOwner.id) {
-                user_page_url = `https://ch.nicovideo.jp/${data.contentOwner.id}`;
-            }
-            live_thumbnail_url = data.thumbnailUrl || '';
-            if (data.large1280x720ThumbnailUrl) {
-                live_thumbnail_url = data.large1280x720ThumbnailUrl;
-            }
-        }
-    } else {
-        // 古いデータ形式の場合
-        community_name = data.community_name || 'コミュニティ名不明';
-        thumbnail_link_url = data.thumbnail_link_url || '';
-        thumbnail_url = data.thumbnail_url || '';
-        icon_url = data.thumbnail_url || '';
-        live_thumbnail_url = data.thumbnail_url || '';
-
-        // ユーザーページのURLを取得
-        if (thumbnail_url) {
-            const match = thumbnail_url.match(/\/(\d+)\.jpg/i);
-            if (match) user_page_url = `https://www.nicovideo.jp/user/${match[1]}`;
-        }
-    }
-
-    // サムネイルURLのフォールバック
-    if (!live_thumbnail_url) {
-        live_thumbnail_url = thumbnail_url || loadingImageURL;
-    }
-    if (!thumbnail_url) {
-        thumbnail_url = loadingImageURL;
-    }
-
-    let userIconHtml = ``;
-    if (user_page_url && icon_url) {
-        userIconHtml = `<a href="${user_page_url}" target="_blank"><img src="${icon_url}"></a>`;
-    } else if (icon_url) {
-        userIconHtml = `<img src="${icon_url}">`;
-    }
-
-    // アクティブポイントを算出
-    const activePoint = calculateActivePoint(data);
-
-    return `<div id="${id}" class="program_container" active-point="${activePoint}">
-                <div class="community">
-                    ${userIconHtml}
-                    <div class="community_name" title="${escapeHtml(community_name)}">
-                        ${escapeHtml(community_name)}
-                    </div>
-                </div>
-                <div class="program_thumbnail program-card_">
-                    <a href="${thumbnail_link_url}">
-                        <img class="program_thumbnail_img" src="${live_thumbnail_url}" data-src="${thumbnail_url}">
-                    </a>
-                </div>
-                <div class="program_title" title="${escapeHtml(title)}">
-                    ${escapeHtml(title)}
-                </div>
-            </div>`;
+    attachThumbnailErrorHandlers();
 }
 
 function updateThumbnail() {
     if (isInserting) return;
 
-    // localStorageから番組情報を取得
-    const programInfos = JSON.parse(localStorage.getItem('programInfos'));
+    const programInfos = getProgramInfosFromStorage();
     if (!programInfos) return;
-
-    document.querySelectorAll('.program_thumbnail').forEach((el) => {
-        if (!el) return;
-
-        const thumbnail = el.querySelector('img');
-        if (!thumbnail) return;
-
-        const thumbnail_url = thumbnail.getAttribute('src');
-        if (!thumbnail_url) return;
-
-        if (thumbnail_url.includes('?cache=')) {
-            const match = thumbnail_url.match(/^.+?\?cache=/);
-            if (match) {
-                thumbnail.src = `${match[0]}${Date.now()}`;
-            }
-        } else {
-            // 番組情報を取得
-            const parentElement = el.parentElement;
-            if (!parentElement || !parentElement.id) return;
-
-            const programInfo = programInfos.find(info => info.id === `lv${parentElement.id}`);
-            if (!programInfo) return;
-            
-            // コミュ限はスルー
-            if (programInfo.isMemberOnly) return;
-
-            if (programInfo.providerType === 'user') {
-                if (programInfo.liveScreenshotThumbnailUrls &&
-                    programInfo.liveScreenshotThumbnailUrls.middle
-                ) {
-                    thumbnail.src = `${programInfo.liveScreenshotThumbnailUrls.middle}?cache=${Date.now()}`;
-                }
-            }
-            if (programInfo.providerType === 'channel') {
-                if (programInfo.thumbnailUrl) {
-                    thumbnail.src = programInfo.thumbnailUrl;
-                }
-                if (programInfo.large1280x720ThumbnailUrl) {
-                    thumbnail.src = programInfo.large1280x720ThumbnailUrl;
-                }
-            }
-        }
-    });
+    updateThumbnailsFromStorage(programInfos);
 }
 
 /**
@@ -943,8 +708,9 @@ const reflectOptions = () => {
             const autoOpenElement = document.querySelector('input[name="autoOpen"]:checked');
             const updateProgramsIntervalElement = document.querySelector('input[name="updateProgramsInterval"]:checked');
             const programsSortElement = document.querySelector('input[name="programsSort"]:checked');
+            const autoNextProgramElement = document.querySelector('input[name="autoNextProgram"]:checked');
 
-            if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement) {
+            if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
                 // console.warn('オプション設定が不完全です');
                 return;
             }
@@ -952,12 +718,9 @@ const reflectOptions = () => {
             options.autoOpen = autoOpenElement.value;
             options.updateProgramsInterval = updateProgramsIntervalElement.value;
             options.programsSort = programsSortElement.value;
+            options.autoNextProgram = autoNextProgramElement.value;
 
-            chrome.storage.local.set(options, (result) => {
-                if (chrome.runtime.lastError) {
-                    // console.error('オプション保存エラー:', chrome.runtime.lastError);
-                }
-            });
+            saveOptionsToStorage(options);
         } catch (error) {
             // console.error('オプション保存エラー:', error);
         }
@@ -967,6 +730,7 @@ const reflectOptions = () => {
     updateCheckedState('programsSort', options.programsSort);
     updateCheckedState('updateProgramsInterval', options.updateProgramsInterval);
     updateCheckedState('autoOpen', options.autoOpen);
+    updateCheckedState('autoNextProgram', options.autoNextProgram);
 
     // フォームに変更があったら保存する
     document.getElementById('optionForm').addEventListener('change', (event) => {
@@ -974,61 +738,3 @@ const reflectOptions = () => {
         saveOptions();
     });
 };
-
-function sortProgramsByActivePoint() {
-
-    const container = document.getElementById('liveProgramContainer')
-    const programs = Array.from(container.getElementsByClassName('program_container'))
-
-    // active-pointに基づいてソート
-    programs.sort((a, b) => {
-        const activeA = parseFloat(a.getAttribute('active-point'), 10)
-        const activeB = parseFloat(b.getAttribute('active-point'), 10)
-        return activeB - activeA // 降順
-    })
-
-    // ソート後の要素をコンテナに再追加
-    programs.forEach(program => container.appendChild(program))
-}
-
-function calculateActivePoint(data) {
-    if (!data) return 0;
-
-    const comments = (data.comments || 0) + 1;
-    const viewers = (data.viewers || 0) + 1;
-    const elapsedTimeAdjustment = 1; // 調整係数
-
-    function calculateElapsedTime(data) {
-        if (!data?.onAirTime?.beginAt) return 1;
-
-        try {
-            const startTime = new Date(data.onAirTime.beginAt);
-            const now = new Date();
-            const elapsedMinutes = Math.floor((now - startTime) / (1000 * 60));
-            
-            // 負の値や異常に大きな値を防ぐ
-            return Math.max(1, elapsedMinutes);
-        } catch (error) {
-            // console.warn('calculateElapsedTime error:', error);
-            return 1;
-        }
-    }
-
-    const elapsedTime = calculateElapsedTime(data);
-    const activePoint = (viewers + comments) / Math.pow(elapsedTime, elapsedTimeAdjustment);
-
-    // 数値の妥当性チェック
-    return isFinite(activePoint) ? activePoint : 0;
-}
-
-// HTMLエスケープ
-function escapeHtml(text) {
-    const map = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, function (m) { return map[m]; });
-}

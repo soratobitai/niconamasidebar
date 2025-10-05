@@ -71,7 +71,8 @@ export default defineConfig({
     },
     target: 'es2015',
     minify: false,
-    sourcemap: true,
+    // 本番ビルドでは source map を出力しない
+    sourcemap: process.env.NODE_ENV !== 'production',
     cssCodeSplit: false // CSSを別ファイルとして出力
   },
   publicDir: false, // 自動コピーを無効化

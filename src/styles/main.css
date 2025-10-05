@@ -198,6 +198,7 @@
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
 }
 
 #api_error {
@@ -214,90 +215,260 @@
 
 /* オプションコンテナ */
 #optionContainer {
-    width: 100%;
-    height: 0px;
-    overflow: hidden;
+    position: fixed;
+    top: -9999px;
+    left: -9999px;
+    display: none;
+    z-index: 10000;
+}
+#optionContainer.show {
+    display: block;
 }
 #optionContainer .container {
-    margin: 20px auto;
-    padding: 15px;
-    width: 100%;
+    margin: 0;
+    padding: 12px;
+    width: 360px;
+    max-width: min(420px, calc(100vw - 24px));
+    max-height: min(70vh, calc(100vh - 24px));
     box-sizing: border-box;
     background-color: #222;
+    color: #ddd;
+    border: 1px solid #333;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    overflow: visible;
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 #optionContainer h1 {
-    font-size: 1.8rem;
+    font-size: 1.1em;
     font-weight: bold;
-    margin: 2rem 0 1.5rem;
+    margin: 0.6em 0 0.5em;
     color: #fff;
     text-align: left;
-    border-bottom: 1px solid #0077ff;
-    padding-bottom: 0.3rem;
+    border-bottom: 1px solid #2a6fd8;
+    padding-bottom: 0.25em;
 }
 
 #optionContainer h2 {
-    margin: 2rem 0 1rem;
-    padding: 0 1.0rem;
-    font-size: 1.2rem;
+    margin: 1.2em 0 0.6em;
+    padding: 0 0.6em;
+    font-size: 1.15em;
     font-weight: bold;
     color: #fff;
-    border-left: 10px solid #0077ff;
+    border-left: 6px solid #2a6fd8;
+}
+
+/* ヘルプアイコン付き見出し */
+#optionContainer .opt-title-with-help {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#optionContainer .help-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+#optionContainer .help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 12px;
+    font-weight: bold;
+    color: #111;
+    background: #ffd54f;
+    border-radius: 50%;
+    cursor: default;
+    user-select: none;
+    outline: none;
+}
+
+#optionContainer .help-tooltip {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    transform: none;
+    width: min(320px, calc(100vw - 48px));
+    max-width: 360px;
+    background: #333;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-weight: normal;
+    font-size: 0.92em;
+    line-height: 1.5;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+    z-index: 10001;
+    display: none;
+}
+
+#optionContainer .help-wrap:hover .help-tooltip,
+#optionContainer .help-icon:focus + .help-tooltip,
+#optionContainer .help-wrap:focus-within .help-tooltip {
+    display: block;
+}
+
+/* コンテナ外へはみ出しても見えるように（親overflow対策） */
+#optionContainer {
+    overflow: visible;
+}
+
+/* ツールチップが画面外に出ないように簡易調整 */
+#optionContainer .help-tooltip {
+    right: auto;
+    white-space: normal;
 }
 
 #optionContainer p {
-    margin: 1rem 0;
+    margin: 0.4em 0;
+    font-size: 0.95em;
+    line-height: 1.6;
 }
 
 #optionContainer ul {
-    margin: 1rem 0;
-    padding-left: 2rem;
+    margin: 0.4em 0;
+    padding-left: 1.4em;
 }
 
 li {
-    margin: 0.5rem 0;
-    font-size: 14px;
+    margin: 0.3em 0;
+    font-size: 0.95em;
 }
 #optionContainer .flex {
     display: flex;
     justify-content: start;
     align-items: center;
-    margin: 0.5rem 0;
+    margin: 0.3rem 0;
+    gap: 0.5rem;
 }
 
 #optionContainer .setbox {
+    display: inline-flex;
     align-items: start;
-    margin: 0.5rem 0 1rem;
+    margin: 0.25rem 0.5rem 0.25rem 0;
 }
 #optionContainer .setbox p {
-    margin: 0.5rem 0;
+    margin: 0.4rem 0;
 }
 
 #optionContainer .inputbox {
-    width: 13rem;
-    max-width: 13rem;
-    min-width: 13rem;
+    width: auto;
+    max-width: none;
+    min-width: 0;
 }
 
 #optionContainer label {
     display: inline-block;
-    width: 5rem;
-    margin-right: 1rem;
+    width: auto;
+    margin-right: 0.6rem;
     font-weight: bold;
     white-space: nowrap;
 }
 
 #optionContainer input[type="text"] {
-    padding: 0.5rem;
+    padding: 0.45rem;
     border-radius: 0.25rem;
     border: 1px solid #ccc;
-    font-size: 1rem;
-    width: 10rem;
+    font-size: 0.95rem;
+    width: 9rem;
     outline: none;
 }
 
 #optionContainer input[type="radio"] {
-    margin-right: 0.5rem;
+    margin-right: 0.4rem;
     cursor: pointer;
 }
 
+#optionContainer a { color: #8db4ff; }
+#optionContainer a:hover { color: #a5c4ff; }
+
+
+/* 自動移動モーダル */
+#auto_next_modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+}
+#auto_next_modal.show { display: flex; }
+#auto_next_modal .backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+}
+#auto_next_modal .dialog {
+    position: relative;
+    background: #fff;
+    color: #222;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    padding: 16px 18px;
+    min-width: 280px;
+    width: 90vw;
+    max-width: 350px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+}
+#auto_next_modal .preview {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+    margin-bottom: 12px;
+}
+#auto_next_modal .preview .thumb {
+    width: 100%;
+    background: #eee;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+}
+#auto_next_modal .preview .thumb img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
+#auto_next_modal .preview .preview-title,
+#auto_next_modal .preview .preview-provider {
+    font-weight: 600;
+    color: #111;
+    line-height: 1.4;
+    word-break: break-word;
+}
+#auto_next_modal .title {
+    font-weight: bold;
+    margin-bottom: 8px;
+    color: #111;
+}
+#auto_next_modal .message {
+    margin-bottom: 12px;
+    color: #333;
+}
+#auto_next_modal .actions {
+    display: flex;
+    justify-content: flex-end;
+}
+#auto_next_modal button {
+    background: #444;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+}
+#auto_next_modal button:hover {
+    background: #555;
+}

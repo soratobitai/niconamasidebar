@@ -7,8 +7,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "postbuild": "rimraf \"dist/**/*.map\"",
     "preview": "vite preview",
     "clean": "rimraf dist",
+    "clean:maps": "rimraf \"dist/**/*.map\"",
     "watch": "vite build --watch"
   },
   "devDependencies": {
