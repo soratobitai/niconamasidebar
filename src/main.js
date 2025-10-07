@@ -1,14 +1,13 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
 import { sidebarMinWidth, maxSaveProgramInfos, updateThumbnailInterval, toDolistsInterval } from './config/constants.js'
-import { liveStatusPollInterval } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, getProgramInfos as getProgramInfosFromStorage, upsertProgramInfo as upsertProgramInfoFromStorage } from './services/storage.js'
 import { fetchLivePrograms, fetchProgramInfo } from './services/api.js'
 import { makeProgramsHtml, calculateActivePoint, attachThumbnailErrorHandlers, updateThumbnailsFromStorage, sortProgramsByActivePoint, buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
-import { checkLiveStatus } from './services/status.js'
+import { observeProgramEnd } from './services/status.js'
 
 const toDolists = [];
 
@@ -24,9 +23,14 @@ let isOpenSidebar = false;
 let isInserting = false;
 let oneTimeFlag = true;
 let onResizeHandler = null;
-let liveStatusTimer = null;
 let autoNextCountdownTimer = null;
 let autoNextScheduled = false;
+let autoNextCanceled = false;
+let liveStatusStopper = null;
+
+// サイドバー更新の多重実行防止用フラグ
+let isUpdatingSidebar = false;
+let pendingSidebarUpdate = false;
 
 let defaultOptions = {
     programsSort: 'newest',
@@ -148,8 +152,9 @@ const setup = async () => {
     // 再読み込みボタン
     const reloadBtn = document.getElementById('reload_programs');
     if (reloadBtn) {
-        reloadBtn.addEventListener('click', function () {
-            updateSidebar();
+        reloadBtn.addEventListener('click', async function () {
+            await updateSidebar();
+            updateThumbnail(true);
         });
     }
 
@@ -298,9 +303,9 @@ const cleanup = () => {
         clearTimeout(sidebarUpdateTimer);
         sidebarUpdateTimer = null;
     }
-    if (liveStatusTimer) {
-        clearInterval(liveStatusTimer);
-        liveStatusTimer = null;
+    if (liveStatusStopper) {
+        try { liveStatusStopper(); } catch (_e) {}
+        liveStatusStopper = null;
     }
     if (autoNextCountdownTimer) {
         clearInterval(autoNextCountdownTimer);
@@ -431,6 +436,7 @@ function showAutoNextModal(seconds, preview, onCancel) {
     const onCancelHandler = (e) => {
         e.preventDefault();
         hideAutoNextModal();
+        autoNextCanceled = true;
         if (typeof onCancel === 'function') onCancel();
     };
     if (cancelBtn) {
@@ -445,6 +451,7 @@ function hideAutoNextModal() {
 
 function scheduleAutoNextNavigation(nextHref, preview) {
     let remaining = 10;
+    autoNextCanceled = false;
     showAutoNextModal(remaining, preview, () => {
         if (autoNextCountdownTimer) {
             clearInterval(autoNextCountdownTimer);
@@ -457,11 +464,19 @@ function scheduleAutoNextNavigation(nextHref, preview) {
     autoNextCountdownTimer = setInterval(() => {
         remaining -= 1;
         if (countEl) countEl.textContent = String(Math.max(0, remaining));
+        if (autoNextCanceled) {
+            clearInterval(autoNextCountdownTimer);
+            autoNextCountdownTimer = null;
+            hideAutoNextModal();
+            return;
+        }
         if (remaining <= 0) {
             clearInterval(autoNextCountdownTimer);
             autoNextCountdownTimer = null;
             hideAutoNextModal();
-            try { location.assign(nextHref); } catch (_e) {}
+            if (!autoNextCanceled) {
+                try { location.assign(nextHref); } catch (_e) {}
+            }
         }
     }, 1000);
 }
@@ -469,16 +484,9 @@ function scheduleAutoNextNavigation(nextHref, preview) {
 // 視聴中番組の終了監視
 function startLiveStatusWatcher() {
     stopLiveStatusWatcher();
-    liveStatusTimer = setInterval(async () => {
+    liveStatusStopper = observeProgramEnd(async () => {
         try {
-            const status = await checkLiveStatus();
-            if (status === 'ON_AIR') {
-                autoNextScheduled = false;
-                return;
-            }
-            if (!status || status === 'ERROR') return;
             if (autoNextScheduled) return;
-
             await updateSidebar();
             const firstLink = document.querySelector('#liveProgramContainer .program_container .program_thumbnail a');
             if (firstLink && firstLink.href && location.href !== firstLink.href) {
@@ -500,13 +508,13 @@ function startLiveStatusWatcher() {
                 scheduleAutoNextNavigation(firstLink.href, preview);
             }
         } catch (_e) {}
-    }, liveStatusPollInterval * 1000);
+    });
 }
 
 function stopLiveStatusWatcher() {
-    if (liveStatusTimer) {
-        clearInterval(liveStatusTimer);
-        liveStatusTimer = null;
+    if (liveStatusStopper) {
+        try { liveStatusStopper(); } catch (_e) {}
+        liveStatusStopper = null;
     }
     if (autoNextCountdownTimer) {
         clearInterval(autoNextCountdownTimer);
@@ -603,91 +611,103 @@ async function getProgramInfo_and_saveLocalStorage(liveId) {
 }
 
 async function updateSidebar() {
-
-    isInserting = true;
-
-    // localStorageから番組情報を取得
-    const programInfos = getProgramInfosFromStorage();
-
-    const livePrograms = await getLivePrograms(100);
-    if (!livePrograms) return;
-
-    const container = document.getElementById('liveProgramContainer');
-    const frag = document.createDocumentFragment();
-    const existingMap = new Map();
-    if (container) {
-        Array.from(container.children).forEach((el) => {
-            if (el && el.id) existingMap.set(el.id, el);
-        });
-    }
-
-    livePrograms.forEach(function (program) {
-        if (!program || !program.id) return;
-
-        const data = programInfos.find((info) => info.id === `lv${program.id}`);
-        const id = String(program.id);
-        const existing = existingMap.get(id);
-
-        if (existing) {
-            // 軽い更新（属性・タイトル・リンク先）
-            existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
-            const titleEl = existing.querySelector('.program_title');
-            if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
-            const linkEl = existing.querySelector('.program_thumbnail a');
-            if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
-            frag.appendChild(existing);
-        } else {
-            const html = data ? makeProgramsHtml(data, loadingImageURL) : makeProgramsHtml(program, loadingImageURL);
-            const temp = document.createElement('div');
-            temp.innerHTML = html;
-            if (temp.firstElementChild) frag.appendChild(temp.firstElementChild);
-        }
-
-        if (!toDolists.includes(program.id)) {
-            toDolists.push(program.id);
-            if (toDolists.length > maxSaveProgramInfos) {
-                toDolists.shift();
-            }
-        }
-    });
-
-    // 一旦すべての番組を取り除く
-    const liveProgramContainer = document.getElementById('liveProgramContainer');
-    if (!liveProgramContainer) {
-        // console.error('liveProgramContainer not found');
-        isInserting = false;
+    // 多重実行を抑止し、終了後に1回だけ追従実行
+    if (isUpdatingSidebar) {
+        pendingSidebarUpdate = true;
         return;
     }
-    
-    // 挿入（置き換え）
-    liveProgramContainer.replaceChildren(frag);
-    // 監視対象を更新
-    refreshThumbnailObservations();
+    isUpdatingSidebar = true;
+    isInserting = true;
+    try {
+        // localStorageから番組情報を取得
+        const programInfos = getProgramInfosFromStorage();
 
-    // ソート
-    if (options.programsSort === 'active') {
+        const livePrograms = await getLivePrograms(100);
+        // 失敗時は何も変更しない
+        if (!livePrograms) return;
+        // 空配列（0件）のときは既存DOMを維持して終了（フリッカー防止）
+        if (Array.isArray(livePrograms) && livePrograms.length === 0) return;
+
         const container = document.getElementById('liveProgramContainer');
-        if (container) sortProgramsByActivePoint(container);
+        const frag = document.createDocumentFragment();
+        const existingMap = new Map();
+        if (container) {
+            Array.from(container.children).forEach((el) => {
+                if (el && el.id) existingMap.set(el.id, el);
+            });
+        }
+
+        livePrograms.forEach(function (program) {
+            if (!program || !program.id) return;
+
+            const data = programInfos.find((info) => info.id === `lv${program.id}`);
+            const id = String(program.id);
+            const existing = existingMap.get(id);
+
+            if (existing) {
+                // 軽い更新（属性・タイトル・リンク先）
+                existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
+                const titleEl = existing.querySelector('.program_title');
+                if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
+                const linkEl = existing.querySelector('.program_thumbnail a');
+                if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
+                frag.appendChild(existing);
+            } else {
+                const html = data ? makeProgramsHtml(data, loadingImageURL) : makeProgramsHtml(program, loadingImageURL);
+                const temp = document.createElement('div');
+                temp.innerHTML = html;
+                if (temp.firstElementChild) frag.appendChild(temp.firstElementChild);
+            }
+
+            if (!toDolists.includes(program.id)) {
+                toDolists.push(program.id);
+                if (toDolists.length > maxSaveProgramInfos) {
+                    toDolists.shift();
+                }
+            }
+        });
+
+        // 一旦すべての番組を取り除く → 置き換え対象が無い場合は何もしない
+        const liveProgramContainer = document.getElementById('liveProgramContainer');
+        if (!liveProgramContainer) return;
+        if (!frag.firstChild) return;
+        
+        // 挿入（置き換え）
+        liveProgramContainer.replaceChildren(frag);
+        // 監視対象を更新
+        refreshThumbnailObservations();
+
+        // ソート
+        if (options.programsSort === 'active') {
+            const container2 = document.getElementById('liveProgramContainer');
+            if (container2) sortProgramsByActivePoint(container2);
+        }
+
+        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+
+        // 番組数更新（0件時はここまで到達しないため、表示は維持される）
+        const programCountElement = document.getElementById('program_count');
+        if (programCountElement) {
+            programCountElement.textContent = String(livePrograms.length);
+        }
+
+        attachThumbnailErrorHandlers();
+    } finally {
+        isInserting = false;
+        isUpdatingSidebar = false;
+        if (pendingSidebarUpdate) {
+            pendingSidebarUpdate = false;
+            setTimeout(() => { updateSidebar(); }, 0);
+        }
     }
-
-    setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
-    isInserting = false;
-
-    // 番組数更新
-    const programCountElement = document.getElementById('program_count');
-    if (programCountElement) {
-        programCountElement.textContent = livePrograms.length ? livePrograms.length : 0;
-    }
-
-    attachThumbnailErrorHandlers();
 }
 
-function updateThumbnail() {
+function updateThumbnail(force) {
     if (isInserting) return;
 
     const programInfos = getProgramInfosFromStorage();
     if (!programInfos) return;
-    updateThumbnailsFromStorage(programInfos);
+    updateThumbnailsFromStorage(programInfos, { force: !!force });
 }
 
 /**

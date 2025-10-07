@@ -123,7 +123,10 @@ function handleThumbnailError() {
     }
 }
 
-export function updateThumbnailsFromStorage(programInfos) {
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs } from '../config/constants.js'
+
+export function updateThumbnailsFromStorage(programInfos, options = {}) {
+    const force = !!(options && options.force)
     // Convert to Map for O(1) lookup if array
     const infoMap = Array.isArray(programInfos)
         ? new Map(programInfos.map((i) => [i.id, i]))
@@ -147,7 +150,8 @@ export function updateThumbnailsFromStorage(programInfos) {
             const urls = info.liveScreenshotThumbnailUrls
             const base = urls && urls.middle ? urls.middle : info.thumbnailUrl || null
             if (!base) return { nextUrl: null, key: '' }
-            return { nextUrl: `${base}?cache=${now}`, key: `u|${base}` }
+            // ユーザー配信はスクショURLをベースにする（?cache はTTLで間引くためここでは付けない）
+            return { nextUrl: base, key: `u|${base}` }
         }
 
         if (info.providerType === 'channel') {
@@ -171,21 +175,39 @@ export function updateThumbnailsFromStorage(programInfos) {
             const { nextUrl, key } = computeNext(info, card.id)
             if (!nextUrl) continue
 
-            // Skip if key unchanged and src identical
-            if (img.dataset.key === key && img.src === nextUrl) continue
-
-            // If current src has ?cache=, only refresh query part
-            if (img.src && img.src.includes('?cache=')) {
-                const m = img.src.match(/^(.+?\?cache=)/)
-                if (m && m[1]) {
-                    img.src = `${m[1]}${now}`
-                    img.dataset.key = key
+            // TTL: 直近成功から一定時間は更新しない（キー変化時は除く）
+            if (!force) {
+                const lastSuccessAt = Number(img.dataset.lastSuccessAt || 0)
+                if (img.dataset.key === key && lastSuccessAt && (now - lastSuccessAt) < thumbnailTtlMs) {
                     continue
                 }
             }
 
-            if (img.src !== nextUrl) img.src = nextUrl
-            img.dataset.key = key
+            // バックオフ: 失敗が続いている間は次回許可時刻までスキップ
+            if (!force) {
+                const nextTryAt = Number(img.dataset.nextTryAt || 0)
+                if (nextTryAt && now < nextTryAt) continue
+            }
+
+            // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
+            const pre = new Image()
+            const urlForAttempt = key.startsWith('u|') ? `${nextUrl}?cache=${now}` : nextUrl
+            pre.onload = () => {
+                if (img.src !== urlForAttempt) img.src = urlForAttempt
+                img.dataset.key = key
+                img.dataset.errors = '0'
+                img.dataset.nextTryAt = '0'
+                img.dataset.lastSuccessAt = String(Date.now())
+            }
+            pre.onerror = () => {
+                const errors = Number(img.dataset.errors || 0) + 1
+                const delay = Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1))
+                img.dataset.errors = String(errors)
+                img.dataset.nextTryAt = String(Date.now() + delay)
+                // 表示は handleThumbnailError に任せる（既にerrorハンドラが付与済み）
+                // エラーを明示的に発火させず、次周期まで現状を維持
+            }
+            pre.src = urlForAttempt
         }
         if (index < sourceImgs.length) requestAnimationFrame(tick)
     }

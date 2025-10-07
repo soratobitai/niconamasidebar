@@ -1,28 +1,51 @@
+// DOMベースで状態を判定（通信なし）
 const checkLiveStatus = async () => {
-    const url = location.href
-
-    try {
-        const res = await fetch(url, {
-            headers: {
-                'Content-Type': 'text/html',
-                'Cache-Control': 'no-cache'
-            }
-        })
-
-        const html = await res.text()
-        const doc = new DOMParser().parseFromString(html, 'text/html')
-        const jsonScript = doc.querySelector('#embedded-data')
-        const data = JSON.parse(jsonScript?.getAttribute('data-props') ?? '{}')
-        const status = data?.program?.status
-
-        return status
-
-    } catch (error) {
-        console.error('ライブ状態の取得に失敗しました:', error)
-        return 'ERROR'
-    }
+	try {
+		// 終了ガイドが存在すれば ENDED、なければ ON_AIR とみなす
+		return detectProgramEndGuide() ? 'ENDED' : 'ON_AIR'
+	} catch (_e) {
+		return 'ERROR'
+	}
 }
 
-export { checkLiveStatus }
+function detectProgramEndGuide() {
+	// ハッシュ付きクラスのため部分一致で検出
+	const guide = document.querySelector('[class*="program-end-guide"]')
+	if (!guide) return false
+
+	// 子要素の構造を確認（テキストは見ない）
+	const hasAnnouncement = !!guide.querySelector('[class*="announcement"]')
+	const hasNextActionArea = !!guide.querySelector('[class*="next-action-area"]')
+	const hasRequestButton = !!guide.querySelector('button[class*="broadcast-request-send-button"]')
+
+	return hasAnnouncement && hasNextActionArea && hasRequestButton
+}
+
+// MutationObserver + 軽量ポーリングで終了を検出
+function observeProgramEnd(onEnded) {
+	const root = document.body
+	if (!root || typeof onEnded !== 'function') return () => {}
+
+	let stopped = false
+	const checkNow = () => {
+		if (stopped) return
+		if (detectProgramEndGuide()) onEnded()
+	}
+
+	// 即時チェック
+	checkNow()
+
+    const mo = new MutationObserver(() => {
+        checkNow()
+    })
+    mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+
+	return () => {
+		stopped = true
+		try { mo.disconnect() } catch (_e) {}
+	}
+}
+
+export { checkLiveStatus, observeProgramEnd }
 
 
