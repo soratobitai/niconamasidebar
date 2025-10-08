@@ -488,40 +488,24 @@ function startLiveStatusWatcher() {
         try {
             if (autoNextScheduled) return;
             await updateSidebar();
-            const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
-            const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);
-            const currentId = currentIdMatch ? currentIdMatch[1] : '';
-
-            let targetLink = null;
-            for (const a of links) {
-                try {
-                    const nextPath = new URL(a.href, location.href).pathname;
-                    const nextIdMatch = nextPath.match(/\/watch\/(lv\d+)/);
-                    const nextId = nextIdMatch ? nextIdMatch[1] : '';
-                    if (currentId && nextId && nextId !== currentId) {
-                        targetLink = a;
-                        break;
-                    }
-                } catch (_e) {}
-            }
-
-            if (targetLink && targetLink.href) {
+            const firstLink = document.querySelector('#liveProgramContainer .program_container .program_thumbnail a');
+            if (firstLink && firstLink.href && location.href !== firstLink.href) {
                 autoNextScheduled = true;
                 // プレビュー情報抽出
                 let preview = null;
                 try {
-                    const card = targetLink.closest('.program_container');
+                    const card = firstLink.closest('.program_container');
                     const imgEl = card ? card.querySelector('.program_thumbnail_img') : null;
                     const titleEl = card ? card.querySelector('.program_title') : null;
                     const providerEl = card ? card.querySelector('.community_name') : null;
                     preview = {
-                        href: targetLink.href,
+                        href: firstLink.href,
                         thumb: imgEl && imgEl.src ? imgEl.src : '',
                         title: titleEl && titleEl.textContent ? titleEl.textContent.trim() : '',
                         provider: providerEl && providerEl.textContent ? providerEl.textContent.trim() : '',
                     };
                 } catch (_e) {}
-                scheduleAutoNextNavigation(targetLink.href, preview);
+                scheduleAutoNextNavigation(firstLink.href, preview);
             }
         } catch (_e) {}
     });
