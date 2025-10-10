@@ -27,6 +27,8 @@ let autoNextCountdownTimer = null;
 let autoNextScheduled = false;
 let autoNextCanceled = false;
 let liveStatusStopper = null;
+// 二重スケジュール抑止用
+let selectingNext = false;
 
 // サイドバー更新の多重実行防止用フラグ
 let isUpdatingSidebar = false;
@@ -450,6 +452,11 @@ function hideAutoNextModal() {
 }
 
 function scheduleAutoNextNavigation(nextHref, preview) {
+    // 既存のカウントダウンが生きていれば停止
+    if (autoNextCountdownTimer) {
+        try { clearInterval(autoNextCountdownTimer); } catch (_e) {}
+        autoNextCountdownTimer = null;
+    }
     let remaining = 10;
     autoNextCanceled = false;
     showAutoNextModal(remaining, preview, () => {
@@ -485,8 +492,10 @@ function scheduleAutoNextNavigation(nextHref, preview) {
 function startLiveStatusWatcher() {
     stopLiveStatusWatcher();
     liveStatusStopper = observeProgramEnd(async () => {
+        // 多重進入抑止
+        if (autoNextScheduled || selectingNext) return;
+        selectingNext = true;
         try {
-            if (autoNextScheduled) return;
             await updateSidebar();
             const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
             const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);
@@ -524,6 +533,10 @@ function startLiveStatusWatcher() {
                 scheduleAutoNextNavigation(targetLink.href, preview);
             }
         } catch (_e) {}
+        finally {
+            // 次回の検出に備えて解除（autoNextScheduled が true の場合は以降で抑止される）
+            selectingNext = false;
+        }
     });
 }
 
