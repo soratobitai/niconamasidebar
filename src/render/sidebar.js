@@ -1,5 +1,11 @@
-export function makeProgramsHtml(data, loadingImageURL) {
-    if (!data || !data.id) return ''
+/**
+ * 番組情報からDOM要素を直接作成（innerHTMLを使用せず、セキュアに）
+ * @param {Object} data - 番組データ
+ * @param {string} loadingImageURL - ローディング画像のURL
+ * @returns {HTMLElement|null} 作成されたDOM要素、またはnull
+ */
+export function makeProgramElement(data, loadingImageURL) {
+    if (!data || !data.id) return null
 
     const id = data.id.replace('lv', '')
     let user_page_url = ''
@@ -54,31 +60,77 @@ export function makeProgramsHtml(data, loadingImageURL) {
         thumbnail_url = loadingImageURL
     }
 
-    let userIconHtml = ''
-    if (user_page_url && icon_url) {
-        userIconHtml = `<a href="${user_page_url}" target="_blank"><img src="${icon_url}"></a>`
-    } else if (icon_url) {
-        userIconHtml = `<img src="${icon_url}">`
-    }
-
     const activePoint = calculateActivePoint(data)
 
-    return `<div id="${id}" class="program_container" active-point="${activePoint}">
-                <div class="community">
-                    ${userIconHtml}
-                    <div class="community_name" title="${escapeHtml(community_name)}">
-                        ${escapeHtml(community_name)}
-                    </div>
-                </div>
-                <div class="program_thumbnail program-card_">
-                    <a href="${thumbnail_link_url}">
-                        <img class="program_thumbnail_img" src="${live_thumbnail_url}" data-src="${thumbnail_url}">
-                    </a>
-                </div>
-                <div class="program_title" title="${escapeHtml(title)}">
-                    ${escapeHtml(title)}
-                </div>
-            </div>`
+    // メインコンテナ
+    const container = document.createElement('div')
+    container.id = id
+    container.className = 'program_container'
+    container.setAttribute('active-point', String(activePoint))
+
+    // コミュニティセクション
+    const communityDiv = document.createElement('div')
+    communityDiv.className = 'community'
+
+    // ユーザーアイコン
+    if (icon_url) {
+        if (user_page_url) {
+            const iconLink = document.createElement('a')
+            iconLink.href = user_page_url
+            iconLink.target = '_blank'
+            const iconImg = document.createElement('img')
+            iconImg.src = icon_url
+            iconLink.appendChild(iconImg)
+            communityDiv.appendChild(iconLink)
+        } else {
+            const iconImg = document.createElement('img')
+            iconImg.src = icon_url
+            communityDiv.appendChild(iconImg)
+        }
+    }
+
+    // コミュニティ名
+    const communityNameDiv = document.createElement('div')
+    communityNameDiv.className = 'community_name'
+    communityNameDiv.title = community_name
+    communityNameDiv.textContent = community_name
+    communityDiv.appendChild(communityNameDiv)
+
+    container.appendChild(communityDiv)
+
+    // サムネイルセクション
+    const thumbnailDiv = document.createElement('div')
+    thumbnailDiv.className = 'program_thumbnail program-card_'
+    const thumbnailLink = document.createElement('a')
+    thumbnailLink.href = thumbnail_link_url
+    const thumbnailImg = document.createElement('img')
+    thumbnailImg.className = 'program_thumbnail_img'
+    thumbnailImg.src = live_thumbnail_url
+    thumbnailImg.setAttribute('data-src', thumbnail_url)
+    thumbnailLink.appendChild(thumbnailImg)
+    thumbnailDiv.appendChild(thumbnailLink)
+    container.appendChild(thumbnailDiv)
+
+    // タイトルセクション
+    const titleDiv = document.createElement('div')
+    titleDiv.className = 'program_title'
+    titleDiv.title = title
+    titleDiv.textContent = title
+    container.appendChild(titleDiv)
+
+    return container
+}
+
+/**
+ * @deprecated 後方互換性のため残しています。makeProgramElementを使用してください。
+ */
+export function makeProgramsHtml(data, loadingImageURL) {
+    const element = makeProgramElement(data, loadingImageURL)
+    if (!element) return ''
+    // 一時的にコンテナに追加してHTMLを取得（互換性のため）
+    const temp = document.createElement('div')
+    temp.appendChild(element)
+    return temp.innerHTML
 }
 
 export function escapeHtml(text) {
@@ -127,20 +179,32 @@ import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs } from '../co
 
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
+    const onComplete = options.onComplete || null
     // Convert to Map for O(1) lookup if array
     const infoMap = Array.isArray(programInfos)
         ? new Map(programInfos.map((i) => [i.id, i]))
         : programInfos
 
     const container = document.getElementById('liveProgramContainer')
-    if (!container) return
+    if (!container) {
+        if (onComplete) onComplete()
+        return
+    }
     const sourceImgs = thumbObserver && visibleImages.size
         ? Array.from(visibleImages).filter((img) => container.contains(img))
         : Array.from(container.querySelectorAll('.program_thumbnail_img'))
     const now = Date.now()
 
+    // 画像が存在しない場合、即座に完了コールバックを呼ぶ
+    if (sourceImgs.length === 0) {
+        if (onComplete) onComplete()
+        return
+    }
+
     let index = 0
     const CHUNK = 50
+    let pendingImages = 0 // 画像読み込み待機中の数
+    let isCompleted = false // 完了コールバックが呼ばれたかどうか
 
     function computeNext(info, parentId) {
         if (!info) return { nextUrl: null, key: '' }
@@ -161,6 +225,15 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         }
 
         return { nextUrl: null, key: '' }
+    }
+
+    function checkComplete() {
+        // 全ての画像処理が完了した場合（画像読み込みは待たない）
+        // ローディング表示は「処理開始」までで完了とし、画像読み込みはバックグラウンドで継続
+        if (!isCompleted && index >= sourceImgs.length) {
+            isCompleted = true
+            if (onComplete) onComplete()
+        }
     }
 
     function tick() {
@@ -190,29 +263,45 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             }
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
+            pendingImages++
             const pre = new Image()
             const urlForAttempt = key.startsWith('u|') ? `${nextUrl}?cache=${now}` : nextUrl
             pre.onload = () => {
+                pendingImages--
                 if (img.src !== urlForAttempt) img.src = urlForAttempt
                 img.dataset.key = key
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
+                // 画像読み込み完了時はcheckComplete()を呼ばない
+                // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続
             }
             pre.onerror = () => {
+                pendingImages--
                 const errors = Number(img.dataset.errors || 0) + 1
                 const delay = Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1))
                 img.dataset.errors = String(errors)
                 img.dataset.nextTryAt = String(Date.now() + delay)
                 // 表示は handleThumbnailError に任せる（既にerrorハンドラが付与済み）
                 // エラーを明示的に発火させず、次周期まで現状を維持
+                // 画像読み込みエラー時もcheckComplete()を呼ばない
             }
             pre.src = urlForAttempt
         }
-        if (index < sourceImgs.length) requestAnimationFrame(tick)
+        if (index < sourceImgs.length) {
+            requestAnimationFrame(tick)
+        } else {
+            // 全ての処理が完了（ただし、画像読み込みはまだ進行中かもしれない）
+            checkComplete()
+        }
     }
 
-    requestAnimationFrame(tick)
+    // 最初のtick呼び出し
+    requestAnimationFrame(() => {
+        tick()
+        // 最初のtick実行後、更新対象がない（全てスキップされた）場合も完了とみなす
+        checkComplete()
+    })
 }
 
 // IntersectionObserver-based visibility tracking (optional optimization)

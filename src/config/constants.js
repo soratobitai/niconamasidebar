@@ -15,4 +15,7 @@ export const thumbnailRetryMaxMs = 60000; // エラー時の再試行最大間�
 // 番組詳細の再取得を間引くためのTTL（ミリ秒）
 export const programInfoTtlMs = 60000;
 
+// ローディングセッションのタイムアウト（ミリ秒）
+export const loadingSessionTimeoutMs = 60000; // 60秒
+
 

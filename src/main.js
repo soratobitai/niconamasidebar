@@ -1,49 +1,80 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, maxSaveProgramInfos, updateThumbnailInterval, toDolistsInterval } from './config/constants.js'
+import { sidebarMinWidth, maxSaveProgramInfos, updateThumbnailInterval, toDolistsInterval, loadingSessionTimeoutMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, getProgramInfos as getProgramInfosFromStorage, upsertProgramInfo as upsertProgramInfoFromStorage } from './services/storage.js'
 import { fetchLivePrograms, fetchProgramInfo } from './services/api.js'
-import { makeProgramsHtml, calculateActivePoint, attachThumbnailErrorHandlers, updateThumbnailsFromStorage, sortProgramsByActivePoint, buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
+import { makeProgramElement, makeProgramsHtml, calculateActivePoint, attachThumbnailErrorHandlers, updateThumbnailsFromStorage, sortProgramsByActivePoint, buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
 import { observeProgramEnd } from './services/status.js'
+import { AppState } from './core/AppState.js'
+import { ProgramInfoQueue } from './services/queue.js'
 
-const toDolists = [];
+// アプリケーション状態を管理するインスタンス
+const appState = new AppState();
 
-// タイマー管理用変数
-let thumbnailUpdateTimer = null;
-let toDoListTimer = null;
-let sidebarUpdateTimer = null;
-let resizeObserver_watchPage = null;
-let resizeObserver_sidebar = null;
-
-let sidebarWidth = sidebarMinWidth;
-let isOpenSidebar = false;
-let isInserting = false;
-let oneTimeFlag = true;
-let onResizeHandler = null;
-let autoNextCountdownTimer = null;
-let autoNextScheduled = false;
-let autoNextCanceled = false;
-let liveStatusStopper = null;
-// 二重スケジュール抑止用
-let selectingNext = false;
-
-// サイドバー更新の多重実行防止用フラグ
-let isUpdatingSidebar = false;
-let pendingSidebarUpdate = false;
+// 番組詳細情報取得キュー
+// レートリミッティングを実装して、APIへの負荷を元の実装と同等に保つ
+// 元の実装: 0.3秒/件 = 約3.3件/秒 → 安全マージンを考慮して4件/秒に設定
+const programInfoQueue = new ProgramInfoQueue({
+    batchSize: 2, // バッチサイズを小さくして、レートリミットを確実に守る
+    processInterval: toDolistsInterval * 1000, // 0.3秒間隔
+    idleTimeout: 50,
+    maxSize: maxSaveProgramInfos,
+    maxRequestsPerSecond: 4, // 1秒あたり最大4件（元の実装の約3.3件/秒より少し余裕を持たせる）
+    getVisibilityState: () => appState.isVisible(), // 可視状態を取得する関数
+    onProcessStart: () => {
+        // キュー処理開始を追跡（updateSidebar()完了後のキュー処理開始時のみ）
+        // updateSidebar()内で既にstartLoading()が呼ばれているため、ここでは呼ばない
+        // ただし、updateSidebar()完了後にキュー処理が開始される場合、ローディングは継続される
+    },
+    onProcessComplete: (processedCount, results) => {
+        // 番組詳細情報取得後、active-pointを更新してソートを実行
+        // 初期表示時に番組詳細情報が未取得のため、ソートが正しく動作しない問題を解決
+        if (typeof updateActivePointsAndSort === 'function') {
+            updateActivePointsAndSort();
+        }
+        
+        // DOM操作（ソート含む）が完了してからサムネイル更新を実行
+        // requestAnimationFrameで次のフレームに延期して、DOM操作との競合を避ける
+        requestAnimationFrame(() => {
+            // ローディングセッション中（ページ読み込み時など）のみ、サムネイル更新を実行
+            // 通常のキュー処理では独立して動作するため、ここでは呼ばない
+            // ページ読み込み時にサムネイル画像がない状態の場合、次の定期更新（20s後）まで待たずに早めに表示するため
+            if (currentUpdateSessionId && typeof updateThumbnail === 'function') {
+                updateThumbnail(false, () => {
+                    // サムネイル更新完了後、キューが空ならセッションを完了
+                    if (currentUpdateSessionId && programInfoQueue.size() === 0) {
+                        finishLoadingSession();
+                    }
+                });
+            } else if (currentUpdateSessionId) {
+                // updateThumbnailが未定義の場合、キューが空ならセッションを完了
+                if (programInfoQueue.size() === 0) {
+                    finishLoadingSession();
+                }
+            }
+            // currentUpdateSessionId が null の場合は、通常のキュー処理なので何もしない（独立動作）
+        });
+    }
+});
 
 let defaultOptions = {
     programsSort: 'newest',
     autoOpen: '3',
     updateProgramsInterval: '120', // 秒
     sidebarWidth: 360,
-    isOpenSidebar: isOpenSidebar,
+    isOpenSidebar: false,
     autoNextProgram: 'off',
 };
 let options = {};
 let elems = {};
+
+// AppStateに設定とDOM要素の参照を保存
+appState.config.defaultOptions = defaultOptions;
+appState.config.options = options;
+appState.elements = elems;
 
 // localStorage初期化
 if (!localStorage.getItem('programInfos')) {
@@ -82,8 +113,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // オプションを取得
     options = await getOptions();
-    sidebarWidth = options.sidebarWidth;
-    isOpenSidebar = !!options.isOpenSidebar;
+    appState.config.options = options;
+    appState.sidebar.width = options.sidebarWidth || sidebarMinWidth;
+    appState.sidebar.isOpen = !!options.isOpenSidebar;
 
     // 各要素を定義
     setElems();
@@ -102,17 +134,18 @@ const setup = async () => {
     // Watchページの幅を設定
     adjustWatchPageChild(elems);
 
-    // ウィンドウサイズの変更時
-    onResizeHandler = debounce(() => {
+    // ウィンドウサイズの変更時（デバウンスを短縮してカクカク感を軽減）
+    const onResizeHandler = debounce(() => {
         adjustWatchPageChild(elems);
         sidebarControl.setRootWidth();
-        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
-    }, 150);
+        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width);
+    }, 30); // 150ms → 30ms に短縮
+    appState.setHandler('onResize', onResizeHandler);
     window.addEventListener('resize', onResizeHandler);
 
     // watchPageサイズ変更時（幅のみ監視）
     let watchPageWidth = elems.watchPage ? elems.watchPage.clientWidth : 0;
-    resizeObserver_watchPage = new ResizeObserver((entries) => {
+    const resizeObserver_watchPage = new ResizeObserver((entries) => {
         entries.forEach(function (entry) {
             if (entry.contentRect.width !== watchPageWidth) {
                 adjustWatchPageChild(elems);
@@ -120,29 +153,23 @@ const setup = async () => {
             }
         });
     });
-    if (elems.watchPage) {
+    appState.setObserver('resizeWatchPage', resizeObserver_watchPage);
     if (elems.watchPage) {
         resizeObserver_watchPage.observe(elems.watchPage);
     }
-    }
 
     // サイドバーのサイズ変更時
-    resizeObserver_sidebar = new ResizeObserver((e) => {
-        const width = elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth;
+    const resizeObserver_sidebar = new ResizeObserver((e) => {
+        const width = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
         setProgramContainerWidth(elems, width);
 
         // ウィンドウリサイズイベントを発行（シークポジションのズレ対策）
         window.dispatchEvent(new Event('resize'));
     });
+    appState.setObserver('resizeSidebar', resizeObserver_sidebar);
     if (elems.sidebar) {
         resizeObserver_sidebar.observe(elems.sidebar);
     }
-
-    // コメント欄　スクロールボタンを押す
-    setTimeout(() => {
-        const indicator = elems.playerSection ? elems.playerSection.querySelector('[class*="_indicator_"]') : null;
-        if (indicator) indicator.click();
-    }, 1000);
 
     // シアターモード切り替え時に実行
     for (let i = 0; i < elems.theaterButtons.length; i++) {
@@ -155,8 +182,15 @@ const setup = async () => {
     const reloadBtn = document.getElementById('reload_programs');
     if (reloadBtn) {
         reloadBtn.addEventListener('click', async function () {
+            // ローディング中は処理を無視
+            if (appState.isLoading()) {
+                return;
+            }
             await updateSidebar();
-            updateThumbnail(true);
+            // 手動更新後、次回の自動更新タイマーをリセット
+            if (appState.sidebar.isOpen) {
+                restartSidebarUpdate();
+            }
         });
     }
 
@@ -236,8 +270,8 @@ const setup = async () => {
 
     // サイドバーOPEN/CLOSEボタン
     const state = {
-        sidebarWidth: { value: sidebarWidth },
-        isOpenSidebar: { value: isOpenSidebar },
+        sidebarWidth: { value: appState.sidebar.width },
+        isOpenSidebar: { value: appState.sidebar.isOpen },
     };
     const sidebarControl = createSidebarControl(elems, state);
     const sidebarBtn = document.getElementById('sidebar_button');
@@ -247,7 +281,20 @@ const setup = async () => {
             e.stopPropagation();
 
             sidebarControl.toggleSidebar();
-            setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+            // サイドバーの開閉状態を更新
+            appState.sidebar.isOpen = state.isOpenSidebar.value;
+            options.isOpenSidebar = state.isOpenSidebar.value;
+            // サイドバーを開いた時に即時更新を実行
+            handleSidebarOpenStateChange(state.isOpenSidebar.value);
+            // CSS transition完了後に調整するため、requestAnimationFrameで次のフレームに延期
+            requestAnimationFrame(() => {
+                // transition中でも正確な幅を取得するため、さらに次のフレームで実行
+                requestAnimationFrame(() => {
+                    const sidebarWidth = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
+                    setProgramContainerWidth(elems, sidebarWidth);
+                    adjustWatchPageChild(elems);
+                });
+            });
         });
     }
 
@@ -258,17 +305,30 @@ const setup = async () => {
     const shouldOpenAtStart = (options.autoOpen == '1') || (options.autoOpen == '3' && !!options.isOpenSidebar);
     if (shouldOpenAtStart) {
         state.isOpenSidebar.value = true;
-        isOpenSidebar = true;
+        appState.sidebar.isOpen = true;
         options.isOpenSidebar = true;
         sidebarControl.openSidebar();
-        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+        // CSS transition完了後に調整するため、requestAnimationFrameで次のフレームに延期
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                const sidebarWidth = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
+                setProgramContainerWidth(elems, sidebarWidth);
+                adjustWatchPageChild(elems);
+            });
+        });
         await handleSidebarOpenStateChange(true);
     } else {
         state.isOpenSidebar.value = false;
-        isOpenSidebar = false;
+        appState.sidebar.isOpen = false;
         options.isOpenSidebar = false;
         sidebarControl.closeSidebar();
-        setProgramContainerWidth(elems, 0);
+        // 閉じる場合も同様に調整
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                setProgramContainerWidth(elems, 0);
+                adjustWatchPageChild(elems);
+            });
+        });
         handleSidebarOpenStateChange(false);
     }
 
@@ -288,75 +348,156 @@ const setup = async () => {
     // ページ離脱時のクリーンアップ
     window.addEventListener('beforeunload', cleanup);
     window.addEventListener('pagehide', cleanup);
+
+    // Page Visibility APIを使用してタブの可視状態を監視
+    // Chromeの最近の更新により、バックグラウンドタブでのリソース管理が厳しくなったため
+    // バックグラウンドタブではタイマーを停止または間隔を延長して、動画プレーヤーのリソースを確保
+    const handleVisibilityChange = () => {
+        const isVisible = !document.hidden;
+        appState.setVisibility(isVisible);
+        
+        // サイドバーが開いている場合のみ処理
+        if (appState.sidebar.isOpen) {
+            if (isVisible) {
+                // フォアグラウンドに戻ったとき：タイマーを再開し、即座に更新
+                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+                if (!appState.getTimer('todo')) {
+                    startToDoListUpdate();
+                    // キューがあれば即座に処理開始
+                    if (programInfoQueue.size() > 0) {
+                        programInfoQueue.processNow().catch(error => {
+                            console.warn('可視化後のキュー処理でエラーが発生しました:', error);
+                        });
+                    }
+                }
+                if (!appState.getTimer('sidebar')) startSidebarUpdate();
+                
+                // 即座に更新を実行
+                requestAnimationFrame(async () => {
+                    await updateSidebar();
+                    updateThumbnail();
+                    // タブがアクティブになった時の即時更新後、次回の自動更新タイマーをリセット
+                    restartSidebarUpdate();
+                });
+            } else {
+                // バックグラウンドに移行したとき：タイマーを停止（リソース消費を抑える）
+                // ただし、完全に停止せず、間隔を延長する方式はqueue.jsで実装済み
+                // ここではサムネイル更新などの重い処理を停止
+                appState.clearTimer('thumbnail');
+                // sidebarとtodoはqueue.jsで間隔が延長されるため、停止しない
+            }
+        }
+    };
+    
+    // 初期状態を設定
+    appState.setVisibility(!document.hidden);
+    
+    // visibilitychangeイベントを監視
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 }
 
 // クリーンアップ関数
 const cleanup = () => {
-    // タイマーをクリア
-    if (thumbnailUpdateTimer) {
-        clearTimeout(thumbnailUpdateTimer);
-        thumbnailUpdateTimer = null;
-    }
-    if (toDoListTimer) {
-        clearInterval(toDoListTimer);
-        toDoListTimer = null;
-    }
-    if (sidebarUpdateTimer) {
-        clearTimeout(sidebarUpdateTimer);
-        sidebarUpdateTimer = null;
-    }
-    if (liveStatusStopper) {
-        try { liveStatusStopper(); } catch (_e) {}
-        liveStatusStopper = null;
-    }
-    if (autoNextCountdownTimer) {
-        clearInterval(autoNextCountdownTimer);
-        autoNextCountdownTimer = null;
-    }
-
-    // ResizeObserverを切断
-    if (resizeObserver_watchPage) {
-        resizeObserver_watchPage.disconnect();
-        resizeObserver_watchPage = null;
-    }
-    if (resizeObserver_sidebar) {
-        resizeObserver_sidebar.disconnect();
-        resizeObserver_sidebar = null;
-    }
+    // AppStateで全てのリソースをクリーンアップ
+    appState.cleanup();
+    
+    // キュー処理を停止
+    programInfoQueue.stop();
+    programInfoQueue.clear();
+    
+    // 外部で管理されているオブザーバーのクリーンアップ
     teardownThumbnailVisibilityObserver();
+    
+    // イベントハンドラーの削除
+    const onResizeHandler = appState.getHandler('onResize');
     if (onResizeHandler) {
         window.removeEventListener('resize', onResizeHandler);
-        onResizeHandler = null;
     }
+    
     hideAutoNextModal();
 }
 
 // すべての更新タイマーを停止
 function stopAllTimers() {
-    if (thumbnailUpdateTimer) {
-        clearTimeout(thumbnailUpdateTimer);
-        thumbnailUpdateTimer = null;
-    }
-    if (toDoListTimer) {
-        clearInterval(toDoListTimer);
-        toDoListTimer = null;
-    }
-    if (sidebarUpdateTimer) {
-        clearTimeout(sidebarUpdateTimer);
-        sidebarUpdateTimer = null;
-    }
+    appState.clearTimer('thumbnail');
+    // todoタイマーはQueueクラスが管理しているため、直接停止
+    programInfoQueue.stop();
+    appState.clearTimer('todo');
+    appState.clearTimer('sidebar');
+    appState.clearTimer('autoNext');
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
 async function handleSidebarOpenStateChange(open) {
     if (open) {
-        // すばやく最新化
-        await updateSidebar();
-        updateThumbnail();
+        // タイマーを先に開始（UIの反応を優先）
         initThumbnailVisibilityObserver();
-        if (!thumbnailUpdateTimer) startThumbnailUpdate();
-        if (!toDoListTimer) startToDoListUpdate();
-        if (!sidebarUpdateTimer) startSidebarUpdate();
+        if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+        if (!appState.getTimer('todo')) startToDoListUpdate();
+        if (!appState.getTimer('sidebar')) startSidebarUpdate();
+        
+        // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
+        // requestAnimationFrameで次のフレームに延期して、開閉アニメーションを優先
+        // ただし、タブが非アクティブの場合、requestAnimationFrameが実行されない可能性があるため、
+        // setTimeout のフォールバックも用意する
+        let rafExecuted = false;
+        requestAnimationFrame(async () => {
+            rafExecuted = true;
+            try {
+                await updateSidebar();
+                // updateThumbnail()はupdateSidebar()の完了後、onProcessComplete内で呼ばれるため、
+                // ここでは呼ばない（重複カウントを避ける）
+                
+                // サイドバーを開いた直後は、キューに追加された新しい番組の詳細情報を優先的に取得
+                // これにより、30分放置後に開いた場合でも、すぐにサムネイルが更新される
+                // 注意: updateSidebar()内で既にstartLoading()が呼ばれているため、
+                // ここで追加でstartLoading()を呼ぶ必要はない（onProcessCompleteでfinishLoading()が呼ばれる）
+                if (programInfoQueue.size() > 0) {
+                    programInfoQueue.processNow().catch(error => {
+                        // エラーが発生しても、定期的な処理で再試行されるため、ログだけ記録
+                        console.warn('即座のキュー処理でエラーが発生しました:', error);
+                        // エラー時もセッションを完了
+                        if (currentUpdateSessionId) {
+                            finishLoadingSession();
+                        }
+                    });
+                }
+                // サイドバーを開いた時の即時更新後、次回の自動更新タイマーをリセット
+                restartSidebarUpdate();
+            } catch (error) {
+                console.error('[ローディング] handleSidebarOpenStateChange updateSidebar エラー:', error);
+                // エラー時もセッションを完了
+                if (currentUpdateSessionId) {
+                    finishLoadingSession();
+                }
+            }
+        });
+        
+        // requestAnimationFrameが実行されない場合のフォールバック（タブが非アクティブなど）
+        setTimeout(() => {
+            if (!rafExecuted) {
+                (async () => {
+                    try {
+                        await updateSidebar();
+                        if (programInfoQueue.size() > 0) {
+                            programInfoQueue.processNow().catch(error => {
+                                console.warn('即座のキュー処理でエラーが発生しました:', error);
+                                if (currentUpdateSessionId) {
+                                    finishLoadingSession();
+                                }
+                            });
+                        }
+                        // サイドバーを開いた時の即時更新後、次回の自動更新タイマーをリセット
+                        restartSidebarUpdate();
+                    } catch (error) {
+                        console.error('[ローディング] handleSidebarOpenStateChange updateSidebar エラー:', error);
+                        if (currentUpdateSessionId) {
+                            finishLoadingSession();
+                        }
+                    }
+                })();
+            }
+        }, 100); // 100ms後にチェック
     } else {
         stopAllTimers();
         teardownThumbnailVisibilityObserver();
@@ -367,54 +508,108 @@ async function handleSidebarOpenStateChange(open) {
 const startThumbnailUpdate = () => {
     function runUpdateThumbnail() {
         updateThumbnail();
-        thumbnailUpdateTimer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+        const timer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+        appState.setTimer('thumbnail', timer);
     }
-    thumbnailUpdateTimer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+    const timer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
+    appState.setTimer('thumbnail', timer);
 }
 
-// ToDoリスト更新開始
+// ToDoリスト更新開始（新しいQueueクラスを使用）
 const startToDoListUpdate = () => {
-    toDoListTimer = setInterval(function () {
-        if (toDolists.length === 0) {
-            if (oneTimeFlag) {
-                updateSidebar();
-                oneTimeFlag = false;
-            }
-        } else {
-            getProgramInfo_and_saveLocalStorage(toDolists.shift());
-        }
-    }, toDolistsInterval * 1000);
+    // oneTimeFlagの処理
+    if (appState.update.oneTimeFlag) {
+        updateSidebar();
+        appState.update.oneTimeFlag = false;
+    }
+    
+    // キュー処理を開始
+    programInfoQueue.start();
+    
+    // タイマーIDを保存（停止用）
+    // Queueクラスの内部タイマーを使用するため、ここではダミーを設定
+    appState.setTimer('todo', 'queue-managed');
 }
 
 // サイドバー更新開始
 const startSidebarUpdate = () => {
     function updateSidebarInterval() {
         updateSidebar();
-        sidebarUpdateTimer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
+        const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
+        appState.setTimer('sidebar', timer);
     }
-    sidebarUpdateTimer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
+    const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
+    appState.setTimer('sidebar', timer);
 }
 
 // 自動次番組モーダル生成と表示/非表示
 function ensureAutoNextModal() {
     let modal = document.getElementById('auto_next_modal');
     if (modal) return modal;
+    
+    // DOM要素を直接作成（innerHTMLを使用しない）
     modal = document.createElement('div');
     modal.id = 'auto_next_modal';
-    modal.innerHTML = `
-<div class="backdrop"></div>
-<div class="dialog">
-  <div class="title">ニコ生サイドバーによる自動移動</div>
-  <div class="message"><span id="auto_next_count">10</span>秒後に次の番組へ移動します。</div>
-  <div class="preview">
-    <div id="auto_next_provider" class="preview-provider"></div>
-    <div class="thumb"><img id="auto_next_thumb" alt=""></div>
-    <div id="auto_next_title" class="preview-title"></div>
-  </div>
-  <div class="actions">
-    <button id="auto_next_cancel">キャンセル</button>
-  </div>
-</div>`;
+    
+    // バックドロップ
+    const backdrop = document.createElement('div');
+    backdrop.className = 'backdrop';
+    modal.appendChild(backdrop);
+    
+    // ダイアログ
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+    
+    // タイトル
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = 'ニコ生サイドバーによる自動移動';
+    dialog.appendChild(title);
+    
+    // メッセージ
+    const message = document.createElement('div');
+    message.className = 'message';
+    const countSpan = document.createElement('span');
+    countSpan.id = 'auto_next_count';
+    countSpan.textContent = '10';
+    message.appendChild(countSpan);
+    message.appendChild(document.createTextNode('秒後に次の番組へ移動します。'));
+    dialog.appendChild(message);
+    
+    // プレビュー
+    const preview = document.createElement('div');
+    preview.className = 'preview';
+    
+    const providerDiv = document.createElement('div');
+    providerDiv.id = 'auto_next_provider';
+    providerDiv.className = 'preview-provider';
+    preview.appendChild(providerDiv);
+    
+    const thumbDiv = document.createElement('div');
+    thumbDiv.className = 'thumb';
+    const thumbImg = document.createElement('img');
+    thumbImg.id = 'auto_next_thumb';
+    thumbImg.alt = '';
+    thumbDiv.appendChild(thumbImg);
+    preview.appendChild(thumbDiv);
+    
+    const titleDiv = document.createElement('div');
+    titleDiv.id = 'auto_next_title';
+    titleDiv.className = 'preview-title';
+    preview.appendChild(titleDiv);
+    
+    dialog.appendChild(preview);
+    
+    // アクション
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.id = 'auto_next_cancel';
+    cancelBtn.textContent = 'キャンセル';
+    actions.appendChild(cancelBtn);
+    dialog.appendChild(actions);
+    
+    modal.appendChild(dialog);
     document.body.appendChild(modal);
     return modal;
 }
@@ -438,7 +633,7 @@ function showAutoNextModal(seconds, preview, onCancel) {
     const onCancelHandler = (e) => {
         e.preventDefault();
         hideAutoNextModal();
-        autoNextCanceled = true;
+        appState.autoNext.canceled = true;
         if (typeof onCancel === 'function') onCancel();
     };
     if (cancelBtn) {
@@ -453,48 +648,51 @@ function hideAutoNextModal() {
 
 function scheduleAutoNextNavigation(nextHref, preview) {
     // 既存のカウントダウンが生きていれば停止
-    if (autoNextCountdownTimer) {
-        try { clearInterval(autoNextCountdownTimer); } catch (_e) {}
-        autoNextCountdownTimer = null;
+    const existingTimer = appState.getTimer('autoNext');
+    if (existingTimer) {
+        try { clearInterval(existingTimer); } catch (_e) {}
+        appState.clearTimer('autoNext');
     }
     let remaining = 10;
-    autoNextCanceled = false;
+    appState.autoNext.canceled = false;
     showAutoNextModal(remaining, preview, () => {
-        if (autoNextCountdownTimer) {
-            clearInterval(autoNextCountdownTimer);
-            autoNextCountdownTimer = null;
+        const timer = appState.getTimer('autoNext');
+        if (timer) {
+            clearInterval(timer);
+            appState.clearTimer('autoNext');
         }
-        autoNextScheduled = true;
+        appState.autoNext.scheduled = true;
     });
     const modal = ensureAutoNextModal();
     const countEl = modal.querySelector('#auto_next_count');
-    autoNextCountdownTimer = setInterval(() => {
+    const timer = setInterval(() => {
         remaining -= 1;
         if (countEl) countEl.textContent = String(Math.max(0, remaining));
-        if (autoNextCanceled) {
-            clearInterval(autoNextCountdownTimer);
-            autoNextCountdownTimer = null;
+        if (appState.autoNext.canceled) {
+            clearInterval(timer);
+            appState.clearTimer('autoNext');
             hideAutoNextModal();
             return;
         }
         if (remaining <= 0) {
-            clearInterval(autoNextCountdownTimer);
-            autoNextCountdownTimer = null;
+            clearInterval(timer);
+            appState.clearTimer('autoNext');
             hideAutoNextModal();
-            if (!autoNextCanceled) {
+            if (!appState.autoNext.canceled) {
                 try { location.assign(nextHref); } catch (_e) {}
             }
         }
     }, 1000);
+    appState.setTimer('autoNext', timer);
 }
 
 // 視聴中番組の終了監視
 function startLiveStatusWatcher() {
     stopLiveStatusWatcher();
-    liveStatusStopper = observeProgramEnd(async () => {
+    const stopper = observeProgramEnd(async () => {
         // 多重進入抑止
-        if (autoNextScheduled || selectingNext) return;
-        selectingNext = true;
+        if (appState.autoNext.scheduled || appState.autoNext.selectingNext) return;
+        appState.autoNext.selectingNext = true;
         try {
             await updateSidebar();
             const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
@@ -515,7 +713,7 @@ function startLiveStatusWatcher() {
             }
 
             if (targetLink && targetLink.href) {
-                autoNextScheduled = true;
+                appState.autoNext.scheduled = true;
                 // プレビュー情報抽出
                 let preview = null;
                 try {
@@ -535,20 +733,18 @@ function startLiveStatusWatcher() {
         } catch (_e) {}
         finally {
             // 次回の検出に備えて解除（autoNextScheduled が true の場合は以降で抑止される）
-            selectingNext = false;
+            appState.autoNext.selectingNext = false;
         }
     });
+    appState.autoNext.liveStatusStopper = stopper;
 }
 
 function stopLiveStatusWatcher() {
-    if (liveStatusStopper) {
-        try { liveStatusStopper(); } catch (_e) {}
-        liveStatusStopper = null;
+    if (appState.autoNext.liveStatusStopper) {
+        try { appState.autoNext.liveStatusStopper(); } catch (_e) {}
+        appState.autoNext.liveStatusStopper = null;
     }
-    if (autoNextCountdownTimer) {
-        clearInterval(autoNextCountdownTimer);
-        autoNextCountdownTimer = null;
-    }
+    appState.clearTimer('autoNext');
     hideAutoNextModal();
 }
 
@@ -564,13 +760,13 @@ chrome.storage.onChanged.addListener(function (changes) {
     if (changes.programsSort) options.programsSort = changes.programsSort.newValue;
     if (changes.isOpenSidebar) {
         options.isOpenSidebar = changes.isOpenSidebar.newValue;
-        isOpenSidebar = changes.isOpenSidebar.newValue;
+        appState.sidebar.isOpen = changes.isOpenSidebar.newValue;
         // 開閉に応じて停止/再開・即時更新
-        handleSidebarOpenStateChange(isOpenSidebar);
+        handleSidebarOpenStateChange(appState.sidebar.isOpen);
     }
     if (changes.sidebarWidth) {
         options.sidebarWidth = changes.sidebarWidth.newValue;
-        sidebarWidth = changes.sidebarWidth.newValue;
+        appState.sidebar.width = changes.sidebarWidth.newValue;
     }
     if (changes.autoNextProgram) {
         options.autoNextProgram = changes.autoNextProgram.newValue;
@@ -586,10 +782,7 @@ chrome.storage.onChanged.addListener(function (changes) {
 
 // サイドバー更新タイマーを再起動
 const restartSidebarUpdate = () => {
-    if (sidebarUpdateTimer) {
-        clearTimeout(sidebarUpdateTimer);
-        sidebarUpdateTimer = null;
-    }
+    appState.clearTimer('sidebar');
     startSidebarUpdate();
 }
 
@@ -627,35 +820,117 @@ async function getLivePrograms(rows = 100) {
     return result;
 }
 
-async function getProgramInfo_and_saveLocalStorage(liveId) {
-    try {
-        const data = await fetchProgramInfo(liveId);
-        if (!data) return;
-        if (data.providerType === 'user' && !data.liveScreenshotThumbnailUrls) return;
-        upsertProgramInfoFromStorage(data);
-        updateThumbnail();
-    } catch (_e) {
-        // no-op
+// getProgramInfo_and_saveLocalStorage は ProgramInfoQueue を使用するため削除
+// キューに追加するだけの関数として置き換え
+
+// 現在の更新セッションIDを保存（エラー時にも完了できるように）
+let currentUpdateSessionId = null;
+// セッション開始時刻とタイムアウトタイマー
+let sessionStartTime = null;
+let sessionTimeoutTimer = null;
+
+/**
+ * ローディングセッションを完了する（タイムアウトタイマーもクリア）
+ */
+function finishLoadingSession() {
+    if (sessionTimeoutTimer) {
+        clearTimeout(sessionTimeoutTimer);
+        sessionTimeoutTimer = null;
+    }
+    if (currentUpdateSessionId) {
+        appState.finishUpdateSession(currentUpdateSessionId);
+        currentUpdateSessionId = null;
+    }
+    sessionStartTime = null;
+    updateLoadingState();
+}
+
+/**
+ * 番組数を表示する
+ * @param {number} count - 番組数
+ */
+function updateProgramCount(count) {
+    const programCountElement = document.getElementById('program_count');
+    if (programCountElement) {
+        programCountElement.textContent = String(count);
     }
 }
 
+/**
+ * ローディング状態を更新（更新ボタンにローディング表示を適用）
+ */
+function updateLoadingState() {
+    const reloadBtn = document.getElementById('reload_programs');
+    if (!reloadBtn) return;
+    
+    if (appState.isLoading()) {
+        // ローディング中：更新ボタンを無効化し、ローディング表示を追加
+        if (!reloadBtn.classList.contains('loading')) {
+            reloadBtn.classList.add('loading');
+            reloadBtn.style.pointerEvents = 'none'; // クリック無効化
+        }
+    } else {
+        // 全ての処理が完了：ローディング表示を解除し、更新ボタンを有効化
+        if (reloadBtn.classList.contains('loading')) {
+            reloadBtn.classList.remove('loading');
+            reloadBtn.style.pointerEvents = ''; // クリック有効化
+        }
+    }
+}
+
+// checkUpdateSessionComplete()関数は削除
+// セッション完了の判定はonProcessCompleteとupdateThumbnailのコールバックで行う
+
 async function updateSidebar() {
     // 多重実行を抑止し、終了後に1回だけ追従実行
-    if (isUpdatingSidebar) {
-        pendingSidebarUpdate = true;
+    if (appState.update.isUpdating) {
+        appState.update.pending = true;
         return;
     }
-    isUpdatingSidebar = true;
-    isInserting = true;
+    appState.update.isUpdating = true;
+    appState.update.isInserting = true;
+    
+    // 更新セッションを開始（すべての処理を包括的に管理）
+    currentUpdateSessionId = appState.startUpdateSession();
+    sessionStartTime = performance.now();
+    updateLoadingState();
+    
+    // タイムアウトタイマーを設定（一定時間経過後に強制的にセッションを完了）
+    if (sessionTimeoutTimer) {
+        clearTimeout(sessionTimeoutTimer);
+    }
+    sessionTimeoutTimer = setTimeout(() => {
+        if (currentUpdateSessionId) {
+            console.warn('[ローディング] タイムアウト: セッションを強制完了します');
+            finishLoadingSession();
+        }
+    }, loadingSessionTimeoutMs);
+    
     try {
         // localStorageから番組情報を取得
         const programInfos = getProgramInfosFromStorage();
 
         const livePrograms = await getLivePrograms(100);
-        // 失敗時は何も変更しない
-        if (!livePrograms) return;
+        // 失敗時は何も変更しない（ローディング表示は維持）
+        if (!livePrograms) {
+            // 失敗時も既存の番組数を維持するため、セッションを完了
+            const container = document.getElementById('liveProgramContainer');
+            if (container && container.children.length > 0) {
+                updateProgramCount(container.children.length);
+            }
+            if (currentUpdateSessionId) {
+                finishLoadingSession();
+            }
+            return;
+        }
         // 空配列（0件）のときは既存DOMを維持して終了（フリッカー防止）
-        if (Array.isArray(livePrograms) && livePrograms.length === 0) return;
+        if (Array.isArray(livePrograms) && livePrograms.length === 0) {
+            updateProgramCount(0);
+            if (currentUpdateSessionId) {
+                finishLoadingSession();
+            }
+            return;
+        }
 
         const container = document.getElementById('liveProgramContainer');
         const frag = document.createDocumentFragment();
@@ -682,24 +957,40 @@ async function updateSidebar() {
                 if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
                 frag.appendChild(existing);
             } else {
-                const html = data ? makeProgramsHtml(data, loadingImageURL) : makeProgramsHtml(program, loadingImageURL);
-                const temp = document.createElement('div');
-                temp.innerHTML = html;
-                if (temp.firstElementChild) frag.appendChild(temp.firstElementChild);
-            }
-
-            if (!toDolists.includes(program.id)) {
-                toDolists.push(program.id);
-                if (toDolists.length > maxSaveProgramInfos) {
-                    toDolists.shift();
+                // DOM要素を直接作成（innerHTMLを使用しない）
+                const element = data 
+                    ? makeProgramElement(data, loadingImageURL) 
+                    : makeProgramElement(program, loadingImageURL);
+                if (element) {
+                    frag.appendChild(element);
                 }
             }
+
+            // 新しいQueueクラスに追加（重複チェックとFIFO処理はQueueクラスで自動的に行われる）
+            programInfoQueue.add(program.id);
         });
 
         // 一旦すべての番組を取り除く → 置き換え対象が無い場合は何もしない
         const liveProgramContainer = document.getElementById('liveProgramContainer');
-        if (!liveProgramContainer) return;
-        if (!frag.firstChild) return;
+        if (!liveProgramContainer) {
+            // 早期リターン時も番組数を表示（既存の番組数を維持）
+            const container = document.getElementById('liveProgramContainer');
+            if (container && container.children.length > 0) {
+                updateProgramCount(container.children.length);
+            }
+            if (currentUpdateSessionId) {
+                finishLoadingSession();
+            }
+            return;
+        }
+        if (!frag.firstChild) {
+            // 早期リターン時も番組数を表示（既存の番組数を維持）
+            updateProgramCount(livePrograms.length);
+            if (currentUpdateSessionId) {
+                finishLoadingSession();
+            }
+            return;
+        }
         
         // 挿入（置き換え）
         liveProgramContainer.replaceChildren(frag);
@@ -707,36 +998,132 @@ async function updateSidebar() {
         refreshThumbnailObservations();
 
         // ソート
+        // 注意: この時点では番組詳細情報が未取得の場合があるため、不完全なactive-pointでソートされる可能性がある
+        // ただし、キュー処理完了後にupdateActivePointsAndSort()で正しい値で再ソートされる
         if (options.programsSort === 'active') {
             const container2 = document.getElementById('liveProgramContainer');
             if (container2) sortProgramsByActivePoint(container2);
         }
 
-        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : sidebarWidth);
+        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width);
 
-        // 番組数更新（0件時はここまで到達しないため、表示は維持される）
-        const programCountElement = document.getElementById('program_count');
-        if (programCountElement) {
-            programCountElement.textContent = String(livePrograms.length);
-        }
+        // 番組数更新（ローディング状態は他の処理が完了するまで維持）
+        updateProgramCount(livePrograms.length);
 
         attachThumbnailErrorHandlers();
+    } catch (error) {
+        console.error('[ローディング] updateSidebar() catch ブロック', error);
+        // エラー発生時もセッションを完了
+        if (currentUpdateSessionId) {
+            finishLoadingSession();
+        }
+        throw error;
     } finally {
-        isInserting = false;
-        isUpdatingSidebar = false;
-        if (pendingSidebarUpdate) {
-            pendingSidebarUpdate = false;
+        appState.update.isInserting = false;
+        appState.update.isUpdating = false;
+        
+        // updateSidebar()完了時点での処理
+        // キューがある場合: onProcessCompleteでサムネイル更新とセッション完了チェックが行われる
+        // キューが空の場合: ローディングセッション中（ページ読み込み時やサイドバーを開いた時）のみ、サムネイル更新を開始
+        // DOM操作（ソート含む）が完了してからサムネイル更新を実行
+        // requestAnimationFrameで次のフレームに延期して、DOM操作との競合を避ける
+        const hasQueue = programInfoQueue.size() > 0;
+        if (!hasQueue && currentUpdateSessionId) {
+            requestAnimationFrame(() => {
+                // ローディングセッション中でキューが空の場合、サムネイル更新を開始
+                // ページ読み込み時やサイドバーを開いた時にサムネイル画像がない場合、次の定期更新（20s後）まで待たずに早めに表示するため
+                if (typeof updateThumbnail === 'function') {
+                    // サムネイル更新完了時にセッション完了をチェック
+                    updateThumbnail(false, () => {
+                        if (currentUpdateSessionId) {
+                            finishLoadingSession();
+                        }
+                    });
+                } else {
+                    // updateThumbnailが未定義の場合は即座にセッション完了
+                    finishLoadingSession();
+                }
+            });
+        }
+        
+        if (appState.update.pending) {
+            appState.update.pending = false;
             setTimeout(() => { updateSidebar(); }, 0);
         }
     }
 }
 
-function updateThumbnail(force) {
-    if (isInserting) return;
+/**
+ * active-point属性を更新してソートを実行
+ * 番組詳細情報が取得された後に呼ばれる
+ */
+function updateActivePointsAndSort() {
+    const container = document.getElementById('liveProgramContainer');
+    if (!container) return;
 
     const programInfos = getProgramInfosFromStorage();
-    if (!programInfos) return;
-    updateThumbnailsFromStorage(programInfos, { force: !!force });
+    if (!programInfos || !Array.isArray(programInfos)) return;
+
+    // 全ての番組要素のactive-pointを更新
+    const programElements = container.querySelectorAll('.program_container');
+    let hasUpdate = false;
+    
+    programElements.forEach((element) => {
+        if (!element.id) return;
+        
+        const programId = `lv${element.id}`;
+        const programInfo = programInfos.find((info) => info.id === programId);
+        
+        if (programInfo) {
+            const newActivePoint = calculateActivePoint(programInfo);
+            const currentActivePoint = parseFloat(element.getAttribute('active-point') || '0');
+            
+            // active-pointが更新される場合のみ更新
+            if (Math.abs(newActivePoint - currentActivePoint) > 0.0001) {
+                element.setAttribute('active-point', String(newActivePoint));
+                hasUpdate = true;
+            }
+        }
+    });
+
+    // active-pointが更新され、ソート設定が'active'の場合のみソートを実行
+    if (hasUpdate && options.programsSort === 'active') {
+        sortProgramsByActivePoint(container);
+    }
+}
+
+// サムネイル更新の実行中フラグ（定期更新とローディングセッション中の更新の競合を防ぐ）
+let isUpdatingThumbnail = false;
+
+function updateThumbnail(force, onComplete) {
+    // DOM操作中は実行しない
+    if (appState.update.isInserting) {
+        if (onComplete) onComplete();
+        return;
+    }
+    
+    // 既にサムネイル更新が実行中の場合はスキップ（定期更新との競合を防ぐ）
+    if (isUpdatingThumbnail) {
+        if (onComplete) onComplete();
+        return;
+    }
+
+    const programInfos = getProgramInfosFromStorage();
+    if (!programInfos) {
+        if (onComplete) onComplete();
+        return;
+    }
+    
+    // 実行中フラグを設定
+    isUpdatingThumbnail = true;
+    
+    // 完了コールバックをラップして、フラグをリセット
+    const wrappedOnComplete = () => {
+        isUpdatingThumbnail = false;
+        if (onComplete) onComplete();
+    };
+    
+    updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete: wrappedOnComplete });
 }
 
 /**

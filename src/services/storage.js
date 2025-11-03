@@ -1,4 +1,5 @@
 import { maxSaveProgramInfos } from '../config/constants.js'
+import { handleError } from '../utils/error.js'
 
 /**
  * Get options from chrome.storage.local and merge with defaults.
@@ -30,7 +31,8 @@ export async function getOptions(defaultOptions = {}) {
         })
 
         return merged
-    } catch (_e) {
+    } catch (error) {
+        handleError(error, { function: 'getOptions', storage: 'chrome.storage.local' })
         return defaultOptions
     }
 }
@@ -44,6 +46,8 @@ export async function saveOptions(options) {
     return new Promise((resolve, reject) => {
         chrome.storage.local.set(options, () => {
             if (chrome.runtime.lastError) {
+                const error = new Error(chrome.runtime.lastError.message || 'Storage save failed')
+                handleError(error, { function: 'saveOptions', storage: 'chrome.storage.local' })
                 reject(chrome.runtime.lastError)
             } else {
                 resolve()
@@ -75,7 +79,8 @@ export function setSidebarWidth(width) {
 export function getProgramInfos() {
     try {
         return JSON.parse(localStorage.getItem('programInfos')) || []
-    } catch (_e) {
+    } catch (error) {
+        handleError(error, { function: 'getProgramInfos', storage: 'localStorage' })
         return []
     }
 }
@@ -85,7 +90,21 @@ export function getProgramInfos() {
  * @param {any[]} list
  */
 export function setProgramInfos(list) {
-    localStorage.setItem('programInfos', JSON.stringify(list))
+    try {
+        localStorage.setItem('programInfos', JSON.stringify(list))
+    } catch (error) {
+        handleError(error, { function: 'setProgramInfos', storage: 'localStorage' })
+        // QuotaExceededなどの場合、古いデータを削除して再試行
+        if (error.name === 'QuotaExceededError' || error.code === 22) {
+            try {
+                // データを半分に減らして再試行
+                const reducedList = list.slice(-Math.floor(list.length / 2))
+                localStorage.setItem('programInfos', JSON.stringify(reducedList))
+            } catch (retryError) {
+                handleError(retryError, { function: 'setProgramInfos', storage: 'localStorage', retry: true })
+            }
+        }
+    }
 }
 
 /**

@@ -5,10 +5,14 @@ export function createSidebarControl(elems, state) {
 
     function setRootWidth() {
         if (!elems.root || !elems.sidebar) return
-        const actualSidebarWidth = elems.sidebar.offsetWidth
-        const calculatedWidth = window.innerWidth - actualSidebarWidth - 20
-        elems.root.style.width = calculatedWidth + 'px'
-        elems.root.style.maxWidth = calculatedWidth + 'px'
+        // CSS transition中の場合は、次のフレームで再実行する
+        // これにより、transition開始直後に実行される場合でも、実際の幅が確定した後に調整される
+        requestAnimationFrame(() => {
+            const actualSidebarWidth = elems.sidebar.offsetWidth
+            const calculatedWidth = window.innerWidth - actualSidebarWidth - 20
+            elems.root.style.width = calculatedWidth + 'px'
+            elems.root.style.maxWidth = calculatedWidth + 'px'
+        })
     }
 
     function openSidebar() {

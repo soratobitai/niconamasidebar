@@ -101,6 +101,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    position: relative;
 }
 .sidebar_header_item_col img {
     height: 18px;
@@ -111,22 +112,87 @@
     filter: invert(63%) sepia(98%) saturate(12%) hue-rotate(70deg) brightness(109%) contrast(92%);
 }
 
+/* 更新ボタンのローディング表示 */
+#reload_programs.loading {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+#reload_programs.loading img {
+    opacity: 0; /* 画像を非表示にしてスピナーを表示 */
+}
+
+#reload_programs.loading::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: loading-spin 0.8s linear infinite;
+    box-sizing: border-box;
+}
+
 .sidebar_body {
     position: relative;
 }
 
 #program_count {
     margin-left: 10px;
-    padding: 1px;
+    padding: 0 8px;
     min-width: 30px;
+    height: 18px;
     font-size: 0.7rem;
     font-weight: bold;
     color: #fff;
-    text-align: center;
     background-color: #f00;
-    border-radius: 30px;
-    display: inline-block;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     box-sizing: border-box;
+    vertical-align: middle;
+    /* 高さを固定してレイアウトシフトを防止 */
+    overflow: hidden;
+}
+
+/* ローディング表示 */
+#program_count.loading {
+    background-color: #666;
+    position: relative;
+    overflow: visible;
+    color: transparent;
+    /* 番組数表示と同じ高さを維持 */
+    height: 18px;
+    line-height: 18px;
+}
+
+#program_count.loading::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 10px;
+    height: 10px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: loading-spin 0.8s linear infinite;
+    box-sizing: border-box;
+}
+
+@keyframes loading-spin {
+    0% {
+        transform: translate(-50%, -50%) rotate(0deg);
+    }
+    100% {
+        transform: translate(-50%, -50%) rotate(360deg);
+    }
 }
 
 .program_container {
@@ -199,6 +265,8 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
+    line-height: 1.4;
+    min-height: 2.8em;
 }
 
 #api_error {

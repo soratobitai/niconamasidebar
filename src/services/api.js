@@ -1,4 +1,5 @@
 import { notifyboxAPI, liveInfoAPI, programInfoTtlMs } from '../config/constants.js'
+import { handleError } from '../utils/error.js'
 
 /**
  * Fetch followed live programs list.
@@ -18,9 +19,16 @@ export async function fetchLivePrograms(rows = 100) {
         try {
             let response = await fetch(`${notifyboxAPI}?rows=${rows}`, { credentials: 'include' })
             response = await response.json()
-            if (response.meta?.status !== 200 || !response.data || !response.data.notifybox_content) return false
+            if (response.meta?.status !== 200 || !response.data || !response.data.notifybox_content) {
+                handleError(
+                    new Error(`API returned status ${response.meta?.status || 'unknown'}`),
+                    { api: 'fetchLivePrograms', rows, response: response.meta }
+                )
+                return false
+            }
             return response.data.notifybox_content
-        } catch (_e) {
+        } catch (error) {
+            handleError(error, { api: 'fetchLivePrograms', rows })
             return false
         } finally {
             // clear in-flight regardless of outcome
@@ -60,11 +68,20 @@ export async function fetchProgramInfo(liveId) {
         try {
             let response = await fetch(`${liveInfoAPI}/lv${id}`)
             response = await response.json()
-            if (response.meta?.status !== 200 || !response.data) return undefined
+            if (response.meta?.status !== 200 || !response.data) {
+                if (response.meta?.status !== 200) {
+                    handleError(
+                        new Error(`API returned status ${response.meta.status}`),
+                        { api: 'fetchProgramInfo', liveId: id, status: response.meta.status }
+                    )
+                }
+                return undefined
+            }
             const data = response.data
             programInfoCache.set(id, { data, fetchedAt: Date.now() })
             return data
-        } catch (_e) {
+        } catch (error) {
+            handleError(error, { api: 'fetchProgramInfo', liveId: id })
             return undefined
         } finally {
             programInfoInFlight.delete(id)
