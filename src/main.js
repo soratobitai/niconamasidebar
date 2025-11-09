@@ -47,16 +47,31 @@ const programInfoQueue = new ProgramInfoQueue({
                     // サムネイル更新完了後、キューが空ならセッションを完了
                     if (currentUpdateSessionId && programInfoQueue.size() === 0) {
                         finishLoadingSession();
+                    } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
+                        // キューが空でない場合でも、セッション完了チェックを実行
+                        checkSessionComplete();
                     }
                 });
             } else if (currentUpdateSessionId) {
                 // updateThumbnailが未定義の場合、キューが空ならセッションを完了
                 if (programInfoQueue.size() === 0) {
                     finishLoadingSession();
+                } else if (typeof checkSessionComplete === 'function') {
+                    // キューが空でない場合でも、セッション完了チェックを実行
+                    checkSessionComplete();
                 }
             }
             // currentUpdateSessionId が null の場合は、通常のキュー処理なので何もしない（独立動作）
         });
+    },
+    onQueueEmpty: () => {
+        // キューが空になった時にセッション完了チェックを実行
+        // processBatchが早期リターンしてonProcessCompleteが呼ばれない場合でも、キューが空になった時点でチェック
+        if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
+            requestAnimationFrame(() => {
+                checkSessionComplete();
+            });
+        }
     }
 });
 
@@ -106,6 +121,9 @@ const loadingImageURL = chrome.runtime.getURL('images/loading.gif');
 const reloadImageURL = chrome.runtime.getURL('images/reload.png');
 const optionsImageURL = chrome.runtime.getURL('images/options.png');
 
+// setup()の重複実行を防ぐフラグ
+let isSetupCompleted = false;
+
 document.addEventListener('DOMContentLoaded', async () => {
     
     // 別窓くんポップアップ時は終了
@@ -121,7 +139,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     setElems();
     if (!elems.root) return; // root要素が存在しない場合は終了
 
+    // setup()の重複実行を防ぐ
+    if (isSetupCompleted) {
+        console.warn('[警告] setup()は既に実行済みです。重複実行を防止しました。');
+        return;
+    }
+    
     setup();
+    isSetupCompleted = true;
 });
 
 const setup = async () => {
@@ -178,10 +203,11 @@ const setup = async () => {
         });
     }
 
-    // 再読み込みボタン
+    // 再読み込みボタン（イベントリスナーの重複登録を防ぐ）
     const reloadBtn = document.getElementById('reload_programs');
     if (reloadBtn) {
-        reloadBtn.addEventListener('click', async function () {
+        // 既存のイベントリスナーを削除してから追加
+        const reloadBtnHandler = async function () {
             // ローディング中は処理を無視
             if (appState.isLoading()) {
                 return;
@@ -191,7 +217,13 @@ const setup = async () => {
             if (appState.sidebar.isOpen) {
                 restartSidebarUpdate();
             }
-        });
+        };
+        // 既存のリスナーを削除（もしあれば）
+        if (appState.handlers.reloadBtn) {
+            reloadBtn.removeEventListener('click', appState.handlers.reloadBtn);
+        }
+        reloadBtn.addEventListener('click', reloadBtnHandler);
+        appState.setHandler('reloadBtn', reloadBtnHandler);
     }
 
     // オプションボタン（ポップアップ）
@@ -385,6 +417,19 @@ const setup = async () => {
                 // ここではサムネイル更新などの重い処理を停止
                 appState.clearTimer('thumbnail');
                 // sidebarとtodoはqueue.jsで間隔が延長されるため、停止しない
+                
+                // バックグラウンドに移行した時にセッションが完了していない場合、
+                // キューが空でサムネイル更新も完了していればセッションを完了
+                // これにより、バックグラウンドに移行した後にセッションが残り続ける問題を防ぐ
+                if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+                    // 少し待ってからチェック（他の処理が完了するのを待つ）
+                    setTimeout(() => {
+                        if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+                            console.warn('[ローディング] バックグラウンド移行時: セッションを完了します');
+                            finishLoadingSession();
+                        }
+                    }, 500);
+                }
             }
         }
     };
@@ -476,6 +521,7 @@ async function handleSidebarOpenStateChange(open) {
         // requestAnimationFrameが実行されない場合のフォールバック（タブが非アクティブなど）
         setTimeout(() => {
             if (!rafExecuted) {
+                console.warn('⚠️ requestAnimationFrameが実行されなかったため、fallbackでupdateSidebar()を呼び出し');
                 (async () => {
                     try {
                         await updateSidebar();
@@ -533,6 +579,12 @@ const startToDoListUpdate = () => {
 
 // サイドバー更新開始
 const startSidebarUpdate = () => {
+    // 既存のタイマーがある場合は警告（二重起動を検出）
+    if (appState.getTimer('sidebar')) {
+        console.warn('[警告] サイドバー更新タイマーが既に存在します。restartSidebarUpdate()を使用してください。');
+        appState.clearTimer('sidebar');
+    }
+    
     function updateSidebarInterval() {
         updateSidebar();
         const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
@@ -812,8 +864,84 @@ const insertSidebar = () => {
     elems.root.style.flexGrow = '1';
 };
 
+// API呼び出しカウンター（重複検出用）- グローバルに設定してqueue.jsからもアクセス可能に
+window.apiCallCounter = {
+    getLivePrograms: 0,
+    fetchProgramInfo: 0,
+    totalCalls: 0,
+    startTime: Date.now()
+};
+const apiCallCounter = window.apiCallCounter;
+
+// API呼び出し統計を定期的に表示（5分ごと、コンパクト版）
+setInterval(() => {
+    const elapsed = Math.floor((Date.now() - apiCallCounter.startTime) / 1000);
+    const minutes = Math.floor(elapsed / 60);
+    const rate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(1);
+    
+    // 異常な頻度の場合のみ警告、通常時は静か
+    if (parseFloat(rate) > 100) {
+        console.warn(`⚠️ [API統計 ${minutes}分経過] 呼び出し頻度が高い: ${rate}回/分 (getLivePrograms: ${apiCallCounter.getLivePrograms}, fetchProgramInfo: ${apiCallCounter.fetchProgramInfo})`);
+    }
+}, 300000); // 5分ごと
+
+// コンソールから手動でAPI統計を確認できる関数
+window.showApiStats = () => {
+    const elapsed = ((Date.now() - apiCallCounter.startTime) / 1000).toFixed(0);
+    const rate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(2);
+    console.log('=== API呼び出し統計 ===');
+    console.log(`getLivePrograms: ${apiCallCounter.getLivePrograms}回`);
+    console.log(`fetchProgramInfo: ${apiCallCounter.fetchProgramInfo}回`);
+    console.log(`合計: ${apiCallCounter.totalCalls}回`);
+    console.log(`経過時間: ${elapsed}秒`);
+    console.log(`呼び出し頻度: ${rate}回/分`);
+    return apiCallCounter;
+};
+
+// updateSidebar呼び出し統計を確認できる関数
+window.showUpdateSidebarStats = () => {
+    console.group('📊 updateSidebar() 呼び出し統計');
+    console.log(`総呼び出し数: ${updateSidebarCallTracker.totalCalls}`);
+    console.log(`現在実行中: ${updateSidebarCallTracker.activeCalls}`);
+    console.log(`拒否された呼び出し: ${updateSidebarCallTracker.rejectedCalls}`);
+    
+    // 呼び出し元の集計
+    const callerCount = {};
+    updateSidebarCallTracker.callHistory.forEach(call => {
+        callerCount[call.caller] = (callerCount[call.caller] || 0) + 1;
+    });
+    console.log('呼び出し元の内訳（直近10件）:', callerCount);
+    
+    console.group('直近10件の呼び出し履歴');
+    updateSidebarCallTracker.callHistory.forEach((call, index) => {
+        const timeAgo = ((Date.now() - call.timestamp) / 1000).toFixed(1);
+        console.log(`${index + 1}. #${call.callId} - ${call.caller} (${timeAgo}秒前)`);
+    });
+    console.groupEnd();
+    console.groupEnd();
+    return updateSidebarCallTracker;
+};
+
 async function getLivePrograms(rows = 100) {
+    apiCallCounter.getLivePrograms++;
+    apiCallCounter.totalCalls++;
+    const callId = apiCallCounter.totalCalls;
+    
+    // 異常検出：getLiveProgramsが1分以内に10回以上呼ばれた場合のみ警告
+    const now = Date.now();
+    if (!apiCallCounter.getLiveProgramsTimestamps) {
+        apiCallCounter.getLiveProgramsTimestamps = [];
+    }
+    apiCallCounter.getLiveProgramsTimestamps.push(now);
+    // 1分以上前のタイムスタンプを削除
+    apiCallCounter.getLiveProgramsTimestamps = apiCallCounter.getLiveProgramsTimestamps.filter(t => now - t < 60000);
+    
+    if (apiCallCounter.getLiveProgramsTimestamps.length >= 10) {
+        console.error(`🚨 [異常検出] getLivePrograms()が1分以内に${apiCallCounter.getLiveProgramsTimestamps.length}回呼ばれています！`);
+    }
+    
     const result = await fetchLivePrograms(rows);
+    
     if (elems.apiErrorElement) {
         elems.apiErrorElement.style.display = result ? 'none' : 'block';
     }
@@ -828,14 +956,35 @@ let currentUpdateSessionId = null;
 // セッション開始時刻とタイムアウトタイマー
 let sessionStartTime = null;
 let sessionTimeoutTimer = null;
+// セッション完了の遅延チェック用タイマー（checkSessionComplete内で使用）
+let sessionCompleteDelayTimer = null;
 
 /**
  * ローディングセッションを完了する（タイムアウトタイマーもクリア）
  */
 function finishLoadingSession() {
+    if (!currentUpdateSessionId) {
+        return;
+    }
+    
+    const sessionId = currentUpdateSessionId;
+    const duration = sessionStartTime ? (performance.now() - sessionStartTime).toFixed(0) : 'unknown';
+    
+    // 異常に長いセッション（60秒以上）の場合のみ警告
+    if (duration !== 'unknown' && parseFloat(duration) > 60000) {
+        console.warn(`⚠️ [異常検出] ローディングセッションが${(duration / 1000).toFixed(1)}秒かかりました`, {
+            sessionId,
+            queueLength: programInfoQueue ? programInfoQueue.queueArray.length : 'N/A'
+        });
+    }
+    
     if (sessionTimeoutTimer) {
         clearTimeout(sessionTimeoutTimer);
         sessionTimeoutTimer = null;
+    }
+    if (sessionCompleteDelayTimer) {
+        clearTimeout(sessionCompleteDelayTimer);
+        sessionCompleteDelayTimer = null;
     }
     if (currentUpdateSessionId) {
         appState.finishUpdateSession(currentUpdateSessionId);
@@ -843,6 +992,35 @@ function finishLoadingSession() {
     }
     sessionStartTime = null;
     updateLoadingState();
+}
+
+/**
+ * セッション完了をチェック（イベント駆動型）
+ * キューが空で、サムネイル更新も完了している場合にセッションを完了
+ * 条件が満たされない場合は何もしない（次のイベントで再チェック）
+ */
+function checkSessionComplete() {
+    if (!currentUpdateSessionId) {
+        return; // セッションが存在しない場合は何もしない
+    }
+    
+    // キューが空で、サムネイル更新も完了している場合
+    if (programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+        // 少し待ってから再チェック（他の処理が完了するのを待つ）
+        // 既存の遅延タイマーがあればクリア（重複を防ぐ）
+        if (sessionCompleteDelayTimer) {
+            clearTimeout(sessionCompleteDelayTimer);
+        }
+        sessionCompleteDelayTimer = setTimeout(() => {
+            // 再度チェック（念のため）
+            if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+                console.warn('[ローディング] セッション完了チェック: タイムアウト前にセッションを完了します');
+                finishLoadingSession();
+            }
+            sessionCompleteDelayTimer = null;
+        }, 300); // 0.3秒後に再チェック（他の処理が完了するのを待つ）
+    }
+    // 条件が満たされない場合は何もしない（次のイベントで再チェック）
 }
 
 /**
@@ -861,9 +1039,13 @@ function updateProgramCount(count) {
  */
 function updateLoadingState() {
     const reloadBtn = document.getElementById('reload_programs');
-    if (!reloadBtn) return;
+    if (!reloadBtn) {
+        return;
+    }
     
-    if (appState.isLoading()) {
+    const isLoading = appState.isLoading();
+    
+    if (isLoading) {
         // ローディング中：更新ボタンを無効化し、ローディング表示を追加
         if (!reloadBtn.classList.contains('loading')) {
             reloadBtn.classList.add('loading');
@@ -881,26 +1063,125 @@ function updateLoadingState() {
 // checkUpdateSessionComplete()関数は削除
 // セッション完了の判定はonProcessCompleteとupdateThumbnailのコールバックで行う
 
+// updateSidebar呼び出し追跡用
+let updateSidebarCallTracker = {
+    totalCalls: 0,
+    activeCalls: 0,
+    rejectedCalls: 0,
+    callHistory: [], // 直近10件の呼び出し履歴
+    lastCallTime: 0,
+    rapidCallCount: 0, // 短期間の呼び出し回数
+    rapidCallWindow: 10000 // 10秒以内の呼び出しを「短期間」とみなす
+};
+
 async function updateSidebar() {
+    updateSidebarCallTracker.totalCalls++;
+    const callId = updateSidebarCallTracker.totalCalls;
+    const now = Date.now();
+    
+    // 呼び出し元を特定（スタックトレースから）
+    const stack = new Error().stack;
+    const stackLines = stack.split('\n').slice(1, 6);
+    let caller = 'unknown';
+    for (const line of stackLines) {
+        if (line.includes('handleSidebarOpenStateChange')) {
+            caller = 'サイドバーを開いた時';
+            break;
+        } else if (line.includes('handleVisibilityChange')) {
+            caller = 'タブがアクティブになった時';
+            break;
+        } else if (line.includes('updateSidebarInterval')) {
+            caller = '定期更新タイマー';
+            break;
+        } else if (line.includes('reloadBtnHandler') || line.includes('click')) {
+            caller = 'リロードボタン';
+            break;
+        } else if (line.includes('selectNextProgram')) {
+            caller = '次番組選択';
+            break;
+        } else if (line.includes('startToDoListUpdate')) {
+            caller = '初期化';
+            break;
+        } else if (line.includes('setTimeout') && line.includes('updateSidebar')) {
+            caller = 'pending再実行';
+            break;
+        } else if (line.includes('optionForm')) {
+            caller = 'オプション変更';
+            break;
+        }
+    }
+    
+    // 短期間（10秒以内）の呼び出し回数をカウント
+    if (now - updateSidebarCallTracker.lastCallTime < updateSidebarCallTracker.rapidCallWindow) {
+        updateSidebarCallTracker.rapidCallCount++;
+    } else {
+        updateSidebarCallTracker.rapidCallCount = 1;
+    }
+    updateSidebarCallTracker.lastCallTime = now;
+    
+    // 呼び出し履歴に追加（最大10件）
+    updateSidebarCallTracker.callHistory.push({
+        callId,
+        caller,
+        timestamp: now,
+        isUpdating: appState.update.isUpdating,
+        pending: appState.update.pending
+    });
+    if (updateSidebarCallTracker.callHistory.length > 10) {
+        updateSidebarCallTracker.callHistory.shift();
+    }
+    
+    // 異常検出：10秒以内に5回以上呼ばれた場合のみ警告
+    if (updateSidebarCallTracker.rapidCallCount >= 5) {
+        console.error(`🚨 [異常検出] updateSidebar()が10秒以内に${updateSidebarCallTracker.rapidCallCount}回呼ばれています！`, {
+            callId,
+            caller,
+            totalCalls: updateSidebarCallTracker.totalCalls,
+            rejectedCalls: updateSidebarCallTracker.rejectedCalls,
+            最近の呼び出し元: updateSidebarCallTracker.callHistory.slice(-5).map(h => h.caller)
+        });
+    }
+    
     // 多重実行を抑止し、終了後に1回だけ追従実行
     if (appState.update.isUpdating) {
+        updateSidebarCallTracker.rejectedCalls++;
+        
+        // 異常検出：拒否が連続5回以上の場合のみ警告
+        if (updateSidebarCallTracker.rejectedCalls % 5 === 0) {
+            console.error(`🚨 [異常検出] updateSidebar()の拒否が${updateSidebarCallTracker.rejectedCalls}回に達しました`, {
+                caller,
+                pending: appState.update.pending
+            });
+        }
+        
         appState.update.pending = true;
         return;
     }
+    
+    updateSidebarCallTracker.activeCalls++;
     appState.update.isUpdating = true;
     appState.update.isInserting = true;
     
     // 更新セッションを開始（すべての処理を包括的に管理）
+    // 既存のセッションがある場合は先に完了させる
+    // これは正常な動作（複数のupdateSidebar呼び出しが重複した場合など）
+    if (currentUpdateSessionId) {
+        finishLoadingSession();
+    }
+    
     currentUpdateSessionId = appState.startUpdateSession();
     sessionStartTime = performance.now();
     updateLoadingState();
     
     // タイムアウトタイマーを設定（一定時間経過後に強制的にセッションを完了）
+    // セッションIDをクロージャで保持して、確実に動作させる
+    const sessionIdForTimeout = currentUpdateSessionId;
     if (sessionTimeoutTimer) {
         clearTimeout(sessionTimeoutTimer);
     }
     sessionTimeoutTimer = setTimeout(() => {
-        if (currentUpdateSessionId) {
+        // セッションIDが一致する場合のみ完了（新しいセッションが開始されている場合は無視）
+        if (currentUpdateSessionId === sessionIdForTimeout) {
             console.warn('[ローディング] タイムアウト: セッションを強制完了します');
             finishLoadingSession();
         }
@@ -1021,6 +1302,7 @@ async function updateSidebar() {
     } finally {
         appState.update.isInserting = false;
         appState.update.isUpdating = false;
+        updateSidebarCallTracker.activeCalls--;
         
         // updateSidebar()完了時点での処理
         // キューがある場合: onProcessCompleteでサムネイル更新とセッション完了チェックが行われる
@@ -1035,20 +1317,48 @@ async function updateSidebar() {
                 if (typeof updateThumbnail === 'function') {
                     // サムネイル更新完了時にセッション完了をチェック
                     updateThumbnail(false, () => {
-                        if (currentUpdateSessionId) {
+                        if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
                             finishLoadingSession();
+                        } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
+                            // セッション完了チェックを実行
+                            checkSessionComplete();
                         }
                     });
                 } else {
                     // updateThumbnailが未定義の場合は即座にセッション完了
-                    finishLoadingSession();
+                    if (currentUpdateSessionId && programInfoQueue.size() === 0) {
+                        finishLoadingSession();
+                    } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
+                        // セッション完了チェックを実行
+                        checkSessionComplete();
+                    }
                 }
             });
+        }
+        // キューがある場合でも、セッション完了チェックを開始（フォールバック）
+        // onProcessCompleteが呼ばれない場合（processBatchが早期リターンする場合など）に備える
+        if (currentUpdateSessionId) {
+            // requestAnimationFrameが実行されない場合（タブが非アクティブなど）のフォールバック
+            if (typeof checkSessionComplete === 'function') {
+                let rafExecuted = false;
+                requestAnimationFrame(() => {
+                    rafExecuted = true;
+                    checkSessionComplete();
+                });
+                // フォールバック: requestAnimationFrameが実行されない場合
+                setTimeout(() => {
+                    if (!rafExecuted && currentUpdateSessionId && typeof checkSessionComplete === 'function') {
+                        checkSessionComplete();
+                    }
+                }, 100);
+            }
         }
         
         if (appState.update.pending) {
             appState.update.pending = false;
-            setTimeout(() => { updateSidebar(); }, 0);
+            setTimeout(() => { 
+                updateSidebar(); 
+            }, 0);
         }
     }
 }
@@ -1099,18 +1409,30 @@ function updateThumbnail(force, onComplete) {
     // DOM操作中は実行しない
     if (appState.update.isInserting) {
         if (onComplete) onComplete();
+        // スキップされた場合でも、セッション完了チェックを実行
+        if (currentUpdateSessionId) {
+            checkSessionComplete();
+        }
         return;
     }
     
     // 既にサムネイル更新が実行中の場合はスキップ（定期更新との競合を防ぐ）
     if (isUpdatingThumbnail) {
         if (onComplete) onComplete();
+        // スキップされた場合でも、セッション完了チェックを実行
+        if (currentUpdateSessionId) {
+            checkSessionComplete();
+        }
         return;
     }
 
     const programInfos = getProgramInfosFromStorage();
     if (!programInfos) {
         if (onComplete) onComplete();
+        // スキップされた場合でも、セッション完了チェックを実行
+        if (currentUpdateSessionId) {
+            checkSessionComplete();
+        }
         return;
     }
     
@@ -1121,6 +1443,10 @@ function updateThumbnail(force, onComplete) {
     const wrappedOnComplete = () => {
         isUpdatingThumbnail = false;
         if (onComplete) onComplete();
+        // サムネイル更新完了後、セッション完了チェックを実行
+        if (currentUpdateSessionId) {
+            checkSessionComplete();
+        }
     };
     
     updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete: wrappedOnComplete });
@@ -1170,7 +1496,9 @@ const reflectOptions = () => {
 
     // フォームに変更があったら保存する
     document.getElementById('optionForm').addEventListener('change', (event) => {
-        if (event.target.name === 'programsSort') updateSidebar();
+        if (event.target.name === 'programsSort') {
+            updateSidebar();
+        }
         saveOptions();
     });
 };

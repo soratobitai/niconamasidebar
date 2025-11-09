@@ -30,6 +30,7 @@ export class ProgramInfoQueue {
         this.onProcessStart = options.onProcessStart || null
         this.onProcessComplete = options.onProcessComplete || null
         this.onProcessError = options.onProcessError || null
+        this.onQueueEmpty = options.onQueueEmpty || null // キューが空になった時に呼ばれるコールバック
         
         // タイマー
         this.timer = null
@@ -44,19 +45,30 @@ export class ProgramInfoQueue {
      */
     add(ids) {
         const idArray = Array.isArray(ids) ? ids : [ids]
+        let addedCount = 0;
+        let duplicateCount = 0;
+        
         idArray.forEach(id => {
             const idStr = String(id)
             if (id != null && !this.queueSet.has(idStr)) {
                 this.queueSet.add(idStr)
                 this.queueArray.push(idStr)
+                addedCount++;
                 
                 // 最大サイズを超えた場合、古いものから削除
                 while (this.queueArray.length > this.maxSize) {
                     const oldest = this.queueArray.shift()
                     this.queueSet.delete(oldest)
                 }
+            } else {
+                duplicateCount++;
             }
         })
+        
+        // 異常検出：一度に50件以上追加された場合のみ警告
+        if (addedCount >= 50) {
+            console.warn(`⚠️ [キュー] 一度に${addedCount}件追加されました (キューサイズ: ${this.queueArray.length})`);
+        }
     }
 
     /**
@@ -128,13 +140,22 @@ export class ProgramInfoQueue {
      * @returns {Promise<void>}
      */
     async processBatch(batchSize = this.batchSize) {
-        if (this.isProcessing || this.queueArray.length === 0) {
+        // キューが空の場合のコールバック実行（早期リターン前にチェック）
+        if (this.queueArray.length === 0) {
+            if (this.onQueueEmpty) {
+                this.onQueueEmpty()
+            }
+            return
+        }
+        
+        if (this.isProcessing) {
             return
         }
 
         // レートリミットチェック
         if (!this._checkRateLimit()) {
             // リクエスト頻度が上限に達している場合は次回に延期
+            // この時点でキューが空の可能性があるが、次回のprocessBatch呼び出し時にチェックされる
             return
         }
 
@@ -153,6 +174,10 @@ export class ProgramInfoQueue {
 
             if (actualBatchSize === 0) {
                 this.isProcessing = false
+                // キューが空の場合のコールバック実行
+                if (this.queueArray.length === 0 && this.onQueueEmpty) {
+                    this.onQueueEmpty()
+                }
                 return
             }
 
@@ -188,23 +213,33 @@ export class ProgramInfoQueue {
                 }
             }
 
-            // 成功したものをキューから削除
+            // 処理結果に応じてキューから削除
             results.forEach((result, index) => {
                 const id = processedIds[index]
-                if (result.status === 'fulfilled' && result.value === true) {
+                if (result.status === 'fulfilled') {
+                    // 成功した場合も失敗した場合もキューから削除
+                    // 失敗の理由：404エラー（番組が見つからない）、ユーザー配信でスクリーンショットURLがない、など
+                    // これらは再試行しても成功しないため、キューから削除して次に進む
                     this.remove(id)
                 } else if (result.status === 'rejected') {
-                    // エラーログ
+                    // ネットワークエラーなどの予期しないエラーもキューから削除
+                    // 無限ループを防ぐため、エラーログだけ記録してキューから削除
                     handleError(result.reason, { function: 'processBatch', queueId: id })
                     if (this.onProcessError) {
                         this.onProcessError(id, result.reason)
                     }
+                    this.remove(id)
                 }
             })
 
             // コールバック実行
             if (this.onProcessComplete) {
                 this.onProcessComplete(processedIds.length, results)
+            }
+            
+            // キューが空になった場合のコールバック実行
+            if (this.queueArray.length === 0 && this.onQueueEmpty) {
+                this.onQueueEmpty()
             }
 
         } catch (error) {
@@ -215,6 +250,10 @@ export class ProgramInfoQueue {
             }
         } finally {
             this.isProcessing = false
+            // エラーが発生した場合でも、キューが空になった場合はコールバックを実行
+            if (this.queueArray.length === 0 && this.onQueueEmpty) {
+                this.onQueueEmpty()
+            }
         }
     }
 
@@ -224,8 +263,15 @@ export class ProgramInfoQueue {
      * @returns {Promise<boolean>} 成功したかどうか
      */
     async fetchAndSave(liveId) {
+        // API呼び出しカウンターをインクリメント（グローバルに追跡）
+        if (typeof window !== 'undefined' && window.apiCallCounter) {
+            window.apiCallCounter.fetchProgramInfo = (window.apiCallCounter.fetchProgramInfo || 0) + 1;
+            window.apiCallCounter.totalCalls++;
+        }
+        
         try {
             const data = await fetchProgramInfo(liveId)
+            
             if (!data) return false
 
             // ユーザー配信でスクリーンショットURLがない場合はスキップ
