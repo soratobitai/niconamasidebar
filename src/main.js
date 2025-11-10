@@ -15,62 +15,52 @@ import { ProgramInfoQueue } from './services/queue.js'
 const appState = new AppState();
 
 // 番組詳細情報取得キュー
-// レートリミッティングを実装して、APIへの負荷を元の実装と同等に保つ
-// 元の実装: 0.3秒/件 = 約3.3件/秒 → 安全マージンを考慮して4件/秒に設定
+// レートリミッティングを実装して、APIへの負荷を配慮
+// 1秒あたり最大4件に制限、1件ずつ処理（0.25秒/件）
 const programInfoQueue = new ProgramInfoQueue({
-    batchSize: 2, // バッチサイズを小さくして、レートリミットを確実に守る
-    processInterval: toDolistsInterval * 1000, // 0.3秒間隔
+    batchSize: 1, // 1件ずつ処理
+    processInterval: toDolistsInterval * 1000, // 0.25秒間隔
     idleTimeout: 50,
     maxSize: maxSaveProgramInfos,
-    maxRequestsPerSecond: 4, // 1秒あたり最大4件（元の実装の約3.3件/秒より少し余裕を持たせる）
+    maxRequestsPerSecond: 4, // 1秒あたり最大4件
     getVisibilityState: () => appState.isVisible(), // 可視状態を取得する関数
     onProcessStart: () => {
         // キュー処理開始を追跡（updateSidebar()完了後のキュー処理開始時のみ）
         // updateSidebar()内で既にstartLoading()が呼ばれているため、ここでは呼ばない
         // ただし、updateSidebar()完了後にキュー処理が開始される場合、ローディングは継続される
     },
-    onProcessComplete: (processedCount, results) => {
-        // 番組詳細情報取得後、active-pointを更新してソートを実行
-        // 初期表示時に番組詳細情報が未取得のため、ソートが正しく動作しない問題を解決
+    onProcessComplete: (processedCount, results, shouldSort) => {
+        // 番組詳細情報取得後、active-pointを更新
+        // shouldSortがtrueの場合のみソートを実行（初回/サイドバーオープン/更新ボタン時）
         if (typeof updateActivePointsAndSort === 'function') {
-            updateActivePointsAndSort();
+            updateActivePointsAndSort(shouldSort);
         }
-        
-        // DOM操作（ソート含む）が完了してからサムネイル更新を実行
-        // requestAnimationFrameで次のフレームに延期して、DOM操作との競合を避ける
-        requestAnimationFrame(() => {
-            // ローディングセッション中（ページ読み込み時など）のみ、サムネイル更新を実行
-            // 通常のキュー処理では独立して動作するため、ここでは呼ばない
-            // ページ読み込み時にサムネイル画像がない状態の場合、次の定期更新（20s後）まで待たずに早めに表示するため
-            if (currentUpdateSessionId && typeof updateThumbnail === 'function') {
-                updateThumbnail(false, () => {
-                    // サムネイル更新完了後、キューが空ならセッションを完了
-                    if (currentUpdateSessionId && programInfoQueue.size() === 0) {
-                        finishLoadingSession();
-                    } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
-                        // キューが空でない場合でも、セッション完了チェックを実行
-                        checkSessionComplete();
-                    }
-                });
-            } else if (currentUpdateSessionId) {
-                // updateThumbnailが未定義の場合、キューが空ならセッションを完了
-                if (programInfoQueue.size() === 0) {
-                    finishLoadingSession();
-                } else if (typeof checkSessionComplete === 'function') {
-                    // キューが空でない場合でも、セッション完了チェックを実行
-                    checkSessionComplete();
-                }
-            }
-            // currentUpdateSessionId が null の場合は、通常のキュー処理なので何もしない（独立動作）
-        });
+        // サムネイル更新は別タイマー（startThumbnailUpdate）で定期実行されるため、ここでは呼ばない
     },
     onQueueEmpty: () => {
-        // キューが空になった時にセッション完了チェックを実行
-        // processBatchが早期リターンしてonProcessCompleteが呼ばれない場合でも、キューが空になった時点でチェック
-        if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
-            requestAnimationFrame(() => {
-                checkSessionComplete();
-            });
+        // 独立サイクル: キューが空になったら設定時間後に再度キュー処理を開始
+        // shouldSortがfalseの場合のみ（初回/サイドバーオープン/更新ボタン時は除外）
+        if (!programInfoQueue.shouldSort && appState.sidebar.isOpen) {
+            // 既存のタイマーをクリア
+            if (appState.getTimer('queueRestart')) {
+                clearTimeout(appState.getTimer('queueRestart'));
+            }
+            // 設定時間後に再開
+            const timer = setTimeout(() => {
+                if (appState.sidebar.isOpen) {
+                    // DOM上の番組をキューに追加
+                    const container = document.getElementById('liveProgramContainer');
+                    if (container) {
+                        const programElements = container.querySelectorAll('.program_container');
+                        const programIds = Array.from(programElements).map(el => el.id).filter(id => id);
+                        if (programIds.length > 0) {
+                            programInfoQueue.add(programIds);
+                        }
+                    }
+                }
+                appState.clearTimer('queueRestart');
+            }, Number(options.updateProgramsInterval) * 1000);
+            appState.setTimer('queueRestart', timer);
         }
     }
 });
@@ -212,11 +202,8 @@ const setup = async () => {
             if (appState.isLoading()) {
                 return;
             }
-            await updateSidebar();
-            // 手動更新後、次回の自動更新タイマーをリセット
-            if (appState.sidebar.isOpen) {
-                restartSidebarUpdate();
-            }
+            // 手動更新を実行
+            await performManualUpdate();
         };
         // 既存のリスナーを削除（もしあれば）
         if (appState.handlers.reloadBtn) {
@@ -406,10 +393,8 @@ const setup = async () => {
                 
                 // 即座に更新を実行
                 requestAnimationFrame(async () => {
-                    await updateSidebar();
-                    updateThumbnail();
-                    // タブがアクティブになった時の即時更新後、次回の自動更新タイマーをリセット
-                    restartSidebarUpdate();
+                    // 手動更新を実行
+                    await performManualUpdate();
                 });
             } else {
                 // バックグラウンドに移行したとき：タイマーを停止（リソース消費を抑える）
@@ -470,6 +455,7 @@ function stopAllTimers() {
     appState.clearTimer('todo');
     appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');
+    appState.clearTimer('queueRestart');
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
@@ -478,7 +464,7 @@ async function handleSidebarOpenStateChange(open) {
         // タイマーを先に開始（UIの反応を優先）
         initThumbnailVisibilityObserver();
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
-        if (!appState.getTimer('todo')) startToDoListUpdate();
+        // startToDoListUpdate()はここでは呼ばない（performInitialLoad内で呼ばれるため重複を避ける）
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
         
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
@@ -488,60 +474,24 @@ async function handleSidebarOpenStateChange(open) {
         let rafExecuted = false;
         requestAnimationFrame(async () => {
             rafExecuted = true;
-            try {
-                await updateSidebar();
-                // updateThumbnail()はupdateSidebar()の完了後、onProcessComplete内で呼ばれるため、
-                // ここでは呼ばない（重複カウントを避ける）
-                
-                // サイドバーを開いた直後は、キューに追加された新しい番組の詳細情報を優先的に取得
-                // これにより、30分放置後に開いた場合でも、すぐにサムネイルが更新される
-                // 注意: updateSidebar()内で既にstartLoading()が呼ばれているため、
-                // ここで追加でstartLoading()を呼ぶ必要はない（onProcessCompleteでfinishLoading()が呼ばれる）
-                if (programInfoQueue.size() > 0) {
-                    programInfoQueue.processNow().catch(error => {
-                        // エラーが発生しても、定期的な処理で再試行されるため、ログだけ記録
-                        console.warn('即座のキュー処理でエラーが発生しました:', error);
-                        // エラー時もセッションを完了
-                        if (currentUpdateSessionId) {
-                            finishLoadingSession();
-                        }
-                    });
-                }
-                // サイドバーを開いた時の即時更新後、次回の自動更新タイマーをリセット
-                restartSidebarUpdate();
-            } catch (error) {
-                console.error('[ローディング] handleSidebarOpenStateChange updateSidebar エラー:', error);
-                // エラー時もセッションを完了
-                if (currentUpdateSessionId) {
-                    finishLoadingSession();
-                }
+            // 初回ロードまたは手動更新を実行
+            // oneTimeFlagが立っている場合は初回ロード、それ以外は手動更新
+            if (appState.update.oneTimeFlag) {
+                if (!appState.getTimer('todo')) await startToDoListUpdate();
+            } else {
+                await performManualUpdate();
             }
         });
         
         // requestAnimationFrameが実行されない場合のフォールバック（タブが非アクティブなど）
         setTimeout(() => {
             if (!rafExecuted) {
-                console.warn('⚠️ requestAnimationFrameが実行されなかったため、fallbackでupdateSidebar()を呼び出し');
-                (async () => {
-                    try {
-                        await updateSidebar();
-                        if (programInfoQueue.size() > 0) {
-                            programInfoQueue.processNow().catch(error => {
-                                console.warn('即座のキュー処理でエラーが発生しました:', error);
-                                if (currentUpdateSessionId) {
-                                    finishLoadingSession();
-                                }
-                            });
-                        }
-                        // サイドバーを開いた時の即時更新後、次回の自動更新タイマーをリセット
-                        restartSidebarUpdate();
-                    } catch (error) {
-                        console.error('[ローディング] handleSidebarOpenStateChange updateSidebar エラー:', error);
-                        if (currentUpdateSessionId) {
-                            finishLoadingSession();
-                        }
-                    }
-                })();
+                console.warn('⚠️ requestAnimationFrameが実行されなかったため、fallbackで更新を呼び出し');
+                if (appState.update.oneTimeFlag) {
+                    startToDoListUpdate();
+                } else {
+                    performManualUpdate();
+                }
             }
         }, 100); // 100ms後にチェック
     } else {
@@ -562,10 +512,10 @@ const startThumbnailUpdate = () => {
 }
 
 // ToDoリスト更新開始（新しいQueueクラスを使用）
-const startToDoListUpdate = () => {
-    // oneTimeFlagの処理
+const startToDoListUpdate = async () => {
+    // oneTimeFlagの処理（ページ読み込み時の初回更新）
     if (appState.update.oneTimeFlag) {
-        updateSidebar();
+        await performInitialLoad(); // 初回ロードを実行（番組詳細も全件取得、完了まで待つ）
         appState.update.oneTimeFlag = false;
     }
     
@@ -579,14 +529,20 @@ const startToDoListUpdate = () => {
 
 // サイドバー更新開始
 const startSidebarUpdate = () => {
-    // 既存のタイマーがある場合は警告（二重起動を検出）
-    if (appState.getTimer('sidebar')) {
-        console.warn('[警告] サイドバー更新タイマーが既に存在します。restartSidebarUpdate()を使用してください。');
-        appState.clearTimer('sidebar');
+    // 既存のタイマーがある場合は確実にクリア
+    const existingTimer = appState.getTimer('sidebar');
+    if (existingTimer && existingTimer !== 'queue-managed') {
+        clearTimeout(existingTimer);
     }
     
-    function updateSidebarInterval() {
-        updateSidebar();
+    async function updateSidebarInterval() {
+        // ソートフラグはOFFのまま（定期更新ではソートしない）
+        await updateSidebar(); // 完了を待つ
+        // 定期更新時：最低1秒のローディング時間を確保して終了
+        if (currentUpdateSessionId) {
+            await finishLoadingSessionWithMinDuration(1000);
+        }
+        // 完了後にタイマーをセット
         const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
         appState.setTimer('sidebar', timer);
     }
@@ -834,6 +790,10 @@ chrome.storage.onChanged.addListener(function (changes) {
 
 // サイドバー更新タイマーを再起動
 const restartSidebarUpdate = () => {
+    const existingTimer = appState.getTimer('sidebar');
+    if (existingTimer && existingTimer !== 'queue-managed') {
+        clearTimeout(existingTimer);
+    }
     appState.clearTimer('sidebar');
     startSidebarUpdate();
 }
@@ -877,24 +837,41 @@ const apiCallCounter = window.apiCallCounter;
 setInterval(() => {
     const elapsed = Math.floor((Date.now() - apiCallCounter.startTime) / 1000);
     const minutes = Math.floor(elapsed / 60);
-    const rate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(1);
     
-    // 異常な頻度の場合のみ警告、通常時は静か
-    if (parseFloat(rate) > 100) {
-        console.warn(`⚠️ [API統計 ${minutes}分経過] 呼び出し頻度が高い: ${rate}回/分 (getLivePrograms: ${apiCallCounter.getLivePrograms}, fetchProgramInfo: ${apiCallCounter.fetchProgramInfo})`);
+    // 過去1分間の実際の呼び出し頻度を計算
+    if (!apiCallCounter.recentTimestamps) {
+        apiCallCounter.recentTimestamps = [];
+    }
+    const now = Date.now();
+    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
+    const recentRate = apiCallCounter.recentTimestamps.length;
+    
+    // 異常な頻度の場合のみ警告（過去1分間に100回以上）
+    if (recentRate > 100) {
+        console.warn(`⚠️ [API統計] 過去1分間の呼び出し頻度が高い: ${recentRate}回/分 (getLivePrograms: ${apiCallCounter.getLivePrograms}, fetchProgramInfo: ${apiCallCounter.fetchProgramInfo})`);
     }
 }, 300000); // 5分ごと
 
 // コンソールから手動でAPI統計を確認できる関数
 window.showApiStats = () => {
     const elapsed = ((Date.now() - apiCallCounter.startTime) / 1000).toFixed(0);
-    const rate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(2);
+    const averageRate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(2);
+    
+    // 過去1分間の実際の呼び出し頻度を計算
+    if (!apiCallCounter.recentTimestamps) {
+        apiCallCounter.recentTimestamps = [];
+    }
+    const now = Date.now();
+    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
+    const recentRate = apiCallCounter.recentTimestamps.length;
+    
     console.log('=== API呼び出し統計 ===');
     console.log(`getLivePrograms: ${apiCallCounter.getLivePrograms}回`);
     console.log(`fetchProgramInfo: ${apiCallCounter.fetchProgramInfo}回`);
     console.log(`合計: ${apiCallCounter.totalCalls}回`);
-    console.log(`経過時間: ${elapsed}秒`);
-    console.log(`呼び出し頻度: ${rate}回/分`);
+    console.log(`経過時間: ${elapsed}秒 (${(elapsed / 60).toFixed(1)}分)`);
+    console.log(`平均頻度: ${averageRate}回/分`);
+    console.log(`過去1分間の実際の頻度: ${recentRate}回/分`);
     return apiCallCounter;
 };
 
@@ -927,8 +904,14 @@ async function getLivePrograms(rows = 100) {
     apiCallCounter.totalCalls++;
     const callId = apiCallCounter.totalCalls;
     
-    // 異常検出：getLiveProgramsが1分以内に10回以上呼ばれた場合のみ警告
+    // タイムスタンプを記録（API呼び出し頻度の計算用）
     const now = Date.now();
+    if (!apiCallCounter.recentTimestamps) {
+        apiCallCounter.recentTimestamps = [];
+    }
+    apiCallCounter.recentTimestamps.push(now);
+    
+    // 異常検出：getLiveProgramsが1分以内に10回以上呼ばれた場合のみ警告
     if (!apiCallCounter.getLiveProgramsTimestamps) {
         apiCallCounter.getLiveProgramsTimestamps = [];
     }
@@ -956,9 +939,6 @@ let currentUpdateSessionId = null;
 // セッション開始時刻とタイムアウトタイマー
 let sessionStartTime = null;
 let sessionTimeoutTimer = null;
-// セッション完了の遅延チェック用タイマー（checkSessionComplete内で使用）
-let sessionCompleteDelayTimer = null;
-
 /**
  * ローディングセッションを完了する（タイムアウトタイマーもクリア）
  */
@@ -970,21 +950,16 @@ function finishLoadingSession() {
     const sessionId = currentUpdateSessionId;
     const duration = sessionStartTime ? (performance.now() - sessionStartTime).toFixed(0) : 'unknown';
     
-    // 異常に長いセッション（60秒以上）の場合のみ警告
-    if (duration !== 'unknown' && parseFloat(duration) > 60000) {
+    // 異常に長いセッション（10秒以上）の場合のみ警告
+    if (duration !== 'unknown' && parseFloat(duration) > 10000) {
         console.warn(`⚠️ [異常検出] ローディングセッションが${(duration / 1000).toFixed(1)}秒かかりました`, {
-            sessionId,
-            queueLength: programInfoQueue ? programInfoQueue.queueArray.length : 'N/A'
+            sessionId
         });
     }
     
     if (sessionTimeoutTimer) {
         clearTimeout(sessionTimeoutTimer);
         sessionTimeoutTimer = null;
-    }
-    if (sessionCompleteDelayTimer) {
-        clearTimeout(sessionCompleteDelayTimer);
-        sessionCompleteDelayTimer = null;
     }
     if (currentUpdateSessionId) {
         appState.finishUpdateSession(currentUpdateSessionId);
@@ -995,32 +970,137 @@ function finishLoadingSession() {
 }
 
 /**
- * セッション完了をチェック（イベント駆動型）
- * キューが空で、サムネイル更新も完了している場合にセッションを完了
- * 条件が満たされない場合は何もしない（次のイベントで再チェック）
+ * 最低ローディング時間を確保してセッションを完了する
+ * @param {number} minDuration - 最低表示時間（ミリ秒、デフォルト1000ms）
  */
-function checkSessionComplete() {
-    if (!currentUpdateSessionId) {
-        return; // セッションが存在しない場合は何もしない
+async function finishLoadingSessionWithMinDuration(minDuration = 1000) {
+    if (!currentUpdateSessionId || !sessionStartTime) {
+        finishLoadingSession();
+        return;
     }
     
-    // キューが空で、サムネイル更新も完了している場合
-    if (programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
-        // 少し待ってから再チェック（他の処理が完了するのを待つ）
-        // 既存の遅延タイマーがあればクリア（重複を防ぐ）
-        if (sessionCompleteDelayTimer) {
-            clearTimeout(sessionCompleteDelayTimer);
-        }
-        sessionCompleteDelayTimer = setTimeout(() => {
-            // 再度チェック（念のため）
-            if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
-                console.warn('[ローディング] セッション完了チェック: タイムアウト前にセッションを完了します');
-                finishLoadingSession();
-            }
-            sessionCompleteDelayTimer = null;
-        }, 300); // 0.3秒後に再チェック（他の処理が完了するのを待つ）
+    const elapsed = performance.now() - sessionStartTime;
+    const remaining = minDuration - elapsed;
+    
+    if (remaining > 0) {
+        // 最低表示時間に達していない場合は待つ
+        await new Promise(resolve => setTimeout(resolve, remaining));
     }
-    // 条件が満たされない場合は何もしない（次のイベントで再チェック）
+    
+    finishLoadingSession();
+}
+
+/**
+ * 初回ロードを実行（ページ読み込み時のみ）
+ * updateSidebar() + 番組詳細取得（全件） + サムネイル更新
+ * すべて完了までローディング維持
+ */
+let isPerformingInitialLoad = false;
+async function performInitialLoad() {
+    // 重複実行を防ぐ
+    if (isPerformingInitialLoad) {
+        console.warn('[初回ロード] 既に実行中のため、スキップします');
+        return;
+    }
+    
+    isPerformingInitialLoad = true;
+    try {
+        // ソートフラグをON
+        programInfoQueue.setShouldSort(true);
+        
+        // 番組リスト更新
+        await updateSidebar();
+        
+        // DOM更新完了を待つ（requestAnimationFrameで次のフレームまで待機）
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        
+        // 番組詳細取得（全件、キューが空になるまで）
+        const initialQueueSize = programInfoQueue.size();
+        
+        if (initialQueueSize > 0) {
+            // processNow()で全件処理（maxItems=nullで全件）
+            await programInfoQueue.processNow(null).catch(error => {
+                console.error('[初回ロード] キュー処理でエラーが発生しました:', error);
+            });
+        }
+        
+        // サムネイル更新（forceフラグON）
+        await new Promise(resolve => {
+            updateThumbnail(true, resolve);
+        });
+        
+        // 最低1秒のローディング時間を確保して終了
+        await finishLoadingSessionWithMinDuration(1000);
+        
+        // 定期タイマーをリセット
+        if (appState.sidebar.isOpen) {
+            restartSidebarUpdate();
+        }
+    } catch (error) {
+        console.error('[初回ロード] エラーが発生しました:', error);
+        // エラー時もローディングを終了
+        if (currentUpdateSessionId) {
+            await finishLoadingSessionWithMinDuration(1000);
+        }
+    } finally {
+        isPerformingInitialLoad = false; // フラグをリセット
+    }
+}
+
+/**
+ * 手動更新を実行（サイドバーオープン、タブ切替、更新ボタン押下）
+ * updateSidebar() + サムネイル更新のみ
+ * 番組詳細取得はバックグラウンドで自動実行
+ */
+async function performManualUpdate() {
+    try {
+        // ソートフラグをON
+        programInfoQueue.setShouldSort(true);
+        
+        // 番組リスト更新
+        await updateSidebar();
+        
+        // サムネイル更新（forceフラグON）
+        await new Promise(resolve => {
+            updateThumbnail(true, resolve);
+        });
+        
+        // 最低1秒のローディング時間を確保して終了
+        await finishLoadingSessionWithMinDuration(1000);
+        
+        // 定期タイマーをリセット
+        if (appState.sidebar.isOpen) {
+            restartSidebarUpdate();
+        }
+    } catch (error) {
+        console.error('[手動更新] エラーが発生しました:', error);
+        // エラー時もローディングを終了
+        if (currentUpdateSessionId) {
+            await finishLoadingSessionWithMinDuration(1000);
+        }
+    }
+}
+
+/**
+ * 番組リストをソート
+ * @param {HTMLElement} container - 番組コンテナ
+ */
+function sortPrograms(container) {
+    if (!container || container.children.length === 0) return;
+    
+    if (options.programsSort === 'active') {
+        // 人気順：active-point属性でソート
+        sortProgramsByActivePoint(container);
+    } else {
+        // 新着順：番組IDでソート（IDが大きいほど新しい）
+        const programs = Array.from(container.children);
+        programs.sort((a, b) => {
+            const idA = parseInt(a.id, 10) || 0;
+            const idB = parseInt(b.id, 10) || 0;
+            return idB - idA; // 降順（新しいものが上）
+        });
+        programs.forEach((program) => container.appendChild(program));
+    }
 }
 
 /**
@@ -1060,8 +1140,8 @@ function updateLoadingState() {
     }
 }
 
-// checkUpdateSessionComplete()関数は削除
-// セッション完了の判定はonProcessCompleteとupdateThumbnailのコールバックで行う
+// セッション完了の判定はupdateSidebar()のfinally内で行う
+// キュー処理とサムネイル更新は別タイマーでバックグラウンド実行される
 
 // updateSidebar呼び出し追跡用
 let updateSidebarCallTracker = {
@@ -1163,10 +1243,9 @@ async function updateSidebar() {
     appState.update.isInserting = true;
     
     // 更新セッションを開始（すべての処理を包括的に管理）
-    // 既存のセッションがある場合は先に完了させる
-    // これは正常な動作（複数のupdateSidebar呼び出しが重複した場合など）
+    // 既存のセッションがある場合は警告を出すが、完了はさせない（呼び出し元で制御）
     if (currentUpdateSessionId) {
-        finishLoadingSession();
+        console.warn('[ローディング] 既存のセッションが存在します:', currentUpdateSessionId);
     }
     
     currentUpdateSessionId = appState.startUpdateSession();
@@ -1192,24 +1271,18 @@ async function updateSidebar() {
         const programInfos = getProgramInfosFromStorage();
 
         const livePrograms = await getLivePrograms(100);
-        // 失敗時は何も変更しない（ローディング表示は維持）
+        // 失敗時は何も変更しない（ローディング終了は呼び出し元で制御）
         if (!livePrograms) {
-            // 失敗時も既存の番組数を維持するため、セッションを完了
+            // 失敗時も既存の番組数を維持
             const container = document.getElementById('liveProgramContainer');
             if (container && container.children.length > 0) {
                 updateProgramCount(container.children.length);
-            }
-            if (currentUpdateSessionId) {
-                finishLoadingSession();
             }
             return;
         }
         // 空配列（0件）のときは既存DOMを維持して終了（フリッカー防止）
         if (Array.isArray(livePrograms) && livePrograms.length === 0) {
             updateProgramCount(0);
-            if (currentUpdateSessionId) {
-                finishLoadingSession();
-            }
             return;
         }
 
@@ -1259,17 +1332,11 @@ async function updateSidebar() {
             if (container && container.children.length > 0) {
                 updateProgramCount(container.children.length);
             }
-            if (currentUpdateSessionId) {
-                finishLoadingSession();
-            }
             return;
         }
         if (!frag.firstChild) {
             // 早期リターン時も番組数を表示（既存の番組数を維持）
             updateProgramCount(livePrograms.length);
-            if (currentUpdateSessionId) {
-                finishLoadingSession();
-            }
             return;
         }
         
@@ -1281,10 +1348,8 @@ async function updateSidebar() {
         // ソート
         // 注意: この時点では番組詳細情報が未取得の場合があるため、不完全なactive-pointでソートされる可能性がある
         // ただし、キュー処理完了後にupdateActivePointsAndSort()で正しい値で再ソートされる
-        if (options.programsSort === 'active') {
-            const container2 = document.getElementById('liveProgramContainer');
-            if (container2) sortProgramsByActivePoint(container2);
-        }
+        const container2 = document.getElementById('liveProgramContainer');
+        if (container2) sortPrograms(container2);
 
         setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width);
 
@@ -1294,65 +1359,16 @@ async function updateSidebar() {
         attachThumbnailErrorHandlers();
     } catch (error) {
         console.error('[ローディング] updateSidebar() catch ブロック', error);
-        // エラー発生時もセッションを完了
-        if (currentUpdateSessionId) {
-            finishLoadingSession();
-        }
+        // エラー発生時のローディング終了は呼び出し元で制御
         throw error;
     } finally {
         appState.update.isInserting = false;
         appState.update.isUpdating = false;
         updateSidebarCallTracker.activeCalls--;
         
-        // updateSidebar()完了時点での処理
-        // キューがある場合: onProcessCompleteでサムネイル更新とセッション完了チェックが行われる
-        // キューが空の場合: ローディングセッション中（ページ読み込み時やサイドバーを開いた時）のみ、サムネイル更新を開始
-        // DOM操作（ソート含む）が完了してからサムネイル更新を実行
-        // requestAnimationFrameで次のフレームに延期して、DOM操作との競合を避ける
-        const hasQueue = programInfoQueue.size() > 0;
-        if (!hasQueue && currentUpdateSessionId) {
-            requestAnimationFrame(() => {
-                // ローディングセッション中でキューが空の場合、サムネイル更新を開始
-                // ページ読み込み時やサイドバーを開いた時にサムネイル画像がない場合、次の定期更新（20s後）まで待たずに早めに表示するため
-                if (typeof updateThumbnail === 'function') {
-                    // サムネイル更新完了時にセッション完了をチェック
-                    updateThumbnail(false, () => {
-                        if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
-                            finishLoadingSession();
-                        } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
-                            // セッション完了チェックを実行
-                            checkSessionComplete();
-                        }
-                    });
-                } else {
-                    // updateThumbnailが未定義の場合は即座にセッション完了
-                    if (currentUpdateSessionId && programInfoQueue.size() === 0) {
-                        finishLoadingSession();
-                    } else if (currentUpdateSessionId && typeof checkSessionComplete === 'function') {
-                        // セッション完了チェックを実行
-                        checkSessionComplete();
-                    }
-                }
-            });
-        }
-        // キューがある場合でも、セッション完了チェックを開始（フォールバック）
-        // onProcessCompleteが呼ばれない場合（processBatchが早期リターンする場合など）に備える
-        if (currentUpdateSessionId) {
-            // requestAnimationFrameが実行されない場合（タブが非アクティブなど）のフォールバック
-            if (typeof checkSessionComplete === 'function') {
-                let rafExecuted = false;
-                requestAnimationFrame(() => {
-                    rafExecuted = true;
-                    checkSessionComplete();
-                });
-                // フォールバック: requestAnimationFrameが実行されない場合
-                setTimeout(() => {
-                    if (!rafExecuted && currentUpdateSessionId && typeof checkSessionComplete === 'function') {
-                        checkSessionComplete();
-                    }
-                }, 100);
-            }
-        }
+        // ローディング終了は呼び出し元で制御
+        // 手動更新時：キュー処理とサムネイル更新完了後に終了
+        // 定期更新時：updateSidebar()完了時点で終了
         
         if (appState.update.pending) {
             appState.update.pending = false;
@@ -1366,8 +1382,9 @@ async function updateSidebar() {
 /**
  * active-point属性を更新してソートを実行
  * 番組詳細情報が取得された後に呼ばれる
+ * @param {boolean} shouldSort - ソートを実行するかどうか（初回/サイドバーオープン/更新ボタン時のみtrue）
  */
-function updateActivePointsAndSort() {
+function updateActivePointsAndSort(shouldSort = false) {
     const container = document.getElementById('liveProgramContainer');
     if (!container) return;
 
@@ -1396,60 +1413,28 @@ function updateActivePointsAndSort() {
         }
     });
 
-    // active-pointが更新され、ソート設定が'active'の場合のみソートを実行
-    if (hasUpdate && options.programsSort === 'active') {
-        sortProgramsByActivePoint(container);
+    // shouldSortがtrueで、active-pointが更新された場合のみソートを実行
+    if (shouldSort && hasUpdate) {
+        sortPrograms(container);
     }
 }
-
-// サムネイル更新の実行中フラグ（定期更新とローディングセッション中の更新の競合を防ぐ）
-let isUpdatingThumbnail = false;
 
 function updateThumbnail(force, onComplete) {
     // DOM操作中は実行しない
     if (appState.update.isInserting) {
+        console.warn('[サムネイル] DOM操作中のためスキップ');
         if (onComplete) onComplete();
-        // スキップされた場合でも、セッション完了チェックを実行
-        if (currentUpdateSessionId) {
-            checkSessionComplete();
-        }
-        return;
-    }
-    
-    // 既にサムネイル更新が実行中の場合はスキップ（定期更新との競合を防ぐ）
-    if (isUpdatingThumbnail) {
-        if (onComplete) onComplete();
-        // スキップされた場合でも、セッション完了チェックを実行
-        if (currentUpdateSessionId) {
-            checkSessionComplete();
-        }
         return;
     }
 
     const programInfos = getProgramInfosFromStorage();
-    if (!programInfos) {
+    if (!programInfos || programInfos.length === 0) {
+        console.warn('[サムネイル] 番組情報が存在しないためスキップ');
         if (onComplete) onComplete();
-        // スキップされた場合でも、セッション完了チェックを実行
-        if (currentUpdateSessionId) {
-            checkSessionComplete();
-        }
         return;
     }
     
-    // 実行中フラグを設定
-    isUpdatingThumbnail = true;
-    
-    // 完了コールバックをラップして、フラグをリセット
-    const wrappedOnComplete = () => {
-        isUpdatingThumbnail = false;
-        if (onComplete) onComplete();
-        // サムネイル更新完了後、セッション完了チェックを実行
-        if (currentUpdateSessionId) {
-            checkSessionComplete();
-        }
-    };
-    
-    updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete: wrappedOnComplete });
+    updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete });
 }
 
 /**
@@ -1497,7 +1482,20 @@ const reflectOptions = () => {
     // フォームに変更があったら保存する
     document.getElementById('optionForm').addEventListener('change', (event) => {
         if (event.target.name === 'programsSort') {
-            updateSidebar();
+            // ソート方式変更時は既存データでソート（APIリクエストなし、ローディングなし）
+            programInfoQueue.setShouldSort(true);
+            
+            // オプションを先に保存（ソート順を反映）
+            saveOptions();
+            
+            // 既存のDOMをソート（統一関数を使用）
+            const container = document.getElementById('liveProgramContainer');
+            if (container) {
+                sortPrograms(container);
+                // サムネイルのIntersectionObserver監視を更新
+                refreshThumbnailObservations();
+            }
+            return; // saveOptions()は既に呼ばれているのでreturn
         }
         saveOptions();
     });

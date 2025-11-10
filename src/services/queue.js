@@ -16,10 +16,11 @@ export class ProgramInfoQueue {
         this.isProcessing = false
         
         // 設定
-        this.batchSize = options.batchSize || 3 // 一度に処理する件数（API負荷を考慮して3件に変更）
-        this.processInterval = options.processInterval || 300 // 処理間隔（ミリ秒）
+        this.batchSize = options.batchSize || 1 // 一度に処理する件数（1件ずつ処理）
+        this.processInterval = options.processInterval || 250 // 処理間隔（ミリ秒）
         this.idleTimeout = options.idleTimeout || 50 // requestIdleCallbackのタイムアウト
         this.maxSize = options.maxSize || 200 // 最大キューサイズ
+        this.shouldSort = false // ソート実行フラグ（初回/サイドバーオープン/更新ボタン時のみtrue）
         
         // レートリミッティング設定（APIへの配慮）
         // 1秒あたりの最大リクエスト数（元の実装: 0.3秒/件 = 約3.3件/秒を基準に）
@@ -109,6 +110,14 @@ export class ProgramInfoQueue {
      */
     has(id) {
         return this.queueSet.has(String(id))
+    }
+
+    /**
+     * ソート実行フラグを設定
+     * @param {boolean} shouldSort - ソート実行するかどうか
+     */
+    setShouldSort(shouldSort) {
+        this.shouldSort = shouldSort
     }
 
     /**
@@ -234,12 +243,16 @@ export class ProgramInfoQueue {
 
             // コールバック実行
             if (this.onProcessComplete) {
-                this.onProcessComplete(processedIds.length, results)
+                this.onProcessComplete(processedIds.length, results, this.shouldSort)
             }
             
-            // キューが空になった場合のコールバック実行
-            if (this.queueArray.length === 0 && this.onQueueEmpty) {
-                this.onQueueEmpty()
+            // キューが空になった場合のコールバック実行とshouldSortリセット
+            if (this.queueArray.length === 0) {
+                if (this.onQueueEmpty) {
+                    this.onQueueEmpty()
+                }
+                // キューが空になったらshouldSortをリセット（次回は独立サイクルとして動作）
+                this.shouldSort = false
             }
 
         } catch (error) {
@@ -267,6 +280,11 @@ export class ProgramInfoQueue {
         if (typeof window !== 'undefined' && window.apiCallCounter) {
             window.apiCallCounter.fetchProgramInfo = (window.apiCallCounter.fetchProgramInfo || 0) + 1;
             window.apiCallCounter.totalCalls++;
+            // タイムスタンプを記録（API呼び出し頻度の計算用）
+            if (!window.apiCallCounter.recentTimestamps) {
+                window.apiCallCounter.recentTimestamps = [];
+            }
+            window.apiCallCounter.recentTimestamps.push(Date.now());
         }
         
         try {
@@ -345,9 +363,61 @@ export class ProgramInfoQueue {
 
     /**
      * 即座に処理を実行（手動実行用）
+     * @param {number} maxItems - 最大処理件数（nullの場合は全件処理）
      */
-    async processNow() {
-        await this.processBatch(this.batchSize)
+    async processNow(maxItems = null) {
+        if (this.isProcessing) {
+            // 既に処理中の場合は完了を待つ
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // 再帰的に呼び出し
+            return await this.processNow(maxItems);
+        }
+        
+        const itemsToProcess = maxItems !== null ? maxItems : this.queueArray.length;
+        let processedCount = 0;
+        let consecutiveZeroCount = 0;
+        const MAX_RETRIES = 5;
+        
+        while (this.queueArray.length > 0 && processedCount < itemsToProcess) {
+            const beforeSize = this.queueArray.length;
+            await this.processBatch(this.batchSize);
+            const afterSize = this.queueArray.length;
+            const processed = beforeSize - afterSize;
+            
+            processedCount += processed;
+            
+            // 処理が進まない場合：レート制限の可能性があるため、少し待ってリトライ
+            if (processed === 0 && this.queueArray.length > 0) {
+                consecutiveZeroCount++;
+                
+                if (consecutiveZeroCount >= MAX_RETRIES) {
+                    console.error(`[キュー] ${MAX_RETRIES}回連続で処理できないため中断`);
+                    break;
+                }
+                
+                const waitTime = Math.min(1000 * consecutiveZeroCount, 3000); // 最大3秒
+                console.warn(`[キュー] 処理が進まない。${waitTime}ms待機... (試行: ${consecutiveZeroCount}/${MAX_RETRIES})`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+                // もう一度試行
+                const retryBeforeSize = this.queueArray.length;
+                await this.processBatch(this.batchSize);
+                const retryAfterSize = this.queueArray.length;
+                const retryProcessed = retryBeforeSize - retryAfterSize;
+                
+                if (retryProcessed > 0) {
+                    processedCount += retryProcessed;
+                    consecutiveZeroCount = 0; // リセット
+                }
+            } else {
+                consecutiveZeroCount = 0; // 処理が進んだらリセット
+            }
+            
+            // レート制限を考慮して少し待つ
+            if (this.queueArray.length > 0 && processedCount < itemsToProcess) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+        }
     }
 }
 

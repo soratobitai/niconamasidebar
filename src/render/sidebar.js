@@ -240,13 +240,15 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         const end = Math.min(index + CHUNK, sourceImgs.length)
         for (; index < end; index++) {
             const img = sourceImgs[index]
-            if (!img) continue
+            if (!img) continue;
+            
             const card = img.closest('.program_container')
-            if (!card || !card.id) continue
+            if (!card || !card.id) continue;
+            
             const info = infoMap.get(`lv${card.id}`)
 
             const { nextUrl, key } = computeNext(info, card.id)
-            if (!nextUrl) continue
+            if (!nextUrl) continue;
 
             // TTL: 直近成功から一定時間は更新しない（キー変化時は除く）
             if (!force) {
@@ -346,8 +348,8 @@ export function teardownThumbnailVisibilityObserver() {
 export function sortProgramsByActivePoint(container) {
     const programs = Array.from(container.getElementsByClassName('program_container'))
     programs.sort((a, b) => {
-        const activeA = parseFloat(a.getAttribute('active-point'), 10)
-        const activeB = parseFloat(b.getAttribute('active-point'), 10)
+        const activeA = parseFloat(a.getAttribute('active-point'))
+        const activeB = parseFloat(b.getAttribute('active-point'))
         return activeB - activeA
     })
     programs.forEach((program) => container.appendChild(program))
