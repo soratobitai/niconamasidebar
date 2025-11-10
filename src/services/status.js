@@ -1,13 +1,3 @@
-// DOMベースで状態を判定（通信なし）
-const checkLiveStatus = async () => {
-	try {
-		// 終了ガイドが存在すれば ENDED、なければ ON_AIR とみなす
-		return detectProgramEndGuide() ? 'ENDED' : 'ON_AIR'
-	} catch (_e) {
-		return 'ERROR'
-	}
-}
-
 function detectProgramEndGuide() {
 	// ハッシュ付きクラスのため部分一致で検出
 	const guide = document.querySelector('[class*="program-end-guide"]')
@@ -46,6 +36,6 @@ function observeProgramEnd(onEnded) {
 	}
 }
 
-export { checkLiveStatus, observeProgramEnd }
+export { observeProgramEnd }
 
 

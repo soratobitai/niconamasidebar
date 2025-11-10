@@ -3,9 +3,8 @@ export const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/progra
 
 export const sidebarMinWidth = 180;
 export const maxSaveProgramInfos = 200;
-export const updateThumbnailInterval = 20; // 秒
 export const toDolistsInterval = 0.25; // 秒
-export const liveStatusPollInterval = 5; // 秒
+export const updateThumbnailInterval = 20; // 秒
 
 // サムネイル更新の安定化用
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）

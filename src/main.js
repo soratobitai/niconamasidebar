@@ -1,15 +1,19 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, maxSaveProgramInfos, updateThumbnailInterval, toDolistsInterval, loadingSessionTimeoutMs } from './config/constants.js'
+import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
-import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, getProgramInfos as getProgramInfosFromStorage, upsertProgramInfo as upsertProgramInfoFromStorage } from './services/storage.js'
-import { fetchLivePrograms, fetchProgramInfo } from './services/api.js'
-import { makeProgramElement, makeProgramsHtml, calculateActivePoint, attachThumbnailErrorHandlers, updateThumbnailsFromStorage, sortProgramsByActivePoint, buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
+import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage } from './services/storage.js'
+import { buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
-import { observeProgramEnd } from './services/status.js'
 import { AppState } from './core/AppState.js'
 import { ProgramInfoQueue } from './services/queue.js'
+import { LoadingManager } from './managers/LoadingManager.js'
+import { AutoNextManager } from './managers/AutoNextManager.js'
+import { UpdateManager } from './managers/UpdateManager.js'
+import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
+import { initApiStats } from './debug/apiStats.js'
+import { setupOptionsHandler } from './handlers/optionsHandler.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
@@ -38,30 +42,9 @@ const programInfoQueue = new ProgramInfoQueue({
         // サムネイル更新は別タイマー（startThumbnailUpdate）で定期実行されるため、ここでは呼ばない
     },
     onQueueEmpty: () => {
-        // 独立サイクル: キューが空になったら設定時間後に再度キュー処理を開始
-        // shouldSortがfalseの場合のみ（初回/サイドバーオープン/更新ボタン時は除外）
-        if (!programInfoQueue.shouldSort && appState.sidebar.isOpen) {
-            // 既存のタイマーをクリア
-            if (appState.getTimer('queueRestart')) {
-                clearTimeout(appState.getTimer('queueRestart'));
-            }
-            // 設定時間後に再開
-            const timer = setTimeout(() => {
-                if (appState.sidebar.isOpen) {
-                    // DOM上の番組をキューに追加
-                    const container = document.getElementById('liveProgramContainer');
-                    if (container) {
-                        const programElements = container.querySelectorAll('.program_container');
-                        const programIds = Array.from(programElements).map(el => el.id).filter(id => id);
-                        if (programIds.length > 0) {
-                            programInfoQueue.add(programIds);
-                        }
-                    }
-                }
-                appState.clearTimer('queueRestart');
-            }, Number(options.updateProgramsInterval) * 1000);
-            appState.setTimer('queueRestart', timer);
-        }
+        // 何もしない
+        // updateSidebar()が120秒ごとに最新の放送中番組リストを取得し、
+        // その番組をキューに追加するため、ここでは何もする必要がない
     }
 });
 
@@ -80,6 +63,11 @@ let elems = {};
 appState.config.defaultOptions = defaultOptions;
 appState.config.options = options;
 appState.elements = elems;
+
+// 各Managerのインスタンス化（setupの後で初期化される）
+let loadingManager = null;
+let autoNextManager = null;
+let updateManager = null;
 
 // localStorage初期化
 if (!localStorage.getItem('programInfos')) {
@@ -145,6 +133,11 @@ const setup = async () => {
 
     // オプション設定を反映（insertSidebar後に実行）
     reflectOptions();
+    
+    // Managerの初期化
+    loadingManager = new LoadingManager(appState, loadingSessionTimeoutMs);
+    autoNextManager = new AutoNextManager(appState);
+    updateManager = new UpdateManager(appState, programInfoQueue, loadingManager, options, elems, loadingImageURL);
 
     // Watchページの幅を設定
     adjustWatchPageChild(elems);
@@ -323,10 +316,12 @@ const setup = async () => {
     // 初期開閉状態の適用（直接open/close）
     const shouldOpenAtStart = (options.autoOpen == '1') || (options.autoOpen == '3' && !!options.isOpenSidebar);
     if (shouldOpenAtStart) {
+        // サイドバーUIは即座に開く（ユーザーにすぐ見せる）
         state.isOpenSidebar.value = true;
         appState.sidebar.isOpen = true;
         options.isOpenSidebar = true;
         sidebarControl.openSidebar();
+        
         // CSS transition完了後に調整するため、requestAnimationFrameで次のフレームに延期
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
@@ -335,7 +330,11 @@ const setup = async () => {
                 adjustWatchPageChild(elems);
             });
         });
-        await handleSidebarOpenStateChange(true);
+        
+        // データ取得のみ少し遅延（初期ページ読み込みの邪魔をしない）
+        setTimeout(() => {
+            handleSidebarOpenStateChange(true);
+        }, 300); // 300ms後にデータ取得開始
     } else {
         state.isOpenSidebar.value = false;
         appState.sidebar.isOpen = false;
@@ -404,12 +403,14 @@ const setup = async () => {
                 // sidebarとtodoはqueue.jsで間隔が延長されるため、停止しない
                 
                 // バックグラウンドに移行した時にセッションが完了していない場合、
-                // キューが空でサムネイル更新も完了していればセッションを完了
+                // キューが空であればセッションを完了
                 // これにより、バックグラウンドに移行した後にセッションが残り続ける問題を防ぐ
-                if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+                const hasActiveSession = loadingManager && loadingManager.getCurrentSessionId();
+                if (hasActiveSession && programInfoQueue.size() === 0) {
                     // 少し待ってからチェック（他の処理が完了するのを待つ）
                     setTimeout(() => {
-                        if (currentUpdateSessionId && programInfoQueue.size() === 0 && !isUpdatingThumbnail) {
+                        const stillHasSession = loadingManager && loadingManager.getCurrentSessionId();
+                        if (stillHasSession && programInfoQueue.size() === 0) {
                             console.warn('[ローディング] バックグラウンド移行時: セッションを完了します');
                             finishLoadingSession();
                         }
@@ -464,7 +465,6 @@ async function handleSidebarOpenStateChange(open) {
         // タイマーを先に開始（UIの反応を優先）
         initThumbnailVisibilityObserver();
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
-        // startToDoListUpdate()はここでは呼ばない（performInitialLoad内で呼ばれるため重複を避ける）
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
         
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
@@ -502,258 +502,62 @@ async function handleSidebarOpenStateChange(open) {
 
 // サムネイル更新開始
 const startThumbnailUpdate = () => {
-    function runUpdateThumbnail() {
-        updateThumbnail();
-        const timer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
-        appState.setTimer('thumbnail', timer);
+    if (updateManager) {
+        updateManager.startThumbnailUpdate();
     }
-    const timer = setTimeout(runUpdateThumbnail, updateThumbnailInterval * 1000);
-    appState.setTimer('thumbnail', timer);
 }
 
 // ToDoリスト更新開始（新しいQueueクラスを使用）
 const startToDoListUpdate = async () => {
-    // oneTimeFlagの処理（ページ読み込み時の初回更新）
-    if (appState.update.oneTimeFlag) {
-        await performInitialLoad(); // 初回ロードを実行（番組詳細も全件取得、完了まで待つ）
-        appState.update.oneTimeFlag = false;
+    if (updateManager) {
+        await updateManager.startToDoListUpdate();
     }
-    
-    // キュー処理を開始
-    programInfoQueue.start();
-    
-    // タイマーIDを保存（停止用）
-    // Queueクラスの内部タイマーを使用するため、ここではダミーを設定
-    appState.setTimer('todo', 'queue-managed');
 }
 
-// サイドバー更新開始
 const startSidebarUpdate = () => {
-    // 既存のタイマーがある場合は確実にクリア
-    const existingTimer = appState.getTimer('sidebar');
-    if (existingTimer && existingTimer !== 'queue-managed') {
-        clearTimeout(existingTimer);
+    if (updateManager) {
+        updateManager.startSidebarUpdate();
     }
-    
-    async function updateSidebarInterval() {
-        // ソートフラグはOFFのまま（定期更新ではソートしない）
-        await updateSidebar(); // 完了を待つ
-        // 定期更新時：最低1秒のローディング時間を確保して終了
-        if (currentUpdateSessionId) {
-            await finishLoadingSessionWithMinDuration(1000);
-        }
-        // 完了後にタイマーをセット
-        const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
-        appState.setTimer('sidebar', timer);
-    }
-    const timer = setTimeout(updateSidebarInterval, Number(options.updateProgramsInterval) * 1000);
-    appState.setTimer('sidebar', timer);
 }
 
 // 自動次番組モーダル生成と表示/非表示
+// ===== 自動次番組関連の関数 =====
+// AutoNextManager に委譲
+
 function ensureAutoNextModal() {
-    let modal = document.getElementById('auto_next_modal');
-    if (modal) return modal;
-    
-    // DOM要素を直接作成（innerHTMLを使用しない）
-    modal = document.createElement('div');
-    modal.id = 'auto_next_modal';
-    
-    // バックドロップ
-    const backdrop = document.createElement('div');
-    backdrop.className = 'backdrop';
-    modal.appendChild(backdrop);
-    
-    // ダイアログ
-    const dialog = document.createElement('div');
-    dialog.className = 'dialog';
-    
-    // タイトル
-    const title = document.createElement('div');
-    title.className = 'title';
-    title.textContent = 'ニコ生サイドバーによる自動移動';
-    dialog.appendChild(title);
-    
-    // メッセージ
-    const message = document.createElement('div');
-    message.className = 'message';
-    const countSpan = document.createElement('span');
-    countSpan.id = 'auto_next_count';
-    countSpan.textContent = '10';
-    message.appendChild(countSpan);
-    message.appendChild(document.createTextNode('秒後に次の番組へ移動します。'));
-    dialog.appendChild(message);
-    
-    // プレビュー
-    const preview = document.createElement('div');
-    preview.className = 'preview';
-    
-    const providerDiv = document.createElement('div');
-    providerDiv.id = 'auto_next_provider';
-    providerDiv.className = 'preview-provider';
-    preview.appendChild(providerDiv);
-    
-    const thumbDiv = document.createElement('div');
-    thumbDiv.className = 'thumb';
-    const thumbImg = document.createElement('img');
-    thumbImg.id = 'auto_next_thumb';
-    thumbImg.alt = '';
-    thumbDiv.appendChild(thumbImg);
-    preview.appendChild(thumbDiv);
-    
-    const titleDiv = document.createElement('div');
-    titleDiv.id = 'auto_next_title';
-    titleDiv.className = 'preview-title';
-    preview.appendChild(titleDiv);
-    
-    dialog.appendChild(preview);
-    
-    // アクション
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.id = 'auto_next_cancel';
-    cancelBtn.textContent = 'キャンセル';
-    actions.appendChild(cancelBtn);
-    dialog.appendChild(actions);
-    
-    modal.appendChild(dialog);
-    document.body.appendChild(modal);
-    return modal;
+    if (autoNextManager) {
+        return autoNextManager.ensureModal();
+    }
 }
 
 function showAutoNextModal(seconds, preview, onCancel) {
-    const modal = ensureAutoNextModal();
-    const countEl = modal.querySelector('#auto_next_count');
-    const cancelBtn = modal.querySelector('#auto_next_cancel');
-    if (countEl) countEl.textContent = String(seconds);
-
-    // プレビュー設定
-    try {
-        const thumbEl = modal.querySelector('#auto_next_thumb');
-        const titleEl = modal.querySelector('#auto_next_title');
-        const providerEl = modal.querySelector('#auto_next_provider');
-        if (thumbEl && preview && preview.thumb) thumbEl.src = preview.thumb;
-        if (titleEl && preview && typeof preview.title === 'string') titleEl.textContent = preview.title;
-        if (providerEl && preview && typeof preview.provider === 'string') providerEl.textContent = preview.provider;
-    } catch (_e) {}
-    modal.classList.add('show');
-    const onCancelHandler = (e) => {
-        e.preventDefault();
-        hideAutoNextModal();
-        appState.autoNext.canceled = true;
-        if (typeof onCancel === 'function') onCancel();
-    };
-    if (cancelBtn) {
-        cancelBtn.addEventListener('click', onCancelHandler, { once: true });
+    if (autoNextManager) {
+        autoNextManager.showModal(seconds, preview, onCancel);
     }
 }
 
 function hideAutoNextModal() {
-    const modal = document.getElementById('auto_next_modal');
-    if (modal) modal.classList.remove('show');
+    if (autoNextManager) {
+        autoNextManager.hideModal();
+    }
 }
 
 function scheduleAutoNextNavigation(nextHref, preview) {
-    // 既存のカウントダウンが生きていれば停止
-    const existingTimer = appState.getTimer('autoNext');
-    if (existingTimer) {
-        try { clearInterval(existingTimer); } catch (_e) {}
-        appState.clearTimer('autoNext');
+    if (autoNextManager) {
+        autoNextManager.scheduleNavigation(nextHref, preview);
     }
-    let remaining = 10;
-    appState.autoNext.canceled = false;
-    showAutoNextModal(remaining, preview, () => {
-        const timer = appState.getTimer('autoNext');
-        if (timer) {
-            clearInterval(timer);
-            appState.clearTimer('autoNext');
-        }
-        appState.autoNext.scheduled = true;
-    });
-    const modal = ensureAutoNextModal();
-    const countEl = modal.querySelector('#auto_next_count');
-    const timer = setInterval(() => {
-        remaining -= 1;
-        if (countEl) countEl.textContent = String(Math.max(0, remaining));
-        if (appState.autoNext.canceled) {
-            clearInterval(timer);
-            appState.clearTimer('autoNext');
-            hideAutoNextModal();
-            return;
-        }
-        if (remaining <= 0) {
-            clearInterval(timer);
-            appState.clearTimer('autoNext');
-            hideAutoNextModal();
-            if (!appState.autoNext.canceled) {
-                try { location.assign(nextHref); } catch (_e) {}
-            }
-        }
-    }, 1000);
-    appState.setTimer('autoNext', timer);
 }
 
-// 視聴中番組の終了監視
 function startLiveStatusWatcher() {
-    stopLiveStatusWatcher();
-    const stopper = observeProgramEnd(async () => {
-        // 多重進入抑止
-        if (appState.autoNext.scheduled || appState.autoNext.selectingNext) return;
-        appState.autoNext.selectingNext = true;
-        try {
-            await updateSidebar();
-            const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
-            const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);
-            const currentId = currentIdMatch ? currentIdMatch[1] : '';
-
-            let targetLink = null;
-            for (const a of links) {
-                try {
-                    const nextPath = new URL(a.href, location.href).pathname;
-                    const nextIdMatch = nextPath.match(/\/watch\/(lv\d+)/);
-                    const nextId = nextIdMatch ? nextIdMatch[1] : '';
-                    if (currentId && nextId && nextId !== currentId) {
-                        targetLink = a;
-                        break;
-                    }
-                } catch (_e) {}
-            }
-
-            if (targetLink && targetLink.href) {
-                appState.autoNext.scheduled = true;
-                // プレビュー情報抽出
-                let preview = null;
-                try {
-                    const card = targetLink.closest('.program_container');
-                    const imgEl = card ? card.querySelector('.program_thumbnail_img') : null;
-                    const titleEl = card ? card.querySelector('.program_title') : null;
-                    const providerEl = card ? card.querySelector('.community_name') : null;
-                    preview = {
-                        href: targetLink.href,
-                        thumb: imgEl && imgEl.src ? imgEl.src : '',
-                        title: titleEl && titleEl.textContent ? titleEl.textContent.trim() : '',
-                        provider: providerEl && providerEl.textContent ? providerEl.textContent.trim() : '',
-                    };
-                } catch (_e) {}
-                scheduleAutoNextNavigation(targetLink.href, preview);
-            }
-        } catch (_e) {}
-        finally {
-            // 次回の検出に備えて解除（autoNextScheduled が true の場合は以降で抑止される）
-            appState.autoNext.selectingNext = false;
-        }
-    });
-    appState.autoNext.liveStatusStopper = stopper;
+    if (autoNextManager) {
+        autoNextManager.startWatcher();
+    }
 }
 
 function stopLiveStatusWatcher() {
-    if (appState.autoNext.liveStatusStopper) {
-        try { appState.autoNext.liveStatusStopper(); } catch (_e) {}
-        appState.autoNext.liveStatusStopper = null;
+    if (autoNextManager) {
+        autoNextManager.stopWatcher();
     }
-    appState.clearTimer('autoNext');
-    hideAutoNextModal();
 }
 
 // データが変更されたときのイベントリスナー
@@ -790,12 +594,9 @@ chrome.storage.onChanged.addListener(function (changes) {
 
 // サイドバー更新タイマーを再起動
 const restartSidebarUpdate = () => {
-    const existingTimer = appState.getTimer('sidebar');
-    if (existingTimer && existingTimer !== 'queue-managed') {
-        clearTimeout(existingTimer);
+    if (updateManager) {
+        updateManager.restartSidebarUpdate();
     }
-    appState.clearTimer('sidebar');
-    startSidebarUpdate();
 }
 
 // オプションを取得
@@ -824,283 +625,48 @@ const insertSidebar = () => {
     elems.root.style.flexGrow = '1';
 };
 
-// API呼び出しカウンター（重複検出用）- グローバルに設定してqueue.jsからもアクセス可能に
-window.apiCallCounter = {
-    getLivePrograms: 0,
-    fetchProgramInfo: 0,
-    totalCalls: 0,
-    startTime: Date.now()
-};
-const apiCallCounter = window.apiCallCounter;
+// API統計の初期化（開発・デバッグ用）
+initApiStats();
 
-// API呼び出し統計を定期的に表示（5分ごと、コンパクト版）
-setInterval(() => {
-    const elapsed = Math.floor((Date.now() - apiCallCounter.startTime) / 1000);
-    const minutes = Math.floor(elapsed / 60);
-    
-    // 過去1分間の実際の呼び出し頻度を計算
-    if (!apiCallCounter.recentTimestamps) {
-        apiCallCounter.recentTimestamps = [];
-    }
-    const now = Date.now();
-    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
-    const recentRate = apiCallCounter.recentTimestamps.length;
-    
-    // 異常な頻度の場合のみ警告（過去1分間に100回以上）
-    if (recentRate > 100) {
-        console.warn(`⚠️ [API統計] 過去1分間の呼び出し頻度が高い: ${recentRate}回/分 (getLivePrograms: ${apiCallCounter.getLivePrograms}, fetchProgramInfo: ${apiCallCounter.fetchProgramInfo})`);
-    }
-}, 300000); // 5分ごと
 
-// コンソールから手動でAPI統計を確認できる関数
-window.showApiStats = () => {
-    const elapsed = ((Date.now() - apiCallCounter.startTime) / 1000).toFixed(0);
-    const averageRate = (apiCallCounter.totalCalls / (elapsed / 60)).toFixed(2);
-    
-    // 過去1分間の実際の呼び出し頻度を計算
-    if (!apiCallCounter.recentTimestamps) {
-        apiCallCounter.recentTimestamps = [];
-    }
-    const now = Date.now();
-    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
-    const recentRate = apiCallCounter.recentTimestamps.length;
-    
-    console.log('=== API呼び出し統計 ===');
-    console.log(`getLivePrograms: ${apiCallCounter.getLivePrograms}回`);
-    console.log(`fetchProgramInfo: ${apiCallCounter.fetchProgramInfo}回`);
-    console.log(`合計: ${apiCallCounter.totalCalls}回`);
-    console.log(`経過時間: ${elapsed}秒 (${(elapsed / 60).toFixed(1)}分)`);
-    console.log(`平均頻度: ${averageRate}回/分`);
-    console.log(`過去1分間の実際の頻度: ${recentRate}回/分`);
-    return apiCallCounter;
-};
 
-// updateSidebar呼び出し統計を確認できる関数
-window.showUpdateSidebarStats = () => {
-    console.group('📊 updateSidebar() 呼び出し統計');
-    console.log(`総呼び出し数: ${updateSidebarCallTracker.totalCalls}`);
-    console.log(`現在実行中: ${updateSidebarCallTracker.activeCalls}`);
-    console.log(`拒否された呼び出し: ${updateSidebarCallTracker.rejectedCalls}`);
-    
-    // 呼び出し元の集計
-    const callerCount = {};
-    updateSidebarCallTracker.callHistory.forEach(call => {
-        callerCount[call.caller] = (callerCount[call.caller] || 0) + 1;
-    });
-    console.log('呼び出し元の内訳（直近10件）:', callerCount);
-    
-    console.group('直近10件の呼び出し履歴');
-    updateSidebarCallTracker.callHistory.forEach((call, index) => {
-        const timeAgo = ((Date.now() - call.timestamp) / 1000).toFixed(1);
-        console.log(`${index + 1}. #${call.callId} - ${call.caller} (${timeAgo}秒前)`);
-    });
-    console.groupEnd();
-    console.groupEnd();
-    return updateSidebarCallTracker;
-};
+// ===== 関数ラッパー（Managerへの委譲） =====
 
-async function getLivePrograms(rows = 100) {
-    apiCallCounter.getLivePrograms++;
-    apiCallCounter.totalCalls++;
-    const callId = apiCallCounter.totalCalls;
-    
-    // タイムスタンプを記録（API呼び出し頻度の計算用）
-    const now = Date.now();
-    if (!apiCallCounter.recentTimestamps) {
-        apiCallCounter.recentTimestamps = [];
-    }
-    apiCallCounter.recentTimestamps.push(now);
-    
-    // 異常検出：getLiveProgramsが1分以内に10回以上呼ばれた場合のみ警告
-    if (!apiCallCounter.getLiveProgramsTimestamps) {
-        apiCallCounter.getLiveProgramsTimestamps = [];
-    }
-    apiCallCounter.getLiveProgramsTimestamps.push(now);
-    // 1分以上前のタイムスタンプを削除
-    apiCallCounter.getLiveProgramsTimestamps = apiCallCounter.getLiveProgramsTimestamps.filter(t => now - t < 60000);
-    
-    if (apiCallCounter.getLiveProgramsTimestamps.length >= 10) {
-        console.error(`🚨 [異常検出] getLivePrograms()が1分以内に${apiCallCounter.getLiveProgramsTimestamps.length}回呼ばれています！`);
-    }
-    
-    const result = await fetchLivePrograms(rows);
-    
-    if (elems.apiErrorElement) {
-        elems.apiErrorElement.style.display = result ? 'none' : 'block';
-    }
-    return result;
-}
-
-// getProgramInfo_and_saveLocalStorage は ProgramInfoQueue を使用するため削除
-// キューに追加するだけの関数として置き換え
-
-// 現在の更新セッションIDを保存（エラー時にも完了できるように）
-let currentUpdateSessionId = null;
-// セッション開始時刻とタイムアウトタイマー
-let sessionStartTime = null;
-let sessionTimeoutTimer = null;
 /**
- * ローディングセッションを完了する（タイムアウトタイマーもクリア）
+ * ローディングセッションを完了する
+ * LoadingManager に完全委譲
  */
 function finishLoadingSession() {
-    if (!currentUpdateSessionId) {
-        return;
+    if (loadingManager) {
+        loadingManager.finishSession();
     }
-    
-    const sessionId = currentUpdateSessionId;
-    const duration = sessionStartTime ? (performance.now() - sessionStartTime).toFixed(0) : 'unknown';
-    
-    // 異常に長いセッション（10秒以上）の場合のみ警告
-    if (duration !== 'unknown' && parseFloat(duration) > 10000) {
-        console.warn(`⚠️ [異常検出] ローディングセッションが${(duration / 1000).toFixed(1)}秒かかりました`, {
-            sessionId
-        });
-    }
-    
-    if (sessionTimeoutTimer) {
-        clearTimeout(sessionTimeoutTimer);
-        sessionTimeoutTimer = null;
-    }
-    if (currentUpdateSessionId) {
-        appState.finishUpdateSession(currentUpdateSessionId);
-        currentUpdateSessionId = null;
-    }
-    sessionStartTime = null;
-    updateLoadingState();
 }
 
 /**
  * 最低ローディング時間を確保してセッションを完了する
- * @param {number} minDuration - 最低表示時間（ミリ秒、デフォルト1000ms）
+ * LoadingManager に完全委譲
  */
 async function finishLoadingSessionWithMinDuration(minDuration = 1000) {
-    if (!currentUpdateSessionId || !sessionStartTime) {
-        finishLoadingSession();
-        return;
+    if (loadingManager) {
+        await loadingManager.finishSessionWithMinDuration(minDuration);
     }
-    
-    const elapsed = performance.now() - sessionStartTime;
-    const remaining = minDuration - elapsed;
-    
-    if (remaining > 0) {
-        // 最低表示時間に達していない場合は待つ
-        await new Promise(resolve => setTimeout(resolve, remaining));
-    }
-    
-    finishLoadingSession();
 }
 
-/**
- * 初回ロードを実行（ページ読み込み時のみ）
- * updateSidebar() + 番組詳細取得（全件） + サムネイル更新
- * すべて完了までローディング維持
- */
-let isPerformingInitialLoad = false;
 async function performInitialLoad() {
-    // 重複実行を防ぐ
-    if (isPerformingInitialLoad) {
-        console.warn('[初回ロード] 既に実行中のため、スキップします');
-        return;
-    }
-    
-    isPerformingInitialLoad = true;
-    try {
-        // ソートフラグをON
-        programInfoQueue.setShouldSort(true);
-        
-        // 番組リスト更新
-        await updateSidebar();
-        
-        // DOM更新完了を待つ（requestAnimationFrameで次のフレームまで待機）
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        
-        // 番組詳細取得（全件、キューが空になるまで）
-        const initialQueueSize = programInfoQueue.size();
-        
-        if (initialQueueSize > 0) {
-            // processNow()で全件処理（maxItems=nullで全件）
-            await programInfoQueue.processNow(null).catch(error => {
-                console.error('[初回ロード] キュー処理でエラーが発生しました:', error);
-            });
-        }
-        
-        // サムネイル更新（forceフラグON）
-        await new Promise(resolve => {
-            updateThumbnail(true, resolve);
-        });
-        
-        // 最低1秒のローディング時間を確保して終了
-        await finishLoadingSessionWithMinDuration(1000);
-        
-        // 定期タイマーをリセット
-        if (appState.sidebar.isOpen) {
-            restartSidebarUpdate();
-        }
-    } catch (error) {
-        console.error('[初回ロード] エラーが発生しました:', error);
-        // エラー時もローディングを終了
-        if (currentUpdateSessionId) {
-            await finishLoadingSessionWithMinDuration(1000);
-        }
-    } finally {
-        isPerformingInitialLoad = false; // フラグをリセット
+    if (updateManager) {
+        await updateManager.performInitialLoad();
     }
 }
 
-/**
- * 手動更新を実行（サイドバーオープン、タブ切替、更新ボタン押下）
- * updateSidebar() + サムネイル更新のみ
- * 番組詳細取得はバックグラウンドで自動実行
- */
 async function performManualUpdate() {
-    try {
-        // ソートフラグをON
-        programInfoQueue.setShouldSort(true);
-        
-        // 番組リスト更新
-        await updateSidebar();
-        
-        // サムネイル更新（forceフラグON）
-        await new Promise(resolve => {
-            updateThumbnail(true, resolve);
-        });
-        
-        // 最低1秒のローディング時間を確保して終了
-        await finishLoadingSessionWithMinDuration(1000);
-        
-        // 定期タイマーをリセット
-        if (appState.sidebar.isOpen) {
-            restartSidebarUpdate();
-        }
-    } catch (error) {
-        console.error('[手動更新] エラーが発生しました:', error);
-        // エラー時もローディングを終了
-        if (currentUpdateSessionId) {
-            await finishLoadingSessionWithMinDuration(1000);
-        }
+    if (updateManager) {
+        await updateManager.performManualUpdate();
     }
 }
 
-/**
- * 番組リストをソート
- * @param {HTMLElement} container - 番組コンテナ
- */
+// sortPrograms関数: utils/sorting.jsの統一関数を使用
 function sortPrograms(container) {
-    if (!container || container.children.length === 0) return;
-    
-    if (options.programsSort === 'active') {
-        // 人気順：active-point属性でソート
-        sortProgramsByActivePoint(container);
-    } else {
-        // 新着順：番組IDでソート（IDが大きいほど新しい）
-        const programs = Array.from(container.children);
-        programs.sort((a, b) => {
-            const idA = parseInt(a.id, 10) || 0;
-            const idB = parseInt(b.id, 10) || 0;
-            return idB - idA; // 降順（新しいものが上）
-        });
-        programs.forEach((program) => container.appendChild(program));
-    }
+    sortProgramsUtil(container, options.programsSort);
 }
 
 /**
@@ -1108,274 +674,24 @@ function sortPrograms(container) {
  * @param {number} count - 番組数
  */
 function updateProgramCount(count) {
-    const programCountElement = document.getElementById('program_count');
-    if (programCountElement) {
-        programCountElement.textContent = String(count);
+    if (updateManager) {
+        updateManager.updateProgramCount(count);
     }
 }
 
 /**
  * ローディング状態を更新（更新ボタンにローディング表示を適用）
+ * LoadingManager に委譲
  */
 function updateLoadingState() {
-    const reloadBtn = document.getElementById('reload_programs');
-    if (!reloadBtn) {
-        return;
-    }
-    
-    const isLoading = appState.isLoading();
-    
-    if (isLoading) {
-        // ローディング中：更新ボタンを無効化し、ローディング表示を追加
-        if (!reloadBtn.classList.contains('loading')) {
-            reloadBtn.classList.add('loading');
-            reloadBtn.style.pointerEvents = 'none'; // クリック無効化
-        }
-    } else {
-        // 全ての処理が完了：ローディング表示を解除し、更新ボタンを有効化
-        if (reloadBtn.classList.contains('loading')) {
-            reloadBtn.classList.remove('loading');
-            reloadBtn.style.pointerEvents = ''; // クリック有効化
-        }
+    if (loadingManager) {
+        loadingManager.updateLoadingState();
     }
 }
 
-// セッション完了の判定はupdateSidebar()のfinally内で行う
-// キュー処理とサムネイル更新は別タイマーでバックグラウンド実行される
-
-// updateSidebar呼び出し追跡用
-let updateSidebarCallTracker = {
-    totalCalls: 0,
-    activeCalls: 0,
-    rejectedCalls: 0,
-    callHistory: [], // 直近10件の呼び出し履歴
-    lastCallTime: 0,
-    rapidCallCount: 0, // 短期間の呼び出し回数
-    rapidCallWindow: 10000 // 10秒以内の呼び出しを「短期間」とみなす
-};
-
 async function updateSidebar() {
-    updateSidebarCallTracker.totalCalls++;
-    const callId = updateSidebarCallTracker.totalCalls;
-    const now = Date.now();
-    
-    // 呼び出し元を特定（スタックトレースから）
-    const stack = new Error().stack;
-    const stackLines = stack.split('\n').slice(1, 6);
-    let caller = 'unknown';
-    for (const line of stackLines) {
-        if (line.includes('handleSidebarOpenStateChange')) {
-            caller = 'サイドバーを開いた時';
-            break;
-        } else if (line.includes('handleVisibilityChange')) {
-            caller = 'タブがアクティブになった時';
-            break;
-        } else if (line.includes('updateSidebarInterval')) {
-            caller = '定期更新タイマー';
-            break;
-        } else if (line.includes('reloadBtnHandler') || line.includes('click')) {
-            caller = 'リロードボタン';
-            break;
-        } else if (line.includes('selectNextProgram')) {
-            caller = '次番組選択';
-            break;
-        } else if (line.includes('startToDoListUpdate')) {
-            caller = '初期化';
-            break;
-        } else if (line.includes('setTimeout') && line.includes('updateSidebar')) {
-            caller = 'pending再実行';
-            break;
-        } else if (line.includes('optionForm')) {
-            caller = 'オプション変更';
-            break;
-        }
-    }
-    
-    // 短期間（10秒以内）の呼び出し回数をカウント
-    if (now - updateSidebarCallTracker.lastCallTime < updateSidebarCallTracker.rapidCallWindow) {
-        updateSidebarCallTracker.rapidCallCount++;
-    } else {
-        updateSidebarCallTracker.rapidCallCount = 1;
-    }
-    updateSidebarCallTracker.lastCallTime = now;
-    
-    // 呼び出し履歴に追加（最大10件）
-    updateSidebarCallTracker.callHistory.push({
-        callId,
-        caller,
-        timestamp: now,
-        isUpdating: appState.update.isUpdating,
-        pending: appState.update.pending
-    });
-    if (updateSidebarCallTracker.callHistory.length > 10) {
-        updateSidebarCallTracker.callHistory.shift();
-    }
-    
-    // 異常検出：10秒以内に5回以上呼ばれた場合のみ警告
-    if (updateSidebarCallTracker.rapidCallCount >= 5) {
-        console.error(`🚨 [異常検出] updateSidebar()が10秒以内に${updateSidebarCallTracker.rapidCallCount}回呼ばれています！`, {
-            callId,
-            caller,
-            totalCalls: updateSidebarCallTracker.totalCalls,
-            rejectedCalls: updateSidebarCallTracker.rejectedCalls,
-            最近の呼び出し元: updateSidebarCallTracker.callHistory.slice(-5).map(h => h.caller)
-        });
-    }
-    
-    // 多重実行を抑止し、終了後に1回だけ追従実行
-    if (appState.update.isUpdating) {
-        updateSidebarCallTracker.rejectedCalls++;
-        
-        // 異常検出：拒否が連続5回以上の場合のみ警告
-        if (updateSidebarCallTracker.rejectedCalls % 5 === 0) {
-            console.error(`🚨 [異常検出] updateSidebar()の拒否が${updateSidebarCallTracker.rejectedCalls}回に達しました`, {
-                caller,
-                pending: appState.update.pending
-            });
-        }
-        
-        appState.update.pending = true;
-        return;
-    }
-    
-    updateSidebarCallTracker.activeCalls++;
-    appState.update.isUpdating = true;
-    appState.update.isInserting = true;
-    
-    // 更新セッションを開始（すべての処理を包括的に管理）
-    // 既存のセッションがある場合は警告を出すが、完了はさせない（呼び出し元で制御）
-    if (currentUpdateSessionId) {
-        console.warn('[ローディング] 既存のセッションが存在します:', currentUpdateSessionId);
-    }
-    
-    currentUpdateSessionId = appState.startUpdateSession();
-    sessionStartTime = performance.now();
-    updateLoadingState();
-    
-    // タイムアウトタイマーを設定（一定時間経過後に強制的にセッションを完了）
-    // セッションIDをクロージャで保持して、確実に動作させる
-    const sessionIdForTimeout = currentUpdateSessionId;
-    if (sessionTimeoutTimer) {
-        clearTimeout(sessionTimeoutTimer);
-    }
-    sessionTimeoutTimer = setTimeout(() => {
-        // セッションIDが一致する場合のみ完了（新しいセッションが開始されている場合は無視）
-        if (currentUpdateSessionId === sessionIdForTimeout) {
-            console.warn('[ローディング] タイムアウト: セッションを強制完了します');
-            finishLoadingSession();
-        }
-    }, loadingSessionTimeoutMs);
-    
-    try {
-        // localStorageから番組情報を取得
-        const programInfos = getProgramInfosFromStorage();
-
-        const livePrograms = await getLivePrograms(100);
-        // 失敗時は何も変更しない（ローディング終了は呼び出し元で制御）
-        if (!livePrograms) {
-            // 失敗時も既存の番組数を維持
-            const container = document.getElementById('liveProgramContainer');
-            if (container && container.children.length > 0) {
-                updateProgramCount(container.children.length);
-            }
-            return;
-        }
-        // 空配列（0件）のときは既存DOMを維持して終了（フリッカー防止）
-        if (Array.isArray(livePrograms) && livePrograms.length === 0) {
-            updateProgramCount(0);
-            return;
-        }
-
-        const container = document.getElementById('liveProgramContainer');
-        const frag = document.createDocumentFragment();
-        const existingMap = new Map();
-        if (container) {
-            Array.from(container.children).forEach((el) => {
-                if (el && el.id) existingMap.set(el.id, el);
-            });
-        }
-
-        livePrograms.forEach(function (program) {
-            if (!program || !program.id) return;
-
-            const data = programInfos.find((info) => info.id === `lv${program.id}`);
-            const id = String(program.id);
-            const existing = existingMap.get(id);
-
-            if (existing) {
-                // 軽い更新（属性・タイトル・リンク先）
-                existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
-                const titleEl = existing.querySelector('.program_title');
-                if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
-                const linkEl = existing.querySelector('.program_thumbnail a');
-                if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
-                frag.appendChild(existing);
-            } else {
-                // DOM要素を直接作成（innerHTMLを使用しない）
-                const element = data 
-                    ? makeProgramElement(data, loadingImageURL) 
-                    : makeProgramElement(program, loadingImageURL);
-                if (element) {
-                    frag.appendChild(element);
-                }
-            }
-
-            // 新しいQueueクラスに追加（重複チェックとFIFO処理はQueueクラスで自動的に行われる）
-            programInfoQueue.add(program.id);
-        });
-
-        // 一旦すべての番組を取り除く → 置き換え対象が無い場合は何もしない
-        const liveProgramContainer = document.getElementById('liveProgramContainer');
-        if (!liveProgramContainer) {
-            // 早期リターン時も番組数を表示（既存の番組数を維持）
-            const container = document.getElementById('liveProgramContainer');
-            if (container && container.children.length > 0) {
-                updateProgramCount(container.children.length);
-            }
-            return;
-        }
-        if (!frag.firstChild) {
-            // 早期リターン時も番組数を表示（既存の番組数を維持）
-            updateProgramCount(livePrograms.length);
-            return;
-        }
-        
-        // 挿入（置き換え）
-        liveProgramContainer.replaceChildren(frag);
-        // 監視対象を更新
-        refreshThumbnailObservations();
-
-        // ソート
-        // 注意: この時点では番組詳細情報が未取得の場合があるため、不完全なactive-pointでソートされる可能性がある
-        // ただし、キュー処理完了後にupdateActivePointsAndSort()で正しい値で再ソートされる
-        const container2 = document.getElementById('liveProgramContainer');
-        if (container2) sortPrograms(container2);
-
-        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width);
-
-        // 番組数更新（ローディング状態は他の処理が完了するまで維持）
-        updateProgramCount(livePrograms.length);
-
-        attachThumbnailErrorHandlers();
-    } catch (error) {
-        console.error('[ローディング] updateSidebar() catch ブロック', error);
-        // エラー発生時のローディング終了は呼び出し元で制御
-        throw error;
-    } finally {
-        appState.update.isInserting = false;
-        appState.update.isUpdating = false;
-        updateSidebarCallTracker.activeCalls--;
-        
-        // ローディング終了は呼び出し元で制御
-        // 手動更新時：キュー処理とサムネイル更新完了後に終了
-        // 定期更新時：updateSidebar()完了時点で終了
-        
-        if (appState.update.pending) {
-            appState.update.pending = false;
-            setTimeout(() => { 
-                updateSidebar(); 
-            }, 0);
-        }
+    if (updateManager) {
+        await updateManager.updateSidebar();
     }
 }
 
@@ -1385,118 +701,21 @@ async function updateSidebar() {
  * @param {boolean} shouldSort - ソートを実行するかどうか（初回/サイドバーオープン/更新ボタン時のみtrue）
  */
 function updateActivePointsAndSort(shouldSort = false) {
-    const container = document.getElementById('liveProgramContainer');
-    if (!container) return;
-
-    const programInfos = getProgramInfosFromStorage();
-    if (!programInfos || !Array.isArray(programInfos)) return;
-
-    // 全ての番組要素のactive-pointを更新
-    const programElements = container.querySelectorAll('.program_container');
-    let hasUpdate = false;
-    
-    programElements.forEach((element) => {
-        if (!element.id) return;
-        
-        const programId = `lv${element.id}`;
-        const programInfo = programInfos.find((info) => info.id === programId);
-        
-        if (programInfo) {
-            const newActivePoint = calculateActivePoint(programInfo);
-            const currentActivePoint = parseFloat(element.getAttribute('active-point') || '0');
-            
-            // active-pointが更新される場合のみ更新
-            if (Math.abs(newActivePoint - currentActivePoint) > 0.0001) {
-                element.setAttribute('active-point', String(newActivePoint));
-                hasUpdate = true;
-            }
-        }
-    });
-
-    // shouldSortがtrueで、active-pointが更新された場合のみソートを実行
-    if (shouldSort && hasUpdate) {
-        sortPrograms(container);
+    if (updateManager) {
+        updateManager.updateActivePointsAndSort(shouldSort);
     }
 }
 
 function updateThumbnail(force, onComplete) {
-    // DOM操作中は実行しない
-    if (appState.update.isInserting) {
-        console.warn('[サムネイル] DOM操作中のためスキップ');
-        if (onComplete) onComplete();
-        return;
+    if (updateManager) {
+        updateManager.updateThumbnail(force, onComplete);
     }
-
-    const programInfos = getProgramInfosFromStorage();
-    if (!programInfos || programInfos.length === 0) {
-        console.warn('[サムネイル] 番組情報が存在しないためスキップ');
-        if (onComplete) onComplete();
-        return;
-    }
-    
-    updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete });
 }
 
 /**
  * オプション内容を反映
+ * handlers/optionsHandler.js に完全委譲
  */
 const reflectOptions = () => {
-    const updateCheckedState = (name, value) => {
-        const elements = document.getElementsByName(name);
-        if (elements.length === 0) return;
-        
-        elements.forEach(item => {
-            item.checked = item.value === value;
-        });
-    };
-
-    const saveOptions = () => {
-        try {
-            const autoOpenElement = document.querySelector('input[name="autoOpen"]:checked');
-            const updateProgramsIntervalElement = document.querySelector('input[name="updateProgramsInterval"]:checked');
-            const programsSortElement = document.querySelector('input[name="programsSort"]:checked');
-            const autoNextProgramElement = document.querySelector('input[name="autoNextProgram"]:checked');
-
-            if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
-                // console.warn('オプション設定が不完全です');
-                return;
-            }
-
-            options.autoOpen = autoOpenElement.value;
-            options.updateProgramsInterval = updateProgramsIntervalElement.value;
-            options.programsSort = programsSortElement.value;
-            options.autoNextProgram = autoNextProgramElement.value;
-
-            saveOptionsToStorage(options);
-        } catch (error) {
-            // console.error('オプション保存エラー:', error);
-        }
-    };
-
-    // 各設定を反映
-    updateCheckedState('programsSort', options.programsSort);
-    updateCheckedState('updateProgramsInterval', options.updateProgramsInterval);
-    updateCheckedState('autoOpen', options.autoOpen);
-    updateCheckedState('autoNextProgram', options.autoNextProgram);
-
-    // フォームに変更があったら保存する
-    document.getElementById('optionForm').addEventListener('change', (event) => {
-        if (event.target.name === 'programsSort') {
-            // ソート方式変更時は既存データでソート（APIリクエストなし、ローディングなし）
-            programInfoQueue.setShouldSort(true);
-            
-            // オプションを先に保存（ソート順を反映）
-            saveOptions();
-            
-            // 既存のDOMをソート（統一関数を使用）
-            const container = document.getElementById('liveProgramContainer');
-            if (container) {
-                sortPrograms(container);
-                // サムネイルのIntersectionObserver監視を更新
-                refreshThumbnailObservations();
-            }
-            return; // saveOptions()は既に呼ばれているのでreturn
-        }
-        saveOptions();
-    });
+    setupOptionsHandler(options, programInfoQueue, sortPrograms);
 };

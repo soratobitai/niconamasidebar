@@ -396,7 +396,7 @@ export class ProgramInfoQueue {
                 }
                 
                 const waitTime = Math.min(1000 * consecutiveZeroCount, 3000); // 最大3秒
-                console.warn(`[キュー] 処理が進まない。${waitTime}ms待機... (試行: ${consecutiveZeroCount}/${MAX_RETRIES})`);
+                // レート制限により待機中（デバッグログは削除）
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 
                 // もう一度試行

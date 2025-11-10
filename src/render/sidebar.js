@@ -124,20 +124,6 @@ export function makeProgramElement(data, loadingImageURL) {
 /**
  * @deprecated 後方互換性のため残しています。makeProgramElementを使用してください。
  */
-export function makeProgramsHtml(data, loadingImageURL) {
-    const element = makeProgramElement(data, loadingImageURL)
-    if (!element) return ''
-    // 一時的にコンテナに追加してHTMLを取得（互換性のため）
-    const temp = document.createElement('div')
-    temp.appendChild(element)
-    return temp.innerHTML
-}
-
-export function escapeHtml(text) {
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }
-    return String(text).replace(/[&<>"']/g, (m) => map[m])
-}
-
 export function calculateActivePoint(data) {
     if (!data) return 0
     const comments = (data.comments || 0) + 1

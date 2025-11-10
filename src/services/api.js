@@ -45,21 +45,13 @@ export async function fetchLivePrograms(rows = 100) {
  * @param {number|string} liveId - Live id without the "lv" prefix.
  * @returns {Promise<any|undefined>} Program data object on success, or undefined on failure.
  */
-// TTL cache and in-flight dedupe for detail API
-const programInfoCache = new Map() // liveId -> { data, fetchedAt }
+// In-flight dedupe for detail API（同時リクエストの重複防止のみ）
 const programInfoInFlight = new Map() // liveId -> Promise
 
 export async function fetchProgramInfo(liveId) {
     const id = String(liveId)
-    const now = Date.now()
 
-    // Serve from cache within TTL
-    const cached = programInfoCache.get(id)
-    if (cached && cached.data && (now - cached.fetchedAt) < programInfoTtlMs) {
-        return cached.data
-    }
-
-    // In-flight dedupe
+    // In-flight dedupe（同時リクエストの重複防止）
     if (programInfoInFlight.has(id)) {
         return programInfoInFlight.get(id)
     }
@@ -78,7 +70,6 @@ export async function fetchProgramInfo(liveId) {
                 return undefined
             }
             const data = response.data
-            programInfoCache.set(id, { data, fetchedAt: Date.now() })
             return data
         } catch (error) {
             handleError(error, { api: 'fetchProgramInfo', liveId: id })

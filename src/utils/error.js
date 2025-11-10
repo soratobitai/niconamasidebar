@@ -233,7 +233,7 @@ export class ErrorManager {
 }
 
 // グローバルエラーマネージャーインスタンス
-export const errorManager = new ErrorManager({
+const errorManager = new ErrorManager({
     enableLogging: true,
     enableConsole: true
 })
@@ -243,37 +243,5 @@ export const errorManager = new ErrorManager({
  */
 export function handleError(error, context = {}) {
     return errorManager.handle(error, context)
-}
-
-/**
- * 非同期関数のエラーハンドリングラッパー
- * @param {Function} fn - 実行する関数
- * @param {Object} context - コンテキスト情報
- * @param {any} defaultValue - エラー時のデフォルト値
- * @returns {Promise<any>}
- */
-export async function safeAsync(fn, context = {}, defaultValue = null) {
-    try {
-        return await fn()
-    } catch (error) {
-        handleError(error, context)
-        return defaultValue
-    }
-}
-
-/**
- * 同期関数のエラーハンドリングラッパー
- * @param {Function} fn - 実行する関数
- * @param {Object} context - コンテキスト情報
- * @param {any} defaultValue - エラー時のデフォルト値
- * @returns {any}
- */
-export function safeSync(fn, context = {}, defaultValue = null) {
-    try {
-        return fn()
-    } catch (error) {
-        handleError(error, context)
-        return defaultValue
-    }
 }
 
