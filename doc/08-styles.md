@@ -85,5 +85,5 @@
 ## 8.6 スタイル改修時の注意
 - クラス/ID名は JS（`render/sidebar.js`, `AutoNextManager.js`, `main.js`, `layout.js`）と密結合。
   **リネームは JS 側と同時に**行う。
-- カード列数のブレークポイントは CSS ではなく **`ui/layout.js` の `setProgramContainerWidth`** にハードコードされている（300/500/.../1500px）。列数を変えたい時はそちらを編集。
+- カード列数のブレークポイントは CSS ではなく **`ui/layout.js` の `setProgramContainerWidth`** の配列 `columnBreakpoints=[300,500,700,900,1100,1300,1500]` で決まる（各値を超えるごとに列+1、最大8列）。列数を変えたい時はそちらを編集。
 - `.program_thumbnail` の `aspect-ratio:16/9` を変えると `AutoNextManager` プレビューやレイアウト計算(`adjustWatchPageChild` の 0.5625=9/16)と齟齬が出うる。

@@ -62,15 +62,14 @@ export function adjustWatchPageChild(elems) {
 }
 
 export function setProgramContainerWidth(elems, sidebarWidth) {
-	let programContainerWidth = '100%'
-	if (sidebarWidth < 300) programContainerWidth = 100 + '%'
-	if (sidebarWidth > 300) programContainerWidth = 100 / 2 + '%'
-	if (sidebarWidth > 500) programContainerWidth = 100 / 3 + '%'
-	if (sidebarWidth > 700) programContainerWidth = 100 / 4 + '%'
-	if (sidebarWidth > 900) programContainerWidth = 100 / 5 + '%'
-	if (sidebarWidth > 1100) programContainerWidth = 100 / 6 + '%'
-	if (sidebarWidth > 1300) programContainerWidth = 100 / 7 + '%'
-	if (sidebarWidth > 1500) programContainerWidth = 100 / 8 + '%'
+	// サイドバー幅が各しきい値を超えるごとに列数を +1（300px以下=1列 … 1500px超=8列）。
+	// 旧・8連ifと等価: columns = 1 +（超えたしきい値の数）
+	const columnBreakpoints = [300, 500, 700, 900, 1100, 1300, 1500]
+	let columns = 1
+	for (const bp of columnBreakpoints) {
+		if (sidebarWidth > bp) columns++
+	}
+	const programContainerWidth = 100 / columns + '%'
 
 	document.querySelectorAll('.program_container').forEach((element) => {
 		element.style.width = programContainerWidth

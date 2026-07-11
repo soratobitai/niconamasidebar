@@ -3,7 +3,7 @@ import { getProgramInfos as getProgramInfosFromStorage } from '../services/stora
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, programInfoTtlMs, watchPageBaseUrl } from '../config/constants.js';
+import { updateThumbnailInterval, programInfoTtlMs, watchPageBaseUrl, apiRateWindowMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -256,7 +256,7 @@ export class UpdateManager {
         }
         this.apiCallCounter.getLiveProgramsTimestamps.push(now);
         // 1分以上前のタイムスタンプを削除
-        this.apiCallCounter.getLiveProgramsTimestamps = this.apiCallCounter.getLiveProgramsTimestamps.filter(t => now - t < 60000);
+        this.apiCallCounter.getLiveProgramsTimestamps = this.apiCallCounter.getLiveProgramsTimestamps.filter(t => now - t < apiRateWindowMs);
         
         if (this.apiCallCounter.getLiveProgramsTimestamps.length >= 10) {
             console.error(`🚨 [異常検出] getLivePrograms()が1分以内に${this.apiCallCounter.getLiveProgramsTimestamps.length}回呼ばれています！`);
