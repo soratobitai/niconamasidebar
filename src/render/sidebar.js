@@ -342,6 +342,65 @@ export function sortProgramsByActivePoint(container) {
     programs.forEach((program) => container.appendChild(program))
 }
 
+/**
+ * FLIP アニメーションで並べ替えを滑らかに見せる。
+ * reorderFn の中で container の子要素を「同期的に」並べ替えること（appendChild 等）。
+ * 位置が変わった要素だけを旧位置から新位置へスライドさせる。
+ * @param {HTMLElement} container - 並べ替え対象のコンテナ
+ * @param {Function} reorderFn - 実際の並べ替えを行う関数（同期実行）
+ * @param {number} [duration=300] - アニメーション時間(ms)
+ */
+export function flipReorder(container, reorderFn, duration = 300) {
+    if (!container || typeof reorderFn !== 'function') {
+        if (typeof reorderFn === 'function') reorderFn()
+        return
+    }
+
+    // First: 並べ替え前の各要素の位置を記録
+    const firstRects = new Map()
+    Array.from(container.children).forEach((el) => {
+        firstRects.set(el, el.getBoundingClientRect())
+    })
+
+    // Last: 並べ替えを実行（同期）
+    reorderFn()
+
+    // Invert: 旧位置へ戻す（トランジション無しで瞬間移動）
+    const moved = []
+    Array.from(container.children).forEach((el) => {
+        const first = firstRects.get(el)
+        if (!first) return
+        const last = el.getBoundingClientRect()
+        const dx = first.left - last.left
+        const dy = first.top - last.top
+        if (dx === 0 && dy === 0) return
+        el.style.transition = 'none'
+        el.style.transform = `translate(${dx}px, ${dy}px)`
+        moved.push(el)
+    })
+
+    if (moved.length === 0) return
+
+    // 強制リフローで Invert 状態を確定させる
+    void container.offsetWidth
+
+    // Play: 新位置へスライド
+    requestAnimationFrame(() => {
+        moved.forEach((el) => {
+            el.style.transition = `transform ${duration}ms ease`
+            el.style.transform = ''
+        })
+    })
+
+    // 後始末: アニメーション終了後にインラインスタイルを除去
+    setTimeout(() => {
+        moved.forEach((el) => {
+            el.style.transition = ''
+            el.style.transform = ''
+        })
+    }, duration + 60)
+}
+
 export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
     const sidebarHtml = `<div id="sidebar" class="sidebar_transition">
                             <div id="sidebar_container">

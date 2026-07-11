@@ -115,10 +115,13 @@ export function upsertProgramInfo(programInfo) {
     if (!programInfo || !programInfo.id) return
     const list = getProgramInfos()
     const idx = list.findIndex((info) => info.id === programInfo.id)
+    // 取得時刻を付与（TTLキャッシュ判定用。programInfoTtlMs 以内は再取得をスキップ）。
+    // 引数オブジェクト（APIレスポンス）を汚さないよう浅いコピーを保存する。
+    const record = { ...programInfo, _fetchedAt: Date.now() }
     if (idx !== -1) {
-        list[idx] = programInfo
+        list[idx] = record
     } else {
-        list.push(programInfo)
+        list.push(record)
     }
     while (list.length > maxSaveProgramInfos) {
         list.shift()

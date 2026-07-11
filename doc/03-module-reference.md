@@ -21,7 +21,7 @@
 | `thumbnailTtlMs` | `10000` | サムネ成功後この時間は再取得しない（フリッカ抑制） |
 | `thumbnailRetryBaseMs` | `2000` | サムネ失敗時の再試行ベース間隔（指数バックオフの基数） |
 | `thumbnailRetryMaxMs` | `60000` | サムネ再試行の最大間隔 |
-| `programInfoTtlMs` | `60000` | 番組詳細の再取得間引きTTL ⚠️ `import` はされるが実際には未使用（→gotchas） |
+| `programInfoTtlMs` | `60000` | 番組詳細の再取得間引きTTL。✅ **TTLキャッシュとして稼働中**（`UpdateManager.updateSidebar` が `_fetchedAt` を見て60秒以内はキュー追加をスキップ） |
 | `loadingSessionTimeoutMs` | `60000` | ローディングセッションの強制終了タイムアウト |
 
 ---
@@ -119,7 +119,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `setSidebarWidth(width)` | chrome.storage.local | `sidebarWidth` のみ保存 |
 | `getProgramInfos()` | localStorage | `programInfos` を JSON parse（失敗時 `[]`） |
 | `setProgramInfos(list)` | localStorage | JSON保存。**QuotaExceeded 時は後半半分に減らして再試行** |
-| `upsertProgramInfo(info)` ★ | localStorage | `id` 一致で置換、無ければ push。`maxSaveProgramInfos`(200) 超過は先頭から shift |
+| `upsertProgramInfo(info)` ★ | localStorage | `id` 一致で置換、無ければ push。`maxSaveProgramInfos`(200) 超過は先頭から shift。✅ **保存時に `_fetchedAt`(取得時刻) を付与**（TTLキャッシュ判定用。引数は汚さず浅いコピーを保存） |
 
 > ⚠️ 設定は `chrome.storage.local` に入るが、`main.js` の `chrome.storage.onChanged` リスナーは
 > `changes.xxx` を直接見ており、`local` / `sync` の area 判定はしていない（このプロジェクトでは local しか使わないので実害なし）。
@@ -137,17 +137,18 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 |---------|------|
 | `startThumbnailUpdate()` | `updateThumbnail()` を即実行→完了後 `updateThumbnailInterval` 秒で再セット（自己再帰 setTimeout）。タイマーは `appState.timers.thumbnail` |
 | `startToDoListUpdate()` | `oneTimeFlag` が立っていれば `performInitialLoad()` 実行後 false 化 → `programInfoQueue.start()` → `timers.todo='queue-managed'`（番兵） |
-| `startSidebarUpdate()` | 既存タイマー掃除→`updateSidebarInterval`（`updateSidebar` 実行→最低1秒のローディング確保→自己再帰）を `updateProgramsInterval` 秒間隔で回す |
+| `startSidebarUpdate()` | 既存タイマー掃除→`updateSidebarInterval`（**別更新が進行中(`isLoading()`)ならスキップ**して次回へ／それ以外は `updateSidebar` 実行→最低1秒ローディング確保→自己再帰）を `updateProgramsInterval` 秒間隔で回す。ガードにより手動settle中(`processNow`)の割り込みソート/セッション上書きを防止 |
 | `stopAllTimers()` | thumbnail/todo/sidebar クリア＋キュー stop |
 | `restartSidebarUpdate()` | sidebar タイマーを張り直す（間隔変更時など） |
-| `performInitialLoad()` ★ | 初回のみ。`setShouldSort(true)`→`updateSidebar()`→（RAF×2待ち）→`processNow(null)`で**全件詳細取得**→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`restartSidebarUpdate()`。`isPerformingInitialLoad` で多重防止 |
-| `performManualUpdate()` ★ | 手動更新（オープン/タブ復帰/更新ボタン）。`updateSidebar()`→`updateThumbnail(true)`→最低1秒→`restartSidebarUpdate()` |
+| `performInitialLoad()` ★ | 初回のみ。**`settling=true`**→`setShouldSort(true)`→`updateSidebar()`（**詳細未取得があれば新着順、全キャッシュ済みなら人気順で描画**）→（RAF×2待ち）→`processNow(null)`で**未取得分の詳細取得**（間は再ソートせず属性のみ更新）→**`settling=false`＋人気順なら `flipReorder` で1回だけ最終ソート**（キャッシュ完備＆新鮮なら移動ゼロの no-op）→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`restartSidebarUpdate()`。`isPerformingInitialLoad` で多重防止、`finally` で `settling=false` 保証 |
+| `performManualUpdate(settle=false)` ★ | 手動更新。共通: `updateSidebar()`→`updateThumbnail(true)`→最低1秒→`restartSidebarUpdate()`。**`settle=true`（更新ボタン）** は追加で、`settleAllowNewest=false`＋**`forceRefetch=true`（TTL無視で全詳細再取得）**にし、間の再ソートを抑制しつつ `processNow(null)` で全詳細取得→人気順なら**1回だけ `flipReorder`**。タブ復帰/再オープンは `settle=false`（軽量・TTL維持、従来どおり）。`finally` でフラグ復元 |
 | `getLivePrograms(rows=100)` | `fetchLivePrograms` ラッパ。統計加算＋1分10回超で異常警告。失敗時は `#api_error` を表示（ログイン促し） |
-| `updateSidebar()` ★★ | ローディングセッション開始→ `getProgramInfos()`（キャッシュ）＋ `getLivePrograms(100)`（一覧）→ 一覧を回して**既存DOMは軽量更新**（active-point/title/link）、**新規は`makeProgramElement`で生成**、各番組を**キューに add**→ `replaceChildren(frag)`→サムネ監視更新→ソート→カラム幅→番組数更新。失敗/空配列時は既存DOM維持 |
+| `updateSidebar()` ★★ | ローディングセッション開始→ `getProgramInfos()`（キャッシュ）＋ `getLivePrograms(100)`（一覧）→ 一覧を回して**既存DOMは軽量更新**（active-point/title/link）、**新規は`makeProgramElement`で生成**、各番組を**キューに add**（✅ **TTL: `_fetchedAt` が60秒以内ならスキップ**。ただし `forceRefetch`＝更新ボタン時はTTL無視で全 add）→ `replaceChildren(frag)`→サムネ監視更新→ソート（`getEffectiveSortType`）→カラム幅→番組数更新。失敗/空配列時は既存DOM維持 |
+| `getEffectiveSortType()` ✅新規 | 表示に使うソート種別を返す。**`settling && programsSort==='active' && settlingNeedsNewest`（＝詳細未取得の番組があり、キャッシュだけでは人気順を確定できない）ときだけ `'newest'`**。**全番組がキャッシュ済みなら最初から人気順**（開くたびの移動を回避）。それ以外は `options.programsSort` |
 | `updateThumbnail(force, onComplete)` | 挿入中(`isInserting`)なら何もしない→ `getProgramInfos()`→ `updateThumbnailsFromStorage` に委譲 |
-| `sortProgramsInContainer(container)` | `sortPrograms(container, options.programsSort)` |
+| `sortProgramsInContainer(container)` | `sortPrograms(container, getEffectiveSortType())`（＝整列確定中は新着順、確定後は設定どおり） |
 | `updateProgramCount(count)` | `#program_count` の数字更新 |
-| `updateActivePointsAndSort(shouldSort)` | 各カードの `active-point` を再計算し、変化があり `shouldSort` の時のみソート |
+| `updateActivePointsAndSort(shouldSort)` | 各カードの `active-point` を再計算。**`settling` 中は並べ替えず属性更新のみ**（確定後に1回ソート）。それ以外は `shouldSort && 変化あり` の時のみソート |
 
 > ⚠️ `updateManager.startThumbnailUpdate` は `options.updateThumbnailInterval` を参照するが、
 > このキーはデフォルトオプションにもUIにも存在しない（常に定数 `updateThumbnailInterval`=20秒が使われる）。
@@ -203,6 +204,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete})` ★★ | localStorageの番組情報を元に各サムネを更新。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。可視画像(IntersectionObserver)があればそれを優先対象に |
 | `initThumbnailVisibilityObserver()` / `refreshThumbnailObservations()` / `teardownThumbnailVisibilityObserver()` | `#liveProgramContainer` 内の `.program_thumbnail_img` を IntersectionObserver で可視監視（`rootMargin:200px`）。可視集合 `visibleImages` を維持 |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体） |
+| `flipReorder(container, reorderFn, duration=300)` ✅新規 | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。人気順の初回最終ソートで使用 |
 | `buildSidebarShell({reloadImageURL, optionsImageURL})` ★ | サイドバー枠HTML(`sidebarHtml`)・境界線(`sidebarLine`)・オプションフォーム(`optionHtml`)の文字列を返す。`main.js` が body に挿入。オプションフォームの全ラジオ(表示順序/自動更新/オートオープン/自動移動)はここに定義 |
 
 > データキー: サムネURLの `key` は user=`u|{base}`, channel=`c|{base}`。ユーザー配信のみ `?cache={now}` を付与してキャッシュ回避。

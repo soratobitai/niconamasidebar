@@ -195,8 +195,8 @@ const setup = async () => {
             if (appState.isLoading()) {
                 return;
             }
-            // 手動更新を実行
-            await performManualUpdate();
+            // 手動更新を実行（更新ボタンは詳細取得後に1回だけ人気順へ整える settle=true）
+            await performManualUpdate(true);
         };
         // 既存のリスナーを削除（もしあれば）
         if (appState.handlers.reloadBtn) {
@@ -659,9 +659,9 @@ async function performInitialLoad() {
     }
 }
 
-async function performManualUpdate() {
+async function performManualUpdate(settle = false) {
     if (updateManager) {
-        await updateManager.performManualUpdate();
+        await updateManager.performManualUpdate(settle);
     }
 }
 

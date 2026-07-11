@@ -30,10 +30,11 @@
 - **修正**: `stopAllTimers()` から当該行を削除。
 - 対象: `src/main.js`
 
-## ✅ E. `programInfoTtlMs` の未使用 import を削除（🟢→整理済み）
-- **旧問題**: `api.js` が `programInfoTtlMs` を import するが未使用。
-- **修正**: import から除去。※定数 `programInfoTtlMs` 自体は `constants.js` に**残置**（将来 TTL 間引きを実装する際の受け皿。実装するなら `upsertProgramInfo` に取得時刻を持たせ `fetchAndSave` 前に判定）。
-- 対象: `src/services/api.js`
+## ✅ E. `programInfoTtlMs` の未使用 import を削除 → **その後TTLキャッシュとして実装**（🟢→対応済み）
+- **旧問題**: `api.js` が `programInfoTtlMs` を import するが未使用（TTL間引き未実装）。
+- **一次対応(2026-07-11)**: `api.js` の未使用 import を除去。
+- **本実装(仕様変更)**: `programInfoTtlMs`(60秒) を**TTLキャッシュ**として実装。`upsertProgramInfo` が保存時に `_fetchedAt` を付与し、`UpdateManager.updateSidebar` が「直近60秒以内に取得済みの番組詳細はキュー追加をスキップ」するようになった。2回目以降の読み込みが高速化＆API負荷軽減。
+- 対象: `src/services/storage.js`, `src/managers/UpdateManager.js`, `src/config/constants.js`
 
 ## ✅ J. `calculateActivePoint` の誤った `@deprecated` を修正（🟢→修正済み）
 - **旧問題**: JSDoc に `@deprecated` とあるが、実際はソート・active-point算出で現役使用。

@@ -59,16 +59,21 @@
     4. rAF内で分岐: `oneTimeFlag===true`（初回）→ `startToDoListUpdate()` / それ以外 → `performManualUpdate()`
     5. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバック。
 24. **`startToDoListUpdate()`（初回）** → `oneTimeFlag` が true なら **`performInitialLoad()`** 実行後 false化 → `programInfoQueue.start()` → `timers.todo='queue-managed'`。
-25. **`performInitialLoad()`**:
-    1. `setShouldSort(true)`
-    2. `await updateSidebar()`（フェーズ4）
-    3. rAF×2でDOM反映待ち
-    4. キューがあれば **`processNow(null)`（全件即時取得）**
-    5. `updateThumbnail(true)`（強制）
-    6. `finishSessionWithMinDuration(1000)`（最低1秒ローディング表示）
-    7. 開いていれば `restartSidebarUpdate()`
+25. **`performInitialLoad()`**（人気順のガチャつき対策を含む）:
+    1. **`appState.update.settling = true`**（整列確定中フラグ）
+    2. `setShouldSort(true)`
+    3. `await updateSidebar()`（フェーズ4）← **キャッシュに詳細が無い番組があれば新着順、全て揃っていれば人気順で描画**（`getEffectiveSortType` / `settlingNeedsNewest`）
+    4. rAF×2でDOM反映待ち
+    5. キューがあれば **`processNow(null)`（全件即時取得）** ← この間、active-point属性は更新されるが**並べ替えはしない**
+    6. **`settling = false` → 人気順(active)なら `flipReorder` で1回だけ最終ソート（FLIPで滑らかにスライド）**
+    7. `updateThumbnail(true)`（強制）
+    8. `finishSessionWithMinDuration(1000)`（最低1秒ローディング表示＝更新ボタンのスピナーが整列完了まで回る）
+    9. 開いていれば `restartSidebarUpdate()`
+    - `finally` で `settling=false` を保証（例外時も詰まらない）
 
-> ⚠️ **初回ロードは `oneTimeFlag` で1度きり**。以降の再オープンや可視復帰は `performManualUpdate` 経路になり、`processNow(全件)` は走らない（通常のキュータイマーに委ねる）。
+> ✅ **人気順のガチャつき対策（仕様変更）**: 人気順の初回ロードは、**キャッシュで人気順を確定できる場合は最初から人気順で表示（移動なし）**。詳細未取得の番組がある場合のみ「新着順で即表示・操作可 → 確定後に1回だけ人気順へFLIPで並べ替え」。連続再ソートを排除。新着順選択時は挙動不変。
+> （TTLキャッシュにより2回目以降＝キャッシュ完備は、ほぼ常に「最初から人気順・移動なし」になる。）
+> ⚠️ **初回ロードは `oneTimeFlag` で1度きり**。以降の再オープンや可視復帰は `performManualUpdate` 経路になり、`processNow(全件)`・settling処理は走らない（通常のキュータイマーに委ねる）。
 
 ## フェーズ4: 番組リスト取得 & 描画（`updateSidebar()`）
 
@@ -77,7 +82,8 @@
 27. `getProgramInfos()`（localStorage読み） ＋ `getLivePrograms(100)`（`fetchLivePrograms`／`credentials:'include'`／in-flight重複排除）
     - 取得成否で `#api_error` を `none`/`block`（ログイン誘導）
 28. **失敗系は既存DOM維持**: `false`（API失敗）も `length===0`（空）も再構築せずカウントだけ更新して return。`#api_error` 表示は `false` の時のみ。
-29. 差分再構築: 既存カードは**軽量更新**（active-point/title/link）、新規は `makeProgramElement`。全番組を `programInfoQueue.add(program.id)`。
+29. 差分再構築: 既存カードは**軽量更新**（active-point/title/link）、新規は `makeProgramElement`。各番組を `programInfoQueue.add(program.id)`。
+    - ✅ **TTLキャッシュ（仕様変更）**: `data._fetchedAt` が直近 `programInfoTtlMs`(60秒) 以内なら**キュー追加をスキップ**（再取得しない）。2回目以降の読み込みが高速化。120秒周期の定期更新では60秒超のため通常どおり再取得され、詳細は古びない。
 30. `isInserting=true` → `replaceChildren(frag)` → `refreshThumbnailObservations()`
 31. `sortPrograms(container, programsSort)`（active=人気順 / newest=ID降順）
 32. `setProgramContainerWidth` → `updateProgramCount` → `isInserting=false`
@@ -97,7 +103,7 @@
 36. `processNow()` … 初回ロード/可視復帰で全件即時処理（進捗0が続けば最大5回リトライ）。
 
 ### 5.3 sidebar（既定120秒・自己再帰 setTimeout）
-37. `startSidebarUpdate()` … **最初の実行も120秒後**（即時ではない）。`updateSidebar()` → 最低1秒ローディング → 自己再帰。
+37. `startSidebarUpdate()` … **最初の実行も120秒後**（即時ではない）。`updateSidebar()` → 最低1秒ローディング → 自己再帰。**別更新が進行中(`isLoading()`)の周期はスキップして次回へ**（手動settleの `processNow` への割り込み・セッション上書き防止）。
 38. `restartSidebarUpdate()` … オプション変更時/初回・手動ロード末尾で張り直し。
 
 > ⚠️ **開いた瞬間の描画は sidebar タイマーではなく**、フェーズ3の `performInitialLoad`/`performManualUpdate` が担う。sidebar タイマーの初回も120秒後である点に注意。
@@ -120,7 +126,7 @@
 
 ## フェーズ8: 手動更新
 
-42. `#reload_programs` click → `isLoading()` なら無視 → `performManualUpdate()`（`updateSidebar` → `updateThumbnail(true)` → 最低1秒ローディング → `restartSidebarUpdate()`）。
+42. `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`（settle）**: `updateSidebar`（`notifybox` を毎回取得＝新着/終了反映、人気順で即描画・新着順退避なし、**`forceRefetch`でTTL無視して全番組をキュー投入**）→ `processNow(null)` で**全詳細を再取得**（間は再ソート抑制）→ **人気順なら1回だけ `flipReorder`** → `updateThumbnail(true)`（サムネ強制）→ 最低1秒 → `restartSidebarUpdate()`。タブ復帰/再オープンは `performManualUpdate()`（settle無し・TTL維持の軽量更新）。
 
 ## フェーズ9: オプション変更の伝播（`chrome.storage.onChanged`）
 

@@ -1,9 +1,9 @@
 import { fetchLivePrograms } from '../services/api.js';
 import { getProgramInfos as getProgramInfosFromStorage } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, refreshThumbnailObservations } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, refreshThumbnailObservations, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval } from '../config/constants.js';
+import { updateThumbnailInterval, programInfoTtlMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -73,6 +73,14 @@ export class UpdateManager {
         }
         
         const updateSidebarInterval = async () => {
+            // 別の更新（手動更新・初回ロード）が進行中なら、今回の定期更新はスキップして次回に回す。
+            // settle中の processNow（最大数十秒）に割り込んで途中ソートやセッション上書きが
+            // 起きるのを防ぐ（ローディングセッションは60秒でタイムアウトするため詰まらない）。
+            if (this.appState.isLoading()) {
+                const retryTimer = setTimeout(updateSidebarInterval, Number(this.options.updateProgramsInterval) * 1000);
+                this.appState.setTimer('sidebar', retryTimer);
+                return;
+            }
             await this.updateSidebar();
             // 定期更新時：最低1秒のローディング時間を確保して終了
             if (this.loadingManager.getCurrentSessionId()) {
@@ -119,33 +127,46 @@ export class UpdateManager {
         }
         
         this.isPerformingInitialLoad = true;
+        // 整列確定中フラグをON。
+        // 人気順のときは、詳細取得が出揃うまで新着順で安定表示し（getEffectiveSortType）、
+        // 途中の再ソートを抑制する（updateActivePointsAndSort）。確定後に1回だけ並べ替える。
+        // 初回ロードはキャッシュ不足時に新着順で待つことを許可する。
+        this.appState.update.settleAllowNewest = true;
+        this.appState.update.settling = true;
         try {
             // ソートフラグをON
             this.programInfoQueue.setShouldSort(true);
-            
-            // 番組リスト更新
+
+            // 番組リスト更新（settling中は新着順で描画される）
             await this.updateSidebar();
-            
+
             // DOM更新完了を待つ
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            
-            // 番組詳細取得（全件）
+
+            // 番組詳細取得（全件）。この間、active-point属性は更新されるが並べ替えはしない。
             const initialQueueSize = this.programInfoQueue.size();
-            
+
             if (initialQueueSize > 0) {
                 await this.programInfoQueue.processNow(null).catch(error => {
                     console.error('[初回ロード] キュー処理でエラーが発生しました:', error);
                 });
             }
-            
+
+            // 整列確定: settlingを解除し、人気順のときは1回だけ最終ソートをFLIPで滑らかに実行
+            this.appState.update.settling = false;
+            const listContainer = document.getElementById('liveProgramContainer');
+            if (listContainer && this.options.programsSort === 'active') {
+                flipReorder(listContainer, () => this.sortProgramsInContainer(listContainer));
+            }
+
             // サムネイル更新
             await new Promise(resolve => {
                 this.updateThumbnail(true, resolve);
             });
-            
+
             // 最低1秒のローディング時間を確保して終了
             await this.loadingManager.finishSessionWithMinDuration(1000);
-            
+
             // 定期タイマーをリセット
             if (this.appState.sidebar.isOpen) {
                 this.restartSidebarUpdate();
@@ -156,26 +177,56 @@ export class UpdateManager {
                 await this.loadingManager.finishSessionWithMinDuration(1000);
             }
         } finally {
+            // 例外時も含め、確定中フラグは必ず解除する
+            this.appState.update.settling = false;
             this.isPerformingInitialLoad = false;
         }
     }
 
     /**
-     * 手動更新を実行（サイドバーオープン、タブ切替、更新ボタン押下）
+     * 手動更新を実行
+     * @param {boolean} [settle=false] - true の場合、初回ロードと同様に詳細を取得してから
+     *   1回だけFLIPで人気順に整える（更新ボタン用）。ただし既に人気順で表示中なので新着順への
+     *   一時退避はしない（settleAllowNewest=false）。false は軽量更新（タブ復帰・再オープン用）。
      */
-    async performManualUpdate() {
+    async performManualUpdate(settle = false) {
+        if (settle) {
+            // 途中の再ソートを抑制し、詳細取得後に1回だけFLIPで整える。
+            // すでに人気順で表示中のため、新着順への一時退避はしない。
+            // 更新ボタンは明示操作なのでTTLを無視して全詳細を再取得する。
+            this.appState.update.settleAllowNewest = false;
+            this.appState.update.settling = true;
+            this.appState.update.forceRefetch = true;
+        }
         try {
             // 番組リスト更新
             await this.updateSidebar();
-            
+
+            if (settle) {
+                // DOM更新完了を待つ
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                // 未取得/期限切れ(TTL超過)の詳細を取得（新鮮なものはスキップ）
+                if (this.programInfoQueue.size() > 0) {
+                    await this.programInfoQueue.processNow(null).catch(error => {
+                        console.error('[手動更新] キュー処理でエラーが発生しました:', error);
+                    });
+                }
+                // 確定: 人気順なら1回だけFLIPで最新の順序へ（動きが無ければ no-op）
+                this.appState.update.settling = false;
+                const listContainer = document.getElementById('liveProgramContainer');
+                if (listContainer && this.options.programsSort === 'active') {
+                    flipReorder(listContainer, () => this.sortProgramsInContainer(listContainer));
+                }
+            }
+
             // サムネイル更新
             await new Promise(resolve => {
                 this.updateThumbnail(true, resolve);
             });
-            
+
             // 最低1秒のローディング時間を確保して終了
             await this.loadingManager.finishSessionWithMinDuration(1000);
-            
+
             // 定期タイマーをリセット
             if (this.appState.sidebar.isOpen) {
                 this.restartSidebarUpdate();
@@ -184,6 +235,13 @@ export class UpdateManager {
             console.error('[手動更新] エラーが発生しました:', error);
             if (this.loadingManager.getCurrentSessionId()) {
                 await this.loadingManager.finishSessionWithMinDuration(1000);
+            }
+        } finally {
+            if (settle) {
+                // 例外時も含め、各フラグを既定へ戻す
+                this.appState.update.settling = false;
+                this.appState.update.settleAllowNewest = true;
+                this.appState.update.forceRefetch = false;
             }
         }
     }
@@ -259,10 +317,13 @@ export class UpdateManager {
                 });
             }
 
+            let missingDetailCount = 0;
             livePrograms.forEach((program) => {
                 if (!program || !program.id) return;
 
                 const data = programInfos.find((info) => info.id === `lv${program.id}`);
+                // 詳細（人気度の元データ）が未取得の番組を数える（初回の描画順の判定に使う）
+                if (!data) missingDetailCount++;
                 const id = String(program.id);
                 const existing = existingMap.get(id);
 
@@ -286,8 +347,14 @@ export class UpdateManager {
 
                 // キューに追加（最新の放送中番組リスト）
                 // updateSidebar()が120秒ごとに最新リストを取得するため、
-                // 自動的に最新の番組がキューに追加される
-                this.programInfoQueue.add(program.id);
+                // 自動的に最新の番組がキューに追加される。
+                // TTLキャッシュ: 直近 programInfoTtlMs 以内に取得済みの詳細は再取得をスキップし、
+                // 2回目以降の読み込みを高速化＆API負荷を軽減する。
+                // forceRefetch（更新ボタン）時はTTLを無視して全番組を再取得する。
+                const isFresh = data && data._fetchedAt && (Date.now() - data._fetchedAt) < programInfoTtlMs;
+                if (this.appState.update.forceRefetch || !isFresh) {
+                    this.programInfoQueue.add(program.id);
+                }
             });
 
             const liveProgramContainer = document.getElementById('liveProgramContainer');
@@ -299,6 +366,14 @@ export class UpdateManager {
             this.appState.update.isInserting = true;
             liveProgramContainer.replaceChildren(frag);
             refreshThumbnailObservations();
+
+            // 初回整列中は、キャッシュだけで人気順を確定できるか（＝詳細未取得の番組が無いか）で描画順を決める。
+            // 全番組がキャッシュ済みなら最初から人気順で描画し、開くたびの並べ替え（移動）を避ける。
+            // ただし settleAllowNewest が false（更新ボタン）のときは新着順への退避はしない。
+            if (this.appState.update.settling) {
+                this.appState.update.settlingNeedsNewest =
+                    this.appState.update.settleAllowNewest && missingDetailCount > 0;
+            }
 
             // ソート
             const container2 = document.getElementById('liveProgramContainer');
@@ -336,10 +411,27 @@ export class UpdateManager {
     }
 
     /**
+     * 表示に使うソート種別を返す。
+     * 初回整列の確定中(settling)かつ人気順のときは、確定するまで新着順で安定表示する。
+     * @returns {string} 'active' | 'newest'
+     */
+    getEffectiveSortType() {
+        // 初回整列の確定中で人気順、かつ「詳細未取得の番組がありキャッシュだけでは人気順を確定できない」
+        // ときだけ、一時的に新着順で安定表示する。
+        // 全番組がキャッシュ済み（人気順を確定できる）なら、変更前と同様に最初から人気順で描画する。
+        if (this.appState.update.settling
+            && this.options.programsSort === 'active'
+            && this.appState.update.settlingNeedsNewest) {
+            return 'newest';
+        }
+        return this.options.programsSort;
+    }
+
+    /**
      * 番組リストをソート（統一関数を使用）
      */
     sortProgramsInContainer(container) {
-        sortPrograms(container, this.options.programsSort);
+        sortPrograms(container, this.getEffectiveSortType());
     }
 
     /**
@@ -386,8 +478,9 @@ export class UpdateManager {
             }
         });
 
-        // shouldSortがtrueで、active-pointが更新された場合のみソートを実行
-        if (shouldSort && hasUpdate) {
+        // 初回整列の確定中(settling)は並べ替えない（確定後に1回だけ実行してガチャつきを防ぐ）。
+        // それ以外は従来通り、shouldSortかつactive-pointが更新された場合のみソート。
+        if (!this.appState.update.settling && shouldSort && hasUpdate) {
             this.sortProgramsInContainer(container);
         }
     }

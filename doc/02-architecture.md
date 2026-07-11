@@ -65,7 +65,7 @@
 | `managers/UpdateManager.js` | 更新タイマー3系統＋描画更新の司令塔（サイドバー/サムネ/番組詳細） | `class UpdateManager` |
 | `managers/LoadingManager.js` | 更新セッション単位のローディング表示制御（最低表示時間・タイムアウト） | `class LoadingManager` |
 | `managers/AutoNextManager.js` | 番組終了時の自動移動（モーダル・カウントダウン・遷移） | `class AutoNextManager` |
-| `render/sidebar.js` | 番組カードDOM生成・サムネ更新・可視監視・サイドバー枠HTML | `makeProgramElement`, `calculateActivePoint`, `updateThumbnailsFromStorage`, `init/refresh/teardownThumbnailVisibilityObserver`, `sortProgramsByActivePoint`, `buildSidebarShell`（※`handleThumbnailError` は内部関数、`makeProgramElement` から配線） |
+| `render/sidebar.js` | 番組カードDOM生成・サムネ更新・可視監視・サイドバー枠HTML・並べ替えFLIP | `makeProgramElement`, `calculateActivePoint`, `updateThumbnailsFromStorage`, `init/refresh/teardownThumbnailVisibilityObserver`, `sortProgramsByActivePoint`, `flipReorder`, `buildSidebarShell`（※`handleThumbnailError` は内部関数、`makeProgramElement` から配線） |
 | `ui/layout.js` | 視聴ページ本体側の幅調整・サイドバー幅→カラム数計算 | `adjustWatchPageChild`, `setProgramContainerWidth` |
 | `ui/sidebarControl.js` | サイドバー開閉・幅ドラッグ・root幅追従 | `createSidebarControl` |
 | `handlers/optionsHandler.js` | オプションフォームの初期反映・変更保存・ソート即時反映 | `setupOptionsHandler` |
@@ -131,7 +131,7 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 | `observers` | `resizeWatchPage` / `resizeSidebar` / `thumbnail` | ResizeObserver 等（thumbnail は sidebar.js が実体を持ち参照のみ） |
 | `sidebar` | `width` / `isOpen` | サイドバー幅・開閉状態（UIの真実） |
 | `visibility` | `isVisible` | Page Visibility API 由来のタブ可視状態 |
-| `update` | `isUpdating` / `pending` / `isInserting` / `oneTimeFlag` | 更新中フラグ・DOM挿入中フラグ・初回フラグ |
+| `update` | `isUpdating` / `pending` / `isInserting` / `oneTimeFlag` / **`settling`** / **`settlingNeedsNewest`** / **`settleAllowNewest`** / **`forceRefetch`** | 更新中・DOM挿入中・初回フラグ。`settling`=整列確定中。`settlingNeedsNewest`=詳細未取得があり新着順で待つ必要があるか。`settleAllowNewest`=新着順への一時退避を許可するか（初回=true/更新ボタン=false）。`forceRefetch`=TTL無視で全詳細を再取得するか（更新ボタン=true） |
 | `loading` | `operations` / `updateSession` | ローディングセッションID（`isLoading()` は `updateSession !== null`） |
 | `autoNext` | `scheduled` / `canceled` / `selectingNext` / `liveStatusStopper` | 自動移動の進行状態と終了監視の停止関数 |
 | `handlers` | `onResize`（＋ 実行時に `reloadBtn` 等が動的追加される） | イベントハンドラ参照 |

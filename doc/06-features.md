@@ -55,6 +55,12 @@
 - 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。詳細取得後 `updateActivePointsAndSort(shouldSort)` で再計算。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
+- ✅ **初回ロード時のガチャつき対策（仕様変更）**: 人気順は詳細取得(4件/秒)が出揃うまで順位が確定しないため、
+  従来はバッチ毎に再ソートしてカードが飛び跳ねていた。対策として:
+  - **キャッシュで人気順を確定できる場合（全番組がキャッシュ済み）は、最初から人気順で表示（移動なし）**。← 変更前の挙動を維持
+  - **詳細未取得の番組がある場合のみ**、確定するまで新着順で安定表示（オーバーレイ無し・クリック可）→ 出揃ったら1回だけ人気順へ [FLIP](./03-module-reference.md) で滑らかに並べ替え。
+  - 進捗は更新ボタンのスピナー。制御は `AppState.update.settling` / `settlingNeedsNewest` ＋ `UpdateManager.getEffectiveSortType` / `performInitialLoad`。
+  - TTLキャッシュにより2回目以降はほぼ常に「最初から人気順・移動なし」。新着順選択時は挙動不変。詳細は [04-data-flow フェーズ3](./04-data-flow.md)。
 
 ## 7. オートオープン（自動でサイドバーを開く）
 - 初期判定: `setup()` の `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`。
@@ -68,7 +74,10 @@
 - ✅ 2026-07-11修正: 終了時の `updateSidebar` は `main.js` から注入され、**実際に最新リストを取得**してから次番組を選定する（旧: IIFEビルドで未解決だった）。→ [09-gotchas A](./09-gotchas-and-techdebt.md)
 
 ## 9. 手動更新ボタン（リロード）
-- `#reload_programs` click → `isLoading()` なら無視 → `performManualUpdate()`（リスト更新→サムネ強制→最低1秒ローディング→タイマー再起動）。
+- `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`**:
+  リスト更新（`notifybox` を毎回取得＝新着/終了番組を反映、人気順は再ソートを抑制のうえ即描画）→ **全番組の詳細を再取得（`forceRefetch`＝TTL無視、視聴者数等も最新化）** → **人気順なら1回だけFLIPで最新の人気順へ整える** → **サムネを強制更新**（10秒TTL・エラーバックオフをバイパス、可視サムネ対象）→ 最低1秒ローディング→ 定期タイマー再起動。
+  新着順への一時退避はしない（すでに人気順表示中のため）。
+  ※明示操作なので**TTLを無視して全詳細を再取得**する（番組数が多いと詳細取得4件/秒で時間がかかる＝スピナー長め。その間もリスト/サムネは即更新済み・クリック可）。ページ開き時・自動更新はTTLを維持。
 - ローディング表示: `LoadingManager` が `.loading` ＋ `pointer-events:none`（60秒タイムアウト）。
 - 対応設定: なし（機能ボタン）。
 
@@ -86,3 +95,11 @@
 
 ## 13. デバッグ機能
 - `window.showApiStats()` で API 呼び出し統計をコンソール表示。5分ごとに異常頻度を自動警告。
+
+## 14. 番組詳細のTTLキャッシュ（内部最適化・仕様変更）
+- 番組詳細は `ProgramInfoQueue` がレート制限（4件/秒）で取得し、`upsertProgramInfo` で localStorage `programInfos` に保存（保存時に `_fetchedAt` を付与）。
+- ✅ **`UpdateManager.updateSidebar` は、直近 `programInfoTtlMs`(60秒) 以内に取得済みの番組はキュー追加をスキップ**し再取得しない。
+  - 効果: 2回目以降の読み込み・サイドバー再オープンが高速化、API負荷も軽減。特に人気順の「整列確定」がほぼ一瞬になる。
+  - 鮮度: 定期更新（120秒）は60秒超のため通常どおり再取得され、詳細が古びない。
+  - **例外**: **更新ボタン（`forceRefetch`）はTTLを無視して全番組の詳細を再取得**する（明示的な「今すぐ最新に」）。TTL最適化はページ開き時・自動更新にのみ適用。
+- 対応設定: なし（内部最適化）。関連: [09-gotchas E](./09-gotchas-and-techdebt.md)、[05-external-api](./05-external-api.md)。
