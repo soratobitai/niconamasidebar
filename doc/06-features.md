@@ -36,6 +36,7 @@
 
 ## 2. サイドバー開閉
 - 制御: `ui/sidebarControl.js` `createSidebarControl`。`#sidebar_button` click → `toggleSidebar()` → `setIsOpenSidebar()` 保存 → `handleSidebarOpenStateChange()`（タイマー起動/停止＋即時更新）。
+- ✅ 2026-07-11修正（二重発火）: 開閉ボタンは直接 `handleSidebarOpenStateChange` を呼ぶが、`setIsOpenSidebar` の書込みで `chrome.storage.onChanged` が**自タブでも**発火して二度目が走り、開くたび `getLivePrograms` が2回になっていた。onChanged の `isOpenSidebar` 分岐に「自タブ（既に反映済み）ならスキップ」ガードを追加（他タブ同期は維持）。→ [09-gotchas S](./09-gotchas-and-techdebt.md)
 - 対応設定: **`isOpenSidebar`**（既定 `false`）。`autoOpen` が初期開閉に影響（§7）。
 
 ## 3. サイドバー幅ドラッグリサイズ
@@ -75,6 +76,7 @@
 - 起動/停止: `setup()` で `on` なら開始、onChanged で on/off に応じて start/stop。
 - 対応設定: **`autoNextProgram`**（既定 `'off'`）。
 - ✅ 2026-07-11修正: 終了時の `updateSidebar` は `main.js` から注入され、**実際に最新リストを取得**してから次番組を選定する（旧: IIFEビルドで未解決だった）。→ [09-gotchas A](./09-gotchas-and-techdebt.md)
+- ✅ 2026-07-11修正（暴走ループ）: `observeProgramEnd` の MutationObserver がデバウンス無しで毎変異 `onEnded`→`updateSidebar` を叩き、`replaceChildren` の変異で自己駆動ループ化して `getLivePrograms` が暴走していた。終了ガイド表示中は**20秒スロットル**で再発火を制限（`status.js`）。→ [09-gotchas S](./09-gotchas-and-techdebt.md)
 
 ## 9. 手動更新ボタン（リロード）
 - `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`**:

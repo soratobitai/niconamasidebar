@@ -28,6 +28,7 @@ export class UpdateManager {
         
         // 重複実行防止フラグ
         this.isPerformingInitialLoad = false;
+        this.isPerformingManualUpdate = false;
     }
 
     /**
@@ -180,6 +181,10 @@ export class UpdateManager {
      *   一時退避はしない（settleAllowNewest=false）。false は軽量更新（タブ復帰・再オープン用）。
      */
     async performManualUpdate(settle = false) {
+        // 多重防止: 前回の手動更新が処理中なら重複実行しない（開閉/タブ復帰/自動移動が重なった時に
+        // getLivePrograms が重複して積まれるのを防ぐ。performInitialLoad の isPerformingInitialLoad と同様）。
+        if (this.isPerformingManualUpdate) return;
+        this.isPerformingManualUpdate = true;
         if (settle) {
             // 途中の再ソートを抑制し、詳細取得後に1回だけFLIPで整える。
             // すでに人気順で表示中のため、新着順への一時退避はしない。
@@ -227,6 +232,7 @@ export class UpdateManager {
                 await this.loadingManager.finishSessionWithMinDuration(1000);
             }
         } finally {
+            this.isPerformingManualUpdate = false;
             if (settle) {
                 // 例外時も含め、各フラグを既定へ戻す
                 this.appState.update.settling = false;

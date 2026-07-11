@@ -106,7 +106,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | 関数 | 説明 |
 |------|------|
 | `detectProgramEndGuide()`（内部） | `[class*="program-end-guide"]` を探し、子に `announcement` / `next-action-area` / `broadcast-request-send-button` が**全て揃う**時のみ true（ハッシュ付きクラス名に部分一致、テキストは見ない） |
-| `observeProgramEnd(onEnded)` ★ export | `document.body` を `MutationObserver`（childList/subtree/attributes[class]）で監視し、終了検知で `onEnded()`。即時チェックも実施。返り値は**停止関数**（`AppState.autoNext.liveStatusStopper` に保持される） |
+| `observeProgramEnd(onEnded)` ★ export | `document.body` を `MutationObserver`（childList/subtree/attributes[class]）で監視し、終了ガイド表示中に `onEnded()`。即時チェックも実施。✅ **スロットル(2026-07-11)**：`onEnded`→`updateSidebar` の `replaceChildren` が変異を撒き「変異→onEnded→更新→変異」の自己駆動ループ（getLivePrograms 暴走）になるのを防ぐため、ガイド表示中は最小 `PROGRAM_END_RECHECK_MIN_INTERVAL_MS`(20秒) 間隔でのみ再発火し、ガイド消滅で再武装（次番組ジャンプの初回1発は保証）。返り値は**停止関数**（`AppState.autoNext.liveStatusStopper` に保持される） |
 
 ⚠️ ニコ生のDOM/クラス名変更に弱い（部分一致で緩和はしている）。
 
@@ -146,7 +146,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `startSidebarUpdate()` | 既存タイマー掃除→`updateSidebarInterval`（**別更新が進行中(`isLoading()`)ならスキップ**して次回へ／それ以外は `updateSidebar` 実行→最低1秒ローディング確保→自己再帰）を `updateProgramsInterval` 秒間隔で回す。ガードにより手動settle中(`processNow`)の割り込みソート/セッション上書きを防止 |
 | `restartSidebarUpdate()` | sidebar タイマーを張り直す（間隔変更時など） |
 | `performInitialLoad()` ★ | 初回のみ。**`settling=true`**→`setShouldSort(true)`→`updateSidebar()`（**詳細未取得があれば新着順、全キャッシュ済みなら人気順で描画**）→（RAF×2待ち）→`processNow(null)`で**未取得分の詳細取得**（間は再ソートせず属性のみ更新）→**`settling=false`＋人気順なら `flipReorder` で1回だけ最終ソート**（キャッシュ完備＆新鮮なら移動ゼロの no-op）→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`restartSidebarUpdate()`。`isPerformingInitialLoad` で多重防止、`finally` で `settling=false` 保証 |
-| `performManualUpdate(settle=false)` ★ | 手動更新。共通: `updateSidebar()`→`updateThumbnail(true)`→最低1秒→`restartSidebarUpdate()`。**`settle=true`（更新ボタン）** は追加で、`settleAllowNewest=false`＋**`forceRefetch=true`（TTL無視で全詳細再取得）**にし、間の再ソートを抑制しつつ `processNow(null)` で全詳細取得→人気順なら**1回だけ `flipReorder`**。タブ復帰/再オープンは `settle=false`（軽量・TTL維持、従来どおり）。`finally` でフラグ復元 |
+| `performManualUpdate(settle=false)` ★ | 手動更新。共通: `updateSidebar()`→`updateThumbnail(true)`→最低1秒→`restartSidebarUpdate()`。**`settle=true`（更新ボタン）** は追加で、`settleAllowNewest=false`＋**`forceRefetch=true`（TTL無視で全詳細再取得）**にし、間の再ソートを抑制しつつ `processNow(null)` で全詳細取得→人気順なら**1回だけ `flipReorder`**。タブ復帰/再オープンは `settle=false`（軽量・TTL維持、従来どおり）。`finally` でフラグ復元。✅ **多重防止(2026-07-11)**：冒頭 `isPerformingManualUpdate` in-flight ガードで、開閉/タブ復帰/自動移動が重なった時の `updateSidebar`→`getLivePrograms` 重複を直列化（更新ボタン経路は別途 `isLoading()` でスキップ） |
 | `getLivePrograms(rows=100)` | `fetchLivePrograms` ラッパ。統計加算＋1分10回超で異常警告。失敗時は `#api_error` を表示（ログイン促し） |
 | `updateSidebar()` ★★ | ローディングセッション開始→ `getProgramInfos()`（キャッシュ）＋ `getLivePrograms(100)`（一覧）→ 一覧を回して**既存DOMは軽量更新**（active-point/title/link）、**新規は`makeProgramElement`で生成**、各番組を**キューに add**（✅ **TTL: `_fetchedAt` が60秒以内ならスキップ**。ただし `forceRefetch`＝更新ボタン時はTTL無視で全 add）→ `replaceChildren(frag)`→サムネ監視更新→ソート（`getEffectiveSortType`）→カラム幅→番組数更新。失敗/空配列時は既存DOM維持 |
 | `getEffectiveSortType()` ✅新規 | 表示に使うソート種別を返す。**`settling && programsSort==='active' && settlingNeedsNewest`（＝詳細未取得の番組があり、キャッシュだけでは人気順を確定できない）ときだけ `'newest'`**。**全番組がキャッシュ済みなら最初から人気順**（開くたびの移動を回避）。それ以外は `options.programsSort` |
