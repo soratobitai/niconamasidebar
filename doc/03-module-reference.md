@@ -262,7 +262,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | 関数 | 説明 |
 |------|------|
-| `sortPrograms(container, sortType)` | `sortType==='active'` → `sortProgramsByActivePoint`（人気順）。それ以外(=`newest`) → **番組ID(数値)降順**（新着順。IDが大きいほど新しい前提） |
+| `sortPrograms(container, sortType)` | `sortType==='active'` → `sortProgramsByActivePoint`（人気順）。それ以外(=`newest`) → **notifybox API の並び順(=放送開始が新しい順)を保持**。`updateSidebar` が各カードに付ける `data-api-index`（API配列の位置）の**昇順**に並べる（lv番号は予約/作成順で放送開始順とズレるため不採用）。同時刻/欠落時のみ lv番号降順フォールバック |
 
 ---
 

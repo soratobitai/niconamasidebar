@@ -73,7 +73,7 @@
 | `services/animFrameStore.js` 🧪 | 動くサムネのフレーム永続化（IndexedDB, blob保存, TTL/件数掃除）。リロード/番組移動をまたいで復元 | `saveFrames`, `loadFrames`, `cleanupFrames` |
 | `utils/dom.js` | `debounce` | `debounce` |
 | `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`（`ErrorManager`/`ErrorType`/`ErrorLevel` は内部専用・未export） |
-| `utils/sorting.js` | 番組リストのソート（新着順=ID降順 / 人気順=active-point） | `sortPrograms` |
+| `utils/sorting.js` | 番組リストのソート（新着順=notifybox APIの並び順(=放送開始が新しい順)を保持 / 人気順=active-point） | `sortPrograms` |
 | `debug/apiStats.js` | API呼び出し統計（異常頻度の警告・手動確認関数） | `initApiStats`（＋ `window.showApiStats`） |
 
 ## 2.4 依存関係グラフ（import 方向）
