@@ -45,10 +45,9 @@
 | `setTimer(name, timer)` / `getTimer(name)` | タイマー登録/取得。`name` は `timers` のキーのみ有効 |
 | `clearTimer(name)` | 値が数値なら `clearTimeout`＋`clearInterval` 両方呼び null化。⚠️ `todo` に入る `'queue-managed'`（文字列）は数値でないためここでは実際のタイマーは止まらない（キュー停止は別途 `programInfoQueue.stop()`） |
 | `clearAllTimers()` | 全タイマークリア |
-| `setObserver/getObserver/disconnectObserver/disconnectAllObservers` | ResizeObserver 等の管理。`disconnect()` を安全に呼ぶ |
+| `setObserver/disconnectObserver/disconnectAllObservers` | ResizeObserver 等の管理。`disconnect()` を安全に呼ぶ |
 | `setHandler(name)/getHandler(name)` | イベントハンドラ参照の保持（削除は呼び出し側責任） |
 | `setVisibility(bool)/isVisible()` | Page Visibility 状態 |
-| `startLoading()/finishLoading()` | `loading.operations` の増減（後方互換。実運用は下記セッション方式） |
 | `isLoading()` | **`loading.updateSession !== null`** を返す（＝セッション方式が真実） |
 | `startUpdateSession()` | `update_{Date.now()}_{Math.random()}` のIDを発行しセット。返り値=ID |
 | `finishUpdateSession(id)` | 現行IDと一致した時のみ null化（後発セッションを誤終了しない） |
@@ -125,7 +124,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `setSidebarWidth(width)` | chrome.storage.local | `sidebarWidth` のみ保存 |
 | `setSidebarTheme(theme)` ✅新規 | chrome.storage.local | `sidebarTheme`（`'dark'`/`'light'`）のみ保存 |
 | `getProgramInfos()` | localStorage | `programInfos` を JSON parse（失敗時 `[]`） |
-| `setProgramInfos(list)` | localStorage | JSON保存。**QuotaExceeded 時は後半半分に減らして再試行** |
+| `setProgramInfos(list)`（内部専用・未export） | localStorage | JSON保存。**QuotaExceeded 時は後半半分に減らして再試行**。`upsertProgramInfo` から内部利用 |
 | `upsertProgramInfo(info)` ★ | localStorage | `id` 一致で置換、無ければ push。`maxSaveProgramInfos`(200) 超過は先頭から shift。✅ **保存時に `_fetchedAt`(取得時刻) を付与**（TTLキャッシュ判定用。引数は汚さず浅いコピーを保存） |
 
 > ⚠️ 設定は `chrome.storage.local` に入るが、`main.js` の `chrome.storage.onChanged` リスナーは
@@ -145,7 +144,6 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `startThumbnailUpdate()` | `updateThumbnail()` を即実行→完了後 `updateThumbnailInterval` 秒で再セット（自己再帰 setTimeout）。タイマーは `appState.timers.thumbnail` |
 | `startToDoListUpdate()` | `oneTimeFlag` が立っていれば `performInitialLoad()` 実行後 false 化 → `programInfoQueue.start()` → `timers.todo='queue-managed'`（番兵） |
 | `startSidebarUpdate()` | 既存タイマー掃除→`updateSidebarInterval`（**別更新が進行中(`isLoading()`)ならスキップ**して次回へ／それ以外は `updateSidebar` 実行→最低1秒ローディング確保→自己再帰）を `updateProgramsInterval` 秒間隔で回す。ガードにより手動settle中(`processNow`)の割り込みソート/セッション上書きを防止 |
-| `stopAllTimers()` | thumbnail/todo/sidebar クリア＋キュー stop |
 | `restartSidebarUpdate()` | sidebar タイマーを張り直す（間隔変更時など） |
 | `performInitialLoad()` ★ | 初回のみ。**`settling=true`**→`setShouldSort(true)`→`updateSidebar()`（**詳細未取得があれば新着順、全キャッシュ済みなら人気順で描画**）→（RAF×2待ち）→`processNow(null)`で**未取得分の詳細取得**（間は再ソートせず属性のみ更新）→**`settling=false`＋人気順なら `flipReorder` で1回だけ最終ソート**（キャッシュ完備＆新鮮なら移動ゼロの no-op）→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`restartSidebarUpdate()`。`isPerformingInitialLoad` で多重防止、`finally` で `settling=false` 保証 |
 | `performManualUpdate(settle=false)` ★ | 手動更新。共通: `updateSidebar()`→`updateThumbnail(true)`→最低1秒→`restartSidebarUpdate()`。**`settle=true`（更新ボタン）** は追加で、`settleAllowNewest=false`＋**`forceRefetch=true`（TTL無視で全詳細再取得）**にし、間の再ソートを抑制しつつ `processNow(null)` で全詳細取得→人気順なら**1回だけ `flipReorder`**。タブ復帰/再オープンは `settle=false`（軽量・TTL維持、従来どおり）。`finally` でフラグ復元 |
@@ -280,12 +278,12 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 エラーの分類・ログ・リトライ戦略。実運用は `handleError` 一本。
 
-| エクスポート | 説明 |
+| シンボル | 説明 |
 |-------------|------|
-| `ErrorType` | `API/NETWORK/DOM/STORAGE/VALIDATION/UNKNOWN` |
-| `ErrorLevel` | `INFO/WARNING/ERROR/CRITICAL` |
-| `class ErrorManager` | `handle(error, context)` でエラー情報生成→ログ(最大100件)→コンソール出力。`_classifyError`（メッセージ文字列から種別推定）、`_determineLevel`、`getLogs`、`isRetryable`、`calculateRetryDelay`（指数バックオフ）を持つ |
-| `handleError(error, context)` ★ | モジュールローカルの `errorManager` へ委譲。**全layerの失敗経路がここに集まる** |
+| `ErrorType`（内部専用・未export） | `API/NETWORK/DOM/STORAGE/VALIDATION/UNKNOWN` |
+| `ErrorLevel`（内部専用・未export） | `INFO/WARNING/ERROR/CRITICAL` |
+| `class ErrorManager`（内部専用・未export） | `handle(error, context)` でエラー情報生成→ログ(最大100件)→コンソール出力。`_classifyError`（メッセージ文字列から種別推定）、`_determineLevel`、`getLogs`、`isRetryable`、`calculateRetryDelay`（指数バックオフ）を持つ |
+| `handleError(error, context)` ★ **唯一のexport** | モジュールローカルの `errorManager` へ委譲。**全layerの失敗経路がここに集まる** |
 
 > ⚠️ `_detectDevelopmentMode()` は「chrome.runtime があれば常に true（開発時）」＝**本番でも console 出力が有効**。
 > リトライ機構(`isRetryable`/`calculateRetryDelay`)は定義のみで、現状どこからも呼ばれていない。
@@ -361,13 +359,13 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 | `stopAllTimers()` | thumbnail/todo/sidebar/autoNext をクリア＋キュー停止 |
 | `handleSidebarOpenStateChange(open)` ★ | 開: thumbnail/sidebarタイマー開始＋（`oneTimeFlag`なら初回ロード、else 手動更新）を RAF/フォールバックで実行。閉: 全タイマー停止 |
 | `startThumbnailUpdate/startToDoListUpdate/startSidebarUpdate` | UpdateManager へ委譲 |
-| `ensure/show/hideAutoNextModal`, `scheduleAutoNextNavigation`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲 |
+| `hideAutoNextModal`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲（`ensure/showModal`・`scheduleNavigation` は AutoNextManager が内部で直接呼ぶため main.js ラッパーは 2026-07-11 整理で削除） |
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |
 | `restartSidebarUpdate` | UpdateManager へ委譲 |
 | `getOptions()` | `storage.getOptions(defaultOptions)` |
 | `insertSidebar()` ★ | `buildSidebarShell` の結果を `body` 先頭に挿入、`#optionContainer` に設定HTMLを挿入（**body直下へは移動しない＝サイドバー内に保持**）、`elems.sidebar` 等を確定、body を `display:flex` に、`#root` を `flexGrow:1` に |
 | `applyTheme(theme)` ✅新規 | `document.body` に `nicosidebar-light` クラスをトグル（`theme==='light'`）。CSS変数(`--sb-*`)が切り替わる。setup時＋onChangedで適用。`#theme_toggle` クリックで `dark`⇄`light`、`setSidebarTheme` で保存 |
-| `finishLoadingSession*`, `performInitialLoad`, `performManualUpdate`, `updateSidebar`, `updateThumbnail`, `updateActivePointsAndSort`, `updateProgramCount`, `updateLoadingState` | 各 Manager への委譲ラッパー |
+| `finishLoadingSession`, `performManualUpdate`, `updateSidebar`, `updateActivePointsAndSort` | 各 Manager への委譲ラッパー（未使用だった `performInitialLoad`/`updateThumbnail`/`updateProgramCount`/`updateLoadingState`/`finishLoadingSessionWithMinDuration` は 2026-07-11 整理で削除。実処理は各 Manager のメソッドが担う） |
 | `sortPrograms(container)` | `sortProgramsUtil(container, options.programsSort)` |
 | `reflectOptions()` | `setupOptionsHandler(options, programInfoQueue, sortPrograms)` |
 

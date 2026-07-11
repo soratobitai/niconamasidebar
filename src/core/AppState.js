@@ -56,7 +56,6 @@ export class AppState {
 
         // ローディング状態管理（更新セッション単位で管理）
         this.loading = {
-            operations: 0, // 進行中の処理数（後方互換性のため残す）
             updateSession: null, // 更新セッションID（すべての処理を包括的に管理）
         };
 
@@ -72,11 +71,6 @@ export class AppState {
         this.handlers = {
             onResize: null,
             reloadBtn: null,
-        };
-
-        // データキュー
-        this.queues = {
-            programInfo: [], // toDolists
         };
 
         // 設定とDOM要素（参照のみ保持）
@@ -139,15 +133,6 @@ export class AppState {
         if (name in this.observers) {
             this.observers[name] = observer;
         }
-    }
-
-    /**
-     * オブザーバーを取得
-     * @param {string} name - オブザーバー名
-     * @returns {object|null} オブザーバー
-     */
-    getObserver(name) {
-        return this.observers[name] || null;
     }
 
     /**
@@ -214,20 +199,6 @@ export class AppState {
      */
     isVisible() {
         return this.visibility.isVisible;
-    }
-
-    /**
-     * ローディング操作を開始（後方互換性のため）
-     */
-    startLoading() {
-        this.loading.operations++;
-    }
-
-    /**
-     * ローディング操作を完了（後方互換性のため）
-     */
-    finishLoading() {
-        this.loading.operations = Math.max(0, this.loading.operations - 1);
     }
 
     /**

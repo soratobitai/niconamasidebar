@@ -1,8 +1,8 @@
 # 08. スタイル（CSS）インベントリ
 
-`src/styles/main.css`（542行）の全セレクタと役割。DOM構造は `render/sidebar.js`・`AutoNextManager.js` が生成する。
+`src/styles/main.css`（652行）の全セレクタと役割。DOM構造は `render/sidebar.js`・`AutoNextManager.js` が生成する。
 
-- テーマ: 既定**ダーク**／**ライト**対応。**CSSカスタムプロパティ `--sb-*`** を `body`（ダーク既定）と **`body.nicosidebar-light`**（ライト）で切替。主要ルールは `var(--sb-bg/-fg/-header-fg/-arrow/-spinner/-spinner-track/-thumb-bg/-icon-filter/-icon-filter-hover/-popup-*/-switch-*)` を使用。JSは `applyTheme` が body クラスをトグル。
+- テーマ: 既定**ライト**／**ダーク**対応。**CSSカスタムプロパティ `--sb-*`** を `body`（ダーク既定値）と **`body.nicosidebar-light`**（ライト）で切替。主要ルールは `var(--sb-bg/-fg/-header-fg/-arrow/-spinner/-spinner-track/-thumb-bg/-icon-filter/-icon-filter-hover/-popup-border/-accent/-segment-bg/-switch-*)` を使用（未使用だった `--sb-popup-bg/-fg/-heading/-input-border` は 2026-07-11 整理で削除）。JSは `applyTheme` が body クラスをトグル。
 - テーマ切替トグル: **オプション設定内・`#optionForm` 末尾**の `#theme_toggle .theme_switch/.theme_switch_knob`。**ダーク=ON（ノブ右・青トラック `--sb-switch-track:#2a6fd8`）／ライト=OFF（ノブ左・グレー `#c9ccd2`）**、ラベルは左「ライト」右「ダーク」。左端ライン/開閉ボタンは `--sb-line`（ライトで着色）。既定テーマは**ライト**（`main.js` の `defaultOptions.sidebarTheme:'light'`、`applyTheme` はサイドバー挿入前に実行しちらつき回避）。
 - サイドバーは `position: sticky; top:0; height:100vh`。開閉は**幅(width)を 0 ⇔ 実幅** に変え、`transition: all .5s` でアニメ。
 
@@ -12,7 +12,6 @@
 |---------|------|
 | `#sidebar` | サイドバー本体。sticky・全高・ダーク・スクロールバー非表示（`scrollbar-width:none` ＋ `::-webkit-scrollbar{display:none}`） |
 | `.sidebar_transition` | 幅変化のトランジション（ドラッグ中は一時的に外す） |
-| `.sidebar_display_none` | 非表示ユーティリティ（`display:none`） |
 | `#sidebar_container` | 内側コンテナ。`padding:10px 8px 80px` |
 | `#sidebar_line` | サイドバー左の境界線（幅5px、ドラッグでリサイズ、`z-index:999`） |
 | `.col_resize` | ドラッグ可能時のカーソル（`col-resize`） |
@@ -65,7 +64,7 @@
 | `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプ（hover/focus 表示）。ツールチップは**見出し行(`position:relative`)基準・`width:100%`** でサイドバー幅内に収める（`.help-wrap` に position を付けない） |
 | `.opt-beta-badge` | 🧪 見出し横の「β版」バッジ（動くサムネ設定用の黄色い小バッジ） |
 | `.theme_toggle_row` / `#theme_toggle` | テーマ切替トグル（`#optionForm` **末尾**）。ダーク=ON（ノブ右）／ライト=OFF（ノブ左） |
-| `#optionContainer a` / `a:hover` | リンク色 |
+| `#optionContainer input[type="radio"]` | ラジオの余白/カーソル（実際は `.opt-segment` 側で `display:none`） |
 
 ## 8.5 自動移動モーダル（`#auto_next_modal`）
 

@@ -96,16 +96,6 @@ export class UpdateManager {
     }
 
     /**
-     * すべてのタイマーを停止
-     */
-    stopAllTimers() {
-        this.appState.clearTimer('thumbnail');
-        this.appState.clearTimer('todo');
-        this.appState.clearTimer('sidebar');
-        this.programInfoQueue.stop();
-    }
-
-    /**
      * サイドバー更新タイマーを再開
      */
     restartSidebarUpdate() {
@@ -252,8 +242,7 @@ export class UpdateManager {
     async getLivePrograms(rows = 100) {
         this.apiCallCounter.getLivePrograms++;
         this.apiCallCounter.totalCalls++;
-        const callId = this.apiCallCounter.totalCalls;
-        
+
         // タイムスタンプを記録（API呼び出し頻度の計算用）
         const now = Date.now();
         if (!this.apiCallCounter.recentTimestamps) {

@@ -10,11 +10,7 @@ body {
     --sb-thumb-bg: #000;
     --sb-icon-filter: invert(59%) sepia(3%) saturate(11%) hue-rotate(22deg) brightness(91%) contrast(93%);
     --sb-icon-filter-hover: invert(63%) sepia(98%) saturate(12%) hue-rotate(70deg) brightness(109%) contrast(92%);
-    --sb-popup-bg: #222;
-    --sb-popup-fg: #ddd;
     --sb-popup-border: #333;
-    --sb-input-border: #ccc;
-    --sb-popup-heading: #fff;
     --sb-accent: #2a6fd8;
     --sb-segment-bg: #2a2a2a;
     --sb-switch-track: #2a6fd8; /* ダーク=ON=色付き */
@@ -32,11 +28,7 @@ body.nicosidebar-light {
     --sb-thumb-bg: #e2e5ea;
     --sb-icon-filter: brightness(0) opacity(0.55);
     --sb-icon-filter-hover: brightness(0) opacity(0.85);
-    --sb-popup-bg: #ffffff;
-    --sb-popup-fg: #333333;
     --sb-popup-border: #d5d9df;
-    --sb-input-border: #b8bdc6;
-    --sb-popup-heading: #111111;
     --sb-accent: #2a6fd8;
     --sb-segment-bg: #eceff3;
     --sb-switch-track: #c9ccd2; /* ライト=OFF=グレー */
@@ -103,9 +95,6 @@ body.nicosidebar-light {
 }
 .sidebar_transition {
     transition: all 0.5s;
-}
-.sidebar_display_none {
-    display: none;
 }
 #sidebar_container {
     position: absolute;
@@ -577,70 +566,10 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
     white-space: normal;
 }
 
-#optionContainer p {
-    margin: 0.4em 0;
-    font-size: 0.95em;
-    line-height: 1.6;
-}
-
-#optionContainer ul {
-    margin: 0.4em 0;
-    padding-left: 1.4em;
-}
-
-li {
-    margin: 0.3em 0;
-    font-size: 0.95em;
-}
-#optionContainer .flex {
-    display: flex;
-    justify-content: start;
-    align-items: center;
-    margin: 0.3rem 0;
-    gap: 0.5rem;
-}
-
-#optionContainer .setbox {
-    display: inline-flex;
-    align-items: start;
-    margin: 0.25rem 0.5rem 0.25rem 0;
-}
-#optionContainer .setbox p {
-    margin: 0.4rem 0;
-}
-
-#optionContainer .inputbox {
-    width: auto;
-    max-width: none;
-    min-width: 0;
-}
-
-#optionContainer label {
-    display: inline-block;
-    width: auto;
-    margin-right: 0.6rem;
-    font-weight: bold;
-    white-space: nowrap;
-}
-
-#optionContainer input[type="text"] {
-    padding: 0.45rem;
-    border-radius: 0.25rem;
-    /* ポップアップ外枠(--sb-popup-border)より濃い専用色。両テーマで視認できる中間グレー */
-    border: 1px solid var(--sb-input-border);
-    font-size: 0.95rem;
-    width: 9rem;
-    outline: none;
-}
-
 #optionContainer input[type="radio"] {
     margin-right: 0.4rem;
     cursor: pointer;
 }
-
-#optionContainer a { color: #8db4ff; }
-#optionContainer a:hover { color: #a5c4ff; }
-
 
 /* 自動移動モーダル */
 #auto_next_modal {

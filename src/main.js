@@ -2,7 +2,7 @@
 import './styles/main.css'
 import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs, visibilityFullRefreshMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
-import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, setSidebarTheme } from './services/storage.js'
+import { getOptions as getOptionsFromStorage, setSidebarTheme } from './services/storage.js'
 import { buildSidebarShell } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
@@ -29,11 +29,6 @@ const programInfoQueue = new ProgramInfoQueue({
     maxSize: maxSaveProgramInfos,
     maxRequestsPerSecond: 4, // 1秒あたり最大4件
     getVisibilityState: () => appState.isVisible(), // 可視状態を取得する関数
-    onProcessStart: () => {
-        // キュー処理開始を追跡（updateSidebar()完了後のキュー処理開始時のみ）
-        // updateSidebar()内で既にstartLoading()が呼ばれているため、ここでは呼ばない
-        // ただし、updateSidebar()完了後にキュー処理が開始される場合、ローディングは継続される
-    },
     onProcessComplete: (processedCount, results, shouldSort) => {
         // 番組詳細情報取得後、active-pointを更新
         // shouldSortがtrueの場合のみソートを実行（初回/サイドバーオープン/更新ボタン時）
@@ -41,11 +36,6 @@ const programInfoQueue = new ProgramInfoQueue({
             updateActivePointsAndSort(shouldSort);
         }
         // サムネイル更新は別タイマー（startThumbnailUpdate）で定期実行されるため、ここでは呼ばない
-    },
-    onQueueEmpty: () => {
-        // 何もしない
-        // updateSidebar()が120秒ごとに最新の放送中番組リストを取得し、
-        // その番組をキューに追加するため、ここでは何もする必要がない
     }
 });
 
@@ -78,9 +68,6 @@ let updateManager = null;
 if (!localStorage.getItem('programInfos')) {
     localStorage.setItem('programInfos', JSON.stringify([]));
 }
-
-// 初期化（開発用）
-// localStorage.setItem('programInfos', JSON.stringify([]));
 
 // 各要素を定義
 const setElems = () => {
@@ -522,27 +509,9 @@ const startSidebarUpdate = () => {
 // ===== 自動次番組関連の関数 =====
 // AutoNextManager に委譲
 
-function ensureAutoNextModal() {
-    if (autoNextManager) {
-        return autoNextManager.ensureModal();
-    }
-}
-
-function showAutoNextModal(seconds, preview, onCancel) {
-    if (autoNextManager) {
-        autoNextManager.showModal(seconds, preview, onCancel);
-    }
-}
-
 function hideAutoNextModal() {
     if (autoNextManager) {
         autoNextManager.hideModal();
-    }
-}
-
-function scheduleAutoNextNavigation(nextHref, preview) {
-    if (autoNextManager) {
-        autoNextManager.scheduleNavigation(nextHref, preview);
     }
 }
 
@@ -649,22 +618,6 @@ function finishLoadingSession() {
     }
 }
 
-/**
- * 最低ローディング時間を確保してセッションを完了する
- * LoadingManager に完全委譲
- */
-async function finishLoadingSessionWithMinDuration(minDuration = 1000) {
-    if (loadingManager) {
-        await loadingManager.finishSessionWithMinDuration(minDuration);
-    }
-}
-
-async function performInitialLoad() {
-    if (updateManager) {
-        await updateManager.performInitialLoad();
-    }
-}
-
 async function performManualUpdate(settle = false) {
     if (updateManager) {
         await updateManager.performManualUpdate(settle);
@@ -674,26 +627,6 @@ async function performManualUpdate(settle = false) {
 // sortPrograms関数: utils/sorting.jsの統一関数を使用
 function sortPrograms(container) {
     sortProgramsUtil(container, options.programsSort);
-}
-
-/**
- * 番組数を表示する
- * @param {number} count - 番組数
- */
-function updateProgramCount(count) {
-    if (updateManager) {
-        updateManager.updateProgramCount(count);
-    }
-}
-
-/**
- * ローディング状態を更新（更新ボタンにローディング表示を適用）
- * LoadingManager に委譲
- */
-function updateLoadingState() {
-    if (loadingManager) {
-        loadingManager.updateLoadingState();
-    }
 }
 
 async function updateSidebar() {
@@ -710,12 +643,6 @@ async function updateSidebar() {
 function updateActivePointsAndSort(shouldSort = false) {
     if (updateManager) {
         updateManager.updateActivePointsAndSort(shouldSort);
-    }
-}
-
-function updateThumbnail(force, onComplete) {
-    if (updateManager) {
-        updateManager.updateThumbnail(force, onComplete);
     }
 }
 

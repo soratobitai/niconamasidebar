@@ -1,3 +1,5 @@
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs } from '../config/constants.js'
+
 /**
  * 番組情報からDOM要素を直接作成（innerHTMLを使用せず、セキュアに）
  * @param {Object} data - 番組データ
@@ -162,8 +164,6 @@ function handleThumbnailError() {
     }
 }
 
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs } from '../config/constants.js'
-
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
     const onComplete = options.onComplete || null
@@ -193,7 +193,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     let pendingImages = 0 // 画像読み込み待機中の数
     let isCompleted = false // 完了コールバックが呼ばれたかどうか
 
-    function computeNext(info, parentId) {
+    function computeNext(info) {
         if (!info) return { nextUrl: null, key: '' }
         if (info.isMemberOnly) return { nextUrl: null, key: 'member' }
 
@@ -234,7 +234,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             
             const info = infoMap.get(`lv${card.id}`)
 
-            const { nextUrl, key } = computeNext(info, card.id)
+            const { nextUrl, key } = computeNext(info)
             if (!nextUrl) continue;
 
             // TTL: 直近成功から一定時間は更新しない（キー変化時は除く）

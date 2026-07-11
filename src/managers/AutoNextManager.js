@@ -128,7 +128,6 @@ export class AutoNextManager {
      * 自動次番組への遷移をスケジュール
      * @param {string} nextHref - 遷移先URL
      * @param {Object} preview - プレビュー情報
-     * @param {Function} updateSidebarFn - サイドバー更新関数
      */
     scheduleNavigation(nextHref, preview) {
         // 既存のカウントダウンが生きていれば停止
@@ -179,7 +178,7 @@ export class AutoNextManager {
 
     /**
      * 視聴中番組の終了監視を開始
-     * @param {Function} updateSidebarFn - サイドバー更新関数（オプション）
+     * @param {Function} updateSidebarFn - サイドバー更新関数（番組終了検知時に最新リストを取得するため main.js から常に注入される）
      */
     startWatcher(updateSidebarFn = null) {
         this.stopWatcher();
