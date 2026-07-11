@@ -367,7 +367,9 @@ export class UpdateManager {
             const container2 = document.getElementById('liveProgramContainer');
             if (container2) this.sortProgramsInContainer(container2);
 
-            setProgramContainerWidth(this.elems, this.elems.sidebar ? this.elems.sidebar.offsetWidth : this.appState.sidebar.width);
+            // 列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅(offsetWidth)を
+            // 使うと、開いた直後のリスト再描画がアニメ中に走った時に1列⇔多列がパタついてサムネが一瞬巨大化するため。
+            setProgramContainerWidth(this.elems, this.appState.sidebar.width);
 
             // 番組数更新
             this.updateProgramCount(livePrograms.length);

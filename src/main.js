@@ -139,6 +139,14 @@ const setup = async () => {
     autoNextManager = new AutoNextManager(appState);
     updateManager = new UpdateManager(appState, programInfoQueue, loadingManager, options, elems, loadingImageURL);
 
+    // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
+    // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
+    // ことで、開閉中の列パタつき（1列⇔多列の切替でサムネが一瞬巨大化する崩れ）を防ぐ。
+    const state = {
+        sidebarWidth: { value: appState.sidebar.width },
+        isOpenSidebar: { value: appState.sidebar.isOpen },
+    };
+
     // Watchページの幅を設定
     adjustWatchPageChild(elems);
 
@@ -146,7 +154,8 @@ const setup = async () => {
     const onResizeHandler = debounce(() => {
         adjustWatchPageChild(elems);
         sidebarControl.setRootWidth();
-        setProgramContainerWidth(elems, elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width);
+        // 意図した幅で列数を決める（アニメ中の途中幅では列がパタつくため）
+        setProgramContainerWidth(elems, state.sidebarWidth.value);
     }, 30); // 150ms → 30ms に短縮
     appState.setHandler('onResize', onResizeHandler);
     window.addEventListener('resize', onResizeHandler);
@@ -168,7 +177,9 @@ const setup = async () => {
 
     // サイドバーのサイズ変更時
     const resizeObserver_sidebar = new ResizeObserver((e) => {
-        const width = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
+        // 開閉アニメ中の途中幅(offsetWidth)ではなく「意図した幅」で列数を決める。
+        // ドラッグ中は onMouseMove が sidebarWidth.value を即時更新するので幅追従は保たれる。
+        const width = state.sidebarWidth.value;
         setProgramContainerWidth(elems, width);
 
         // ウィンドウリサイズイベントを発行（シークポジションのズレ対策）
@@ -252,11 +263,7 @@ const setup = async () => {
         window.dispatchEvent(new Event('resize'));
     });
 
-    // サイドバーOPEN/CLOSEボタン
-    const state = {
-        sidebarWidth: { value: appState.sidebar.width },
-        isOpenSidebar: { value: appState.sidebar.isOpen },
-    };
+    // サイドバーOPEN/CLOSEボタン（state は上部で定義済み）
     const sidebarControl = createSidebarControl(elems, state);
     const sidebarBtn = document.getElementById('sidebar_button');
     if (sidebarBtn) {
@@ -274,7 +281,7 @@ const setup = async () => {
             requestAnimationFrame(() => {
                 // transition中でも正確な幅を取得するため、さらに次のフレームで実行
                 requestAnimationFrame(() => {
-                    const sidebarWidth = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
+                    const sidebarWidth = state.sidebarWidth.value;
                     setProgramContainerWidth(elems, sidebarWidth);
                     adjustWatchPageChild(elems);
                 });
@@ -297,12 +304,12 @@ const setup = async () => {
         // CSS transition完了後に調整するため、requestAnimationFrameで次のフレームに延期
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                const sidebarWidth = elems.sidebar ? elems.sidebar.offsetWidth : appState.sidebar.width;
+                const sidebarWidth = state.sidebarWidth.value;
                 setProgramContainerWidth(elems, sidebarWidth);
                 adjustWatchPageChild(elems);
             });
         });
-        
+
         // データ取得のみ少し遅延（初期ページ読み込みの邪魔をしない）
         setTimeout(() => {
             handleSidebarOpenStateChange(true);
@@ -315,7 +322,8 @@ const setup = async () => {
         // 閉じる場合も同様に調整
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                setProgramContainerWidth(elems, 0);
+                // 閉じていても列数は「開いた時の幅」で確定させておく（開いた瞬間の列パタつき防止）
+                setProgramContainerWidth(elems, state.sidebarWidth.value);
                 adjustWatchPageChild(elems);
             });
         });
