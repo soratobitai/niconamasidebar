@@ -190,10 +190,8 @@ export class AutoNextManager {
             this.appState.autoNext.selectingNext = true;
             
             try {
-                // グローバル関数 updateSidebar を呼び出す（循環依存回避）
-                if (typeof updateSidebar === 'function') {
-                    await updateSidebar();
-                } else if (updateSidebarFn) {
+                // 最新の番組リストを取得（循環依存回避のため main.js から関数を注入）
+                if (typeof updateSidebarFn === 'function') {
                     await updateSidebarFn();
                 }
                 const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');

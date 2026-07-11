@@ -107,6 +107,8 @@ export function makeProgramElement(data, loadingImageURL) {
     thumbnailImg.className = 'program_thumbnail_img'
     thumbnailImg.src = live_thumbnail_url
     thumbnailImg.setAttribute('data-src', thumbnail_url)
+    // 画像読み込み失敗時のフォールバック（data-src → loading.gif）を配線
+    thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)
     thumbnailDiv.appendChild(thumbnailLink)
     container.appendChild(thumbnailDiv)
@@ -122,7 +124,11 @@ export function makeProgramElement(data, loadingImageURL) {
 }
 
 /**
- * @deprecated 後方互換性のため残しています。makeProgramElementを使用してください。
+ * 番組データから人気度スコア（active-point）を算出する。
+ * point = (視聴者数+1 + コメント数+1) / 放送経過分数
+ * ソート（人気順）および DOM属性 active-point の元になる現役の関数。
+ * @param {Object} data - 番組データ（viewers/comments/onAirTime.beginAt を参照）
+ * @returns {number} 人気度スコア（非有限時は0）
  */
 export function calculateActivePoint(data) {
     if (!data) return 0
@@ -144,13 +150,8 @@ export function calculateActivePoint(data) {
     return Number.isFinite(point) ? point : 0
 }
 
-export function attachThumbnailErrorHandlers() {
-    document.querySelectorAll('.program_thumbnail_img').forEach(function (element) {
-        element.removeEventListener('error', handleThumbnailError)
-        element.addEventListener('error', handleThumbnailError)
-    })
-}
-
+// サムネイル画像の読み込み失敗時のフォールバック処理。
+// makeProgramElement 生成時に各 img へ addEventListener('error', ...) で配線される。
 function handleThumbnailError() {
     const dataSrc = this.getAttribute('data-src')
     if (dataSrc && this.src !== dataSrc) {

@@ -55,6 +55,7 @@ export class AppState {
         // その他
         this.handlers = {
             onResize: null,
+            reloadBtn: null,
         };
 
         // データキュー

@@ -456,7 +456,6 @@ function stopAllTimers() {
     appState.clearTimer('todo');
     appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');
-    appState.clearTimer('queueRestart');
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
@@ -550,7 +549,9 @@ function scheduleAutoNextNavigation(nextHref, preview) {
 
 function startLiveStatusWatcher() {
     if (autoNextManager) {
-        autoNextManager.startWatcher();
+        // 番組終了検知時に最新リストを取得できるよう updateSidebar を注入
+        // （IIFEビルドではモジュールローカル関数はグローバル参照できないため明示的に渡す）
+        autoNextManager.startWatcher(updateSidebar);
     }
 }
 

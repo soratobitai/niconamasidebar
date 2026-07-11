@@ -1,4 +1,4 @@
-import { notifyboxAPI, liveInfoAPI, programInfoTtlMs } from '../config/constants.js'
+import { notifyboxAPI, liveInfoAPI } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 
 /**
