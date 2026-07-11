@@ -61,7 +61,7 @@
 | `services/api.js` | ニコ生2API の fetch（in-flight 重複排除つき） | `fetchLivePrograms`, `fetchProgramInfo` |
 | `services/queue.js` | 番組詳細取得キュー。レート制限・逐次処理・可視状態連動 | `class ProgramInfoQueue` |
 | `services/status.js` | watch ページの「番組終了ガイド」検知 | `observeProgramEnd` |
-| `services/storage.js` | `chrome.storage.local`（設定）と `localStorage`（番組キャッシュ）の読み書き | `getOptions`, `saveOptions`, `setIsOpenSidebar`, `setSidebarWidth`, `getProgramInfos`, `setProgramInfos`, `upsertProgramInfo` |
+| `services/storage.js` | `chrome.storage.local`（設定）と `localStorage`（番組キャッシュ）の読み書き | `getOptions`, `saveOptions`, `setIsOpenSidebar`, `setSidebarWidth`, `setSidebarTheme`, `getProgramInfos`, `upsertProgramInfo`（`setProgramInfos` は内部専用・未export） |
 | `managers/UpdateManager.js` | 更新タイマー3系統＋描画更新の司令塔（サイドバー/サムネ/番組詳細） | `class UpdateManager` |
 | `managers/LoadingManager.js` | 更新セッション単位のローディング表示制御（最低表示時間・タイムアウト） | `class LoadingManager` |
 | `managers/AutoNextManager.js` | 番組終了時の自動移動（モーダル・カウントダウン・遷移） | `class AutoNextManager` |
@@ -72,7 +72,7 @@
 | `render/animatedThumbnail.js` 🧪 | 動くサムネ（実験・ホバー中のみ）。CORS＋canvas知覚ハッシュで重複排除しblobリングバッファに保持、ホバーで巡回表示 | `setAnimatedThumbnailEnabled`, `teardownAnimatedThumbnails` |
 | `services/animFrameStore.js` 🧪 | 動くサムネのフレーム永続化（IndexedDB, blob保存, TTL/件数掃除）。リロード/番組移動をまたいで復元 | `saveFrames`, `loadFrames`, `cleanupFrames` |
 | `utils/dom.js` | `debounce` | `debounce` |
-| `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`, `ErrorManager`, `ErrorType`, `ErrorLevel` |
+| `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`（`ErrorManager`/`ErrorType`/`ErrorLevel` は内部専用・未export） |
 | `utils/sorting.js` | 番組リストのソート（新着順=ID降順 / 人気順=active-point） | `sortPrograms` |
 | `debug/apiStats.js` | API呼び出し統計（異常頻度の警告・手動確認関数） | `initApiStats`（＋ `window.showApiStats`） |
 
@@ -134,10 +134,9 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 | `sidebar` | `width` / `isOpen` | サイドバー幅・開閉状態（UIの真実） |
 | `visibility` | `isVisible` | Page Visibility API 由来のタブ可視状態 |
 | `update` | `isUpdating` / `pending` / `isInserting` / `oneTimeFlag` / **`settling`** / **`settlingNeedsNewest`** / **`settleAllowNewest`** / **`forceRefetch`** | 更新中・DOM挿入中・初回フラグ。`settling`=整列確定中。`settlingNeedsNewest`=詳細未取得があり新着順で待つ必要があるか。`settleAllowNewest`=新着順への一時退避を許可するか（初回=true/更新ボタン=false）。`forceRefetch`=TTL無視で全詳細を再取得するか（更新ボタン=true） |
-| `loading` | `operations` / `updateSession` | ローディングセッションID（`isLoading()` は `updateSession !== null`） |
+| `loading` | `updateSession` | ローディングセッションID（`isLoading()` は `updateSession !== null`。旧 `operations` カウンタは 2026-07-11 整理で削除） |
 | `autoNext` | `scheduled` / `canceled` / `selectingNext` / `liveStatusStopper` | 自動移動の進行状態と終了監視の停止関数 |
 | `handlers` | `onResize`（＋ 実行時に `reloadBtn` 等が動的追加される） | イベントハンドラ参照 |
-| `queues` | `programInfo` | （宣言のみ。実キューは `ProgramInfoQueue` 側） |
 | `config` | `options` / `defaultOptions` | 設定（参照保持） |
 | `elements` | （動的） | DOM要素参照 |
 

@@ -97,7 +97,7 @@ export function getProgramInfos() {
  * Write programInfos to localStorage.
  * @param {any[]} list
  */
-export function setProgramInfos(list) {
+function setProgramInfos(list) {
     try {
         localStorage.setItem('programInfos', JSON.stringify(list))
     } catch (error) {

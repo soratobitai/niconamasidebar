@@ -3,8 +3,8 @@
  * エラーの分類、ログ記録、リトライ戦略を提供
  */
 
-// エラータイプ
-export const ErrorType = {
+// エラータイプ（このモジュール内部専用）
+const ErrorType = {
     API: 'API',
     NETWORK: 'NETWORK',
     DOM: 'DOM',
@@ -13,8 +13,8 @@ export const ErrorType = {
     UNKNOWN: 'UNKNOWN'
 }
 
-// エラーレベル
-export const ErrorLevel = {
+// エラーレベル（このモジュール内部専用）
+const ErrorLevel = {
     INFO: 'INFO',
     WARNING: 'WARNING',
     ERROR: 'ERROR',
@@ -22,9 +22,9 @@ export const ErrorLevel = {
 }
 
 /**
- * エラーマネージャークラス
+ * エラーマネージャークラス（このモジュール内部専用。外部へは handleError のみ公開）
  */
-export class ErrorManager {
+class ErrorManager {
     constructor(options = {}) {
         this.enableLogging = options.enableLogging !== false // デフォルトで有効
         this.enableConsole = options.enableConsole !== false // コンソール出力
