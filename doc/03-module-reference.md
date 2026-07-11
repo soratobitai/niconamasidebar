@@ -123,6 +123,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `saveOptions(options)` | chrome.storage.local | 保存（Promise） |
 | `setIsOpenSidebar(bool)` | chrome.storage.local | `isOpenSidebar` のみ保存 |
 | `setSidebarWidth(width)` | chrome.storage.local | `sidebarWidth` のみ保存 |
+| `setSidebarTheme(theme)` ✅新規 | chrome.storage.local | `sidebarTheme`（`'dark'`/`'light'`）のみ保存 |
 | `getProgramInfos()` | localStorage | `programInfos` を JSON parse（失敗時 `[]`） |
 | `setProgramInfos(list)` | localStorage | JSON保存。**QuotaExceeded 時は後半半分に減らして再試行** |
 | `upsertProgramInfo(info)` ★ | localStorage | `id` 一致で置換、無ければ push。`maxSaveProgramInfos`(200) 超過は先頭から shift。✅ **保存時に `_fetchedAt`(取得時刻) を付与**（TTLキャッシュ判定用。引数は汚さず浅いコピーを保存） |
@@ -364,14 +365,14 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |
 | `restartSidebarUpdate` | UpdateManager へ委譲 |
 | `getOptions()` | `storage.getOptions(defaultOptions)` |
-| `insertSidebar()` ★ | `buildSidebarShell` の結果を `body` 先頭に挿入、`#optionContainer` を body 直下へ移動、`elems.sidebar` 等を確定、body を `display:flex` に、`#root` を `flexGrow:1` に |
+| `insertSidebar()` ★ | `buildSidebarShell` の結果を `body` 先頭に挿入、`#optionContainer` に設定HTMLを挿入（**body直下へは移動しない＝サイドバー内に保持**）、`elems.sidebar` 等を確定、body を `display:flex` に、`#root` を `flexGrow:1` に |
+| `applyTheme(theme)` ✅新規 | `document.body` に `nicosidebar-light` クラスをトグル（`theme==='light'`）。CSS変数(`--sb-*`)が切り替わる。setup時＋onChangedで適用。`#theme_toggle` クリックで `dark`⇄`light`、`setSidebarTheme` で保存 |
 | `finishLoadingSession*`, `performInitialLoad`, `performManualUpdate`, `updateSidebar`, `updateThumbnail`, `updateActivePointsAndSort`, `updateProgramCount`, `updateLoadingState` | 各 Manager への委譲ラッパー |
 | `sortPrograms(container)` | `sortProgramsUtil(container, options.programsSort)` |
 | `reflectOptions()` | `setupOptionsHandler(options, programInfoQueue, sortPrograms)` |
 
-### オプションポップアップ配置（setup内）
-`#setting_options` クリックで `#optionContainer` を表示。`placePopup` がボタン直下に、画面外なら上側に配置。
-resize/scroll/Esc/外側クリックで再配置・クローズ。
+### 設定パネルの表示（setup内）
+`#setting_options`（歯車）クリックで `.sidebar_body` に `.show-settings` をトグル → **番組リストと設定を入れ替え**（CSSで `#liveProgramContainer`/`#api_error` を隠し `#optionContainer` を表示）。設定内の `#settings_close`（×）または Esc で番組リストへ戻る。ポップアップの `placePopup`/`onDocClick` 等は廃止。
 
 > ✅ 死んでいた `clearTimer('queueRestart')`（未宣言キー）は `stopAllTimers` から削除済み（2026-07-11）。
 > ✅ `AppState.handlers` に `reloadBtn` を宣言追加したため、更新ボタンの `setHandler('reloadBtn', ...)` が実効化（2026-07-11）。

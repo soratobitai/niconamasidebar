@@ -2,7 +2,7 @@
 import './styles/main.css'
 import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs, visibilityFullRefreshMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
-import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage } from './services/storage.js'
+import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage, setSidebarTheme } from './services/storage.js'
 import { buildSidebarShell } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
@@ -55,6 +55,7 @@ let defaultOptions = {
     updateProgramsInterval: '120', // 秒
     sidebarWidth: 360,
     isOpenSidebar: false,
+    sidebarTheme: 'light', // 'dark' | 'light'（既定ライト）
     autoNextProgram: 'off',
     animatedThumbnail: 'off', // β版・既定OFF
 };
@@ -96,6 +97,11 @@ const setElems = () => {
     elems.enquetePlaceholder = document.getElementById('enquete-placeholder');
 };
 
+// テーマ（ダーク/ライト）を body クラスで適用。CSSはこのクラスで変数を切り替える。
+function applyTheme(theme) {
+    if (document.body) document.body.classList.toggle('nicosidebar-light', theme === 'light');
+}
+
 const url = new URL(window.location.href);
 const params = url.searchParams;
 
@@ -132,6 +138,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 const setup = async () => {
+    // テーマ（ダーク/ライト）を先に適用してからサイドバー挿入（初回のちらつき回避）
+    applyTheme(options.sidebarTheme);
+
     // サイドバーを挿入
     await insertSidebar();
 
@@ -210,72 +219,44 @@ const setup = async () => {
         appState.setHandler('reloadBtn', reloadBtnHandler);
     }
 
-    // オプションボタン（ポップアップ）
+    // テーマ切替トグル（設定ボタンの右）
+    const themeToggleBtn = document.getElementById('theme_toggle');
+    if (themeToggleBtn) {
+        themeToggleBtn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const next = (options.sidebarTheme === 'light') ? 'dark' : 'light';
+            options.sidebarTheme = next;
+            applyTheme(next);
+            setSidebarTheme(next); // chrome.storage.local に保存（onChangedで他タブにも反映）
+        });
+    }
+
+    // オプションボタン（サイドバー内で番組リストと入れ替え表示）
     const optionsBtn = document.getElementById('setting_options');
-    const optionContainerEl2 = document.getElementById('optionContainer');
-    if (optionsBtn && optionContainerEl2) {
-        const placePopup = () => {
-            if (!optionContainerEl2.classList.contains('show')) return;
-            const btnRect = optionsBtn.getBoundingClientRect();
-            const popupRect = optionContainerEl2.querySelector('.container')?.getBoundingClientRect();
-
-            const margin = 6; // ボタンのすぐ下に余白
-            const viewportWidth = window.innerWidth;
-            const viewportHeight = window.innerHeight;
-
-            const popupWidth = popupRect ? popupRect.width : 320;
-            const popupHeight = popupRect ? popupRect.height : 300;
-
-            let left = Math.min(btnRect.left, viewportWidth - popupWidth - margin);
-            let top = btnRect.bottom + margin;
-
-            // 下方向に収まらない場合、上に出す
-            if (top + popupHeight > viewportHeight - margin) {
-                const topCandidate = btnRect.top - margin - popupHeight;
-                if (topCandidate >= margin) top = topCandidate;
-            }
-
-            optionContainerEl2.style.left = Math.max(margin, left) + 'px';
-            optionContainerEl2.style.top = Math.max(margin, top) + 'px';
-        };
-
-        const openPopup = () => {
-            optionContainerEl2.classList.add('show');
-            placePopup();
-            // 位置再計算リスナー
-            window.addEventListener('resize', placePopup);
-            window.addEventListener('scroll', placePopup, true);
-            if (elems.sidebar) elems.sidebar.addEventListener('scroll', placePopup, { passive: true });
-            document.addEventListener('keydown', onKeydown, true);
-            document.addEventListener('click', onDocClick, true);
-        };
-
-        const closePopup = () => {
-            optionContainerEl2.classList.remove('show');
-            optionContainerEl2.style.left = '-9999px';
-            optionContainerEl2.style.top = '-9999px';
-            window.removeEventListener('resize', placePopup);
-            window.removeEventListener('scroll', placePopup, true);
-            if (elems.sidebar) elems.sidebar.removeEventListener('scroll', placePopup, { passive: true });
-            document.removeEventListener('keydown', onKeydown, true);
-            document.removeEventListener('click', onDocClick, true);
-        };
-
-        const onKeydown = (e) => {
-            if (e.key === 'Escape') closePopup();
-        };
-
-        const onDocClick = (e) => {
-            if (!optionContainerEl2.classList.contains('show')) return;
-            if (optionContainerEl2.contains(e.target) || optionsBtn.contains(e.target)) return;
-            closePopup();
-        };
+    const sidebarBodyEl = document.querySelector('.sidebar_body');
+    if (optionsBtn && sidebarBodyEl) {
+        const closeSettings = () => sidebarBodyEl.classList.remove('show-settings');
 
         optionsBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (optionContainerEl2.classList.contains('show')) closePopup();
-            else openPopup();
+            sidebarBodyEl.classList.toggle('show-settings'); // 番組リスト⇄設定を入れ替え
+        });
+
+        // 設定内の「閉じる（番組リストに戻る）」ボタン
+        const settingsCloseBtn = document.getElementById('settings_close');
+        if (settingsCloseBtn) {
+            settingsCloseBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                closeSettings();
+            });
+        }
+
+        // Escで設定を閉じて番組リストへ戻る
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && sidebarBodyEl.classList.contains('show-settings')) closeSettings();
         });
     }
 
@@ -599,6 +580,10 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.sidebarWidth = changes.sidebarWidth.newValue;
         appState.sidebar.width = changes.sidebarWidth.newValue;
     }
+    if (changes.sidebarTheme) {
+        options.sidebarTheme = changes.sidebarTheme.newValue;
+        applyTheme(options.sidebarTheme);
+    }
     if (changes.autoNextProgram) {
         options.autoNextProgram = changes.autoNextProgram.newValue;
         if (options.autoNextProgram === 'on') startLiveStatusWatcher();
@@ -631,9 +616,8 @@ const insertSidebar = () => {
     document.body.insertAdjacentHTML('afterbegin', sidebarHtml + sidebarLine);
     const optionContainerEl = document.getElementById('optionContainer');
     if (optionContainerEl) {
+        // 設定はサイドバー内（.sidebar_body 内）に置き、番組リストと入れ替え表示する（body直下へは移動しない）
         optionContainerEl.insertAdjacentHTML('beforeend', optionHtml);
-        // サイドバー外にはみ出しても見えるように、body直下へ移動
-        document.body.appendChild(optionContainerEl);
     }
 
     // 各要素を定義

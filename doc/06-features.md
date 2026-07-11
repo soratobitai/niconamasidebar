@@ -22,6 +22,7 @@
 | 動くサムネ（β版） | `animatedThumbnail` | `on`/`off` | `animatedThumbnail` | `'off'` | sidebar.js | onChanged→`setAnimatedThumbnailEnabled` |
 | サイドバー幅 | （フォーム外・ドラッグ） | — | `sidebarWidth` | `360` | — | onChanged |
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
+| ライト/ダーク | （設定画面**末尾**のトグル。ON=ダーク） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `#theme_toggle`） | onChanged→`applyTheme` |
 | サムネ間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数） | — | — |
 
 ---
@@ -83,10 +84,12 @@
 - ローディング表示: `LoadingManager` が `.loading` ＋ `pointer-events:none`（60秒タイムアウト）。
 - 対応設定: なし（機能ボタン）。
 
-## 10. オプション設定ポップアップ（歯車）
-- `#setting_options` click → `#optionContainer` の `.show` トグル、`placePopup` でボタン直下配置。Esc/外側クリック/scroll/resize で閉じる/再配置。
-- フォーム同期・保存: `setupOptionsHandler`。
-- 対応設定: フォーム全4項目。`sidebarWidth`/`isOpenSidebar` はフォーム外。
+## 10. 設定パネル（サイドバー内・番組リストと入替）
+- `#setting_options`（歯車）click → `.sidebar_body` に `.show-settings` をトグル → **番組リスト(`#liveProgramContainer`)と設定(`#optionContainer`)を入れ替え表示**（ポップアップ廃止）。設定内の×ボタン（`#settings_close`）または Esc で番組リストへ戻る。
+- 設定は `.sidebar_body` 内に配置（body直下へは移動しない＝`insertSidebar` の appendChild 廃止）。
+- UI: 「設定」ヘッダー＋×、各項目は**セグメント型（`.opt-segment`：ラジオを隠しラベルをボタン化、選択は `--sb-accent`）**、テーマはトグルスイッチ。ヘルプ「?」・β版バッジは維持。
+- フォーム同期・保存: `setupOptionsHandler`（ラジオは非表示だが機能は同じ）。
+- 対応設定: フォーム内の5項目（テーマ/表示順序/自動更新/オートオープン/自動移動/動くサムネ）。`sidebarWidth`/`isOpenSidebar` はフォーム外。
 
 ## 11. API失敗表示（ログイン誘導）
 - `#api_error`（ログインリンク付き）。`getLivePrograms` 成功で `none`、失敗で `block`。
@@ -94,6 +97,14 @@
 
 ## 12. 別窓くん連携 / ポップアップ抑止
 - `?popup=on` の時は `setup()` に入らず起動しない（姉妹ツール「別窓くん」のポップアップ内で二重起動しないため）。
+
+## 15b. ライト/ダークモード（テーマ切替）
+- サイドバーは既定**ライト**。**ダークモード**にも対応。
+- 切替UI: **設定パネル内の「テーマ」トグルスイッチ**（`#theme_toggle`、`#optionForm` の**末尾**）。**ダーク=ON（ノブ右・青トラック）／ライト=OFF（ノブ左・グレー）**、ラベルは左「ライト」右「ダーク」。クリックで即切替。`applyTheme` はサイドバー挿入前に実行しちらつきを回避。
+- 実装: CSSカスタムプロパティ（`--sb-*`）を `body`（ダーク既定）と **`body.nicosidebar-light`**（ライト）で切替。`main.js` の `applyTheme(theme)` が body クラスをトグル、`storage.js` の `setSidebarTheme` で `chrome.storage.local` に保存、`onChanged` で他タブにも反映。
+- ✅ ライト時、本サイト背景が白でも境目が分かるよう、**サイドバー左端のライン/開閉ボタン(`#sidebar_line`/`#sidebar_button`)に色**（`--sb-line`=ダーク`#111`/ライト`#d5d9df`（薄め））。
+- 対応設定: **`sidebarTheme`**（既定 **`'light'`**）。設定パネル内のトグルで保存。
+- テーマ対象: サイドバー本体（背景/文字/ヘッダー/アイコン/サムネ枠/スピナー/左端ライン）＋設定パネル（セグメント含む）。自動移動モーダルは元から明色。
 
 ## 13. デバッグ機能
 - `window.showApiStats()` で API 呼び出し統計をコンソール表示。5分ごとに異常頻度を自動警告。

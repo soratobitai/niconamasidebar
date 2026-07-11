@@ -1,3 +1,48 @@
+/* ===== テーマ変数（ダーク=既定 / ライト=body.nicosidebar-light 付与時） ===== */
+body {
+    --sb-bg: #111;
+    --sb-line: #111;
+    --sb-fg: #ccc;
+    --sb-header-fg: #fff;
+    --sb-arrow: #ccc;
+    --sb-spinner: #fff;
+    --sb-spinner-track: rgba(255, 255, 255, 0.3);
+    --sb-thumb-bg: #000;
+    --sb-icon-filter: invert(59%) sepia(3%) saturate(11%) hue-rotate(22deg) brightness(91%) contrast(93%);
+    --sb-icon-filter-hover: invert(63%) sepia(98%) saturate(12%) hue-rotate(70deg) brightness(109%) contrast(92%);
+    --sb-popup-bg: #222;
+    --sb-popup-fg: #ddd;
+    --sb-popup-border: #333;
+    --sb-input-border: #ccc;
+    --sb-popup-heading: #fff;
+    --sb-accent: #2a6fd8;
+    --sb-segment-bg: #2a2a2a;
+    --sb-switch-track: #2a6fd8; /* ダーク=ON=色付き */
+    --sb-switch-knob: #fff;
+}
+body.nicosidebar-light {
+    --sb-bg: #ffffff;
+    /* ライト時は本サイト背景が白でも境目が分かるよう、左端ライン/開閉ボタンに色を付ける（薄め） */
+    --sb-line: #d5d9df;
+    --sb-fg: #333333;
+    --sb-header-fg: #111111;
+    --sb-arrow: #666666;
+    --sb-spinner: #666666;
+    --sb-spinner-track: rgba(0, 0, 0, 0.2);
+    --sb-thumb-bg: #e2e5ea;
+    --sb-icon-filter: brightness(0) opacity(0.55);
+    --sb-icon-filter-hover: brightness(0) opacity(0.85);
+    --sb-popup-bg: #ffffff;
+    --sb-popup-fg: #333333;
+    --sb-popup-border: #d5d9df;
+    --sb-input-border: #b8bdc6;
+    --sb-popup-heading: #111111;
+    --sb-accent: #2a6fd8;
+    --sb-segment-bg: #eceff3;
+    --sb-switch-track: #c9ccd2; /* ライト=OFF=グレー */
+    --sb-switch-knob: #ffffff;
+}
+
 #sidebar_line {
     position: sticky;
     top: 0;
@@ -6,7 +51,7 @@
     height: 100vh;
     max-height: 100%;
     min-height: 100%;
-    background-color: #111;
+    background-color: var(--sb-line);
     z-index: 999;
 }
 
@@ -21,7 +66,7 @@
     width: 20px;
     min-width: 20px;
     height: 70px;
-    background-color: #111;
+    background-color: var(--sb-line);
     border-radius: 0 8px 8px 0;
     cursor: pointer;
 
@@ -32,8 +77,8 @@
 #sidebar_arrow {
     width: 10px;
     height: 10px;
-    border-top: solid 2px #ccc;
-    border-right: solid 2px #ccc;
+    border-top: solid 2px var(--sb-arrow);
+    border-right: solid 2px var(--sb-arrow);
     transform: rotate(45deg);
     transition: all 0.5s;
 }
@@ -47,8 +92,8 @@
     width: 0px;
     min-width: 0px;
     height: 100vh;
-    background-color: #111;
-    color: #ccc;
+    background-color: var(--sb-bg);
+    color: var(--sb-fg);
     overflow: auto;
     scrollbar-width: none;
     box-sizing: border-box;
@@ -92,7 +137,7 @@
     justify-content: center;
 }
 .sidebar_header_item a {
-    color: #fff;
+    color: var(--sb-header-fg);
     text-decoration: none;
 }
 .sidebar_header_item_col {
@@ -105,11 +150,39 @@
 }
 .sidebar_header_item_col img {
     height: 18px;
-    filter: invert(59%) sepia(3%) saturate(11%) hue-rotate(22deg) brightness(91%) contrast(93%);
+    filter: var(--sb-icon-filter);
 }
 
 .sidebar_header_item_col:hover img {
-    filter: invert(63%) sepia(98%) saturate(12%) hue-rotate(70deg) brightness(109%) contrast(92%);
+    filter: var(--sb-icon-filter-hover);
+}
+
+/* テーマ切替トグルスイッチ（設定ボタンの右） */
+#theme_toggle {
+    cursor: pointer;
+}
+#theme_toggle .theme_switch {
+    display: inline-block;
+    width: 34px;
+    height: 18px;
+    border-radius: 9px;
+    background: var(--sb-switch-track);
+    position: relative;
+    transition: background 0.2s;
+}
+#theme_toggle .theme_switch_knob {
+    position: absolute;
+    top: 2px;
+    left: 18px; /* 既定=ダーク=ON=ノブ右 */
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--sb-switch-knob);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    transition: left 0.2s, background 0.2s;
+}
+body.nicosidebar-light #theme_toggle .theme_switch_knob {
+    left: 2px; /* ライト=OFF=ノブ左 */
 }
 
 /* 更新ボタンのローディング表示 */
@@ -130,8 +203,8 @@
     transform: translate(-50%, -50%);
     width: 14px;
     height: 14px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-top-color: #fff;
+    border: 2px solid var(--sb-spinner-track);
+    border-top-color: var(--sb-spinner);
     border-radius: 50%;
     animation: loading-spin 0.8s linear infinite;
     box-sizing: border-box;
@@ -239,7 +312,7 @@
     position: relative;
     width: 100%;
     /* height: 100%; */
-    background-color: #000;
+    background-color: var(--sb-thumb-bg);
     display: inline-block;
     border-radius: 8px;
     overflow: hidden;
@@ -306,51 +379,108 @@
 
 
 
-/* オプションコンテナ */
+/* 設定パネル（サイドバー内・番組リストと入れ替え表示） */
 #optionContainer {
-    position: fixed;
-    top: -9999px;
-    left: -9999px;
     display: none;
-    z-index: 10000;
 }
-#optionContainer.show {
+.sidebar_body.show-settings #optionContainer {
     display: block;
 }
+.sidebar_body.show-settings #liveProgramContainer,
+.sidebar_body.show-settings #api_error {
+    display: none !important; /* #api_error はJSがインラインstyleでdisplayを設定するため !important で確実に隠す */
+}
 #optionContainer .container {
+    /* コンテナは全幅。ヘッダー（設定/×）を左右いっぱいに広げるため上限は設けない。
+       フォーム本体だけ #optionForm で幅を頭打ち＆左右中央に配置する */
     margin: 0;
-    padding: 12px;
-    width: 360px;
-    max-width: min(420px, calc(100vw - 24px));
-    max-height: min(70vh, calc(100vh - 24px));
+    padding: 0 2px 24px;
+    width: 100%;
     box-sizing: border-box;
-    background-color: #222;
-    color: #ddd;
-    border: 1px solid #333;
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    overflow: visible;
+    color: var(--sb-fg);
     font-size: 12px;
     line-height: 1.5;
 }
 
-#optionContainer h1 {
-    font-size: 1.1em;
-    font-weight: bold;
-    margin: 0.6em 0 0.5em;
-    color: #fff;
-    text-align: left;
-    border-bottom: 1px solid #2a6fd8;
-    padding-bottom: 0.25em;
+/* 設定フォーム本体は読みやすい幅で頭打ち＆左右中央（サイドバーが広がってもヘッダーだけ全幅） */
+#optionContainer #optionForm {
+    max-width: 440px;
+    margin: 0 auto;
 }
 
-#optionContainer h2 {
-    margin: 1.2em 0 0.6em;
-    padding: 0 0.6em;
-    font-size: 1.15em;
+/* 設定ヘッダー（タイトル＋閉じる） */
+#optionContainer .settings_header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--sb-popup-border);
+}
+#optionContainer h1 {
+    font-size: 1.05em;
     font-weight: bold;
+    margin: 0;
+    color: var(--sb-header-fg);
+}
+#optionContainer .settings_close {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    line-height: 1;
+    font-size: 18px;
+    color: var(--sb-fg);
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
+#optionContainer .settings_close:hover {
+    background: rgba(128, 128, 128, 0.18);
+}
+
+/* 各設定セクション */
+#optionContainer .opt-section {
+    margin: 0 0 16px;
+}
+#optionContainer .opt-label {
+    font-size: 0.95em;
+    font-weight: bold;
+    color: var(--sb-header-fg);
+    margin-bottom: 6px;
+}
+
+/* セグメント型の選択UI（ラジオを隠してラベルをボタン化） */
+#optionContainer .opt-segment {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    background: var(--sb-segment-bg);
+    border-radius: 8px;
+}
+#optionContainer .opt-segment input[type="radio"] {
+    display: none;
+}
+#optionContainer .opt-segment label {
+    flex: 1 1 0;
+    margin: 0;
+    padding: 6px 4px;
+    text-align: center;
+    font-size: 0.9em;
+    font-weight: 500;
+    color: var(--sb-fg);
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    transition: background 0.15s, color 0.15s;
+}
+#optionContainer .opt-segment label:hover {
+    background: rgba(128, 128, 128, 0.14);
+}
+#optionContainer .opt-segment input[type="radio"]:checked + label {
+    background: var(--sb-accent);
     color: #fff;
-    border-left: 6px solid #2a6fd8;
 }
 
 /* ヘルプアイコン付き見出し */
@@ -359,6 +489,17 @@
     display: flex;
     align-items: center;
     gap: 6px;
+}
+
+/* テーマ切替（設定内）の行 */
+#optionContainer .theme_toggle_row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+#optionContainer .theme_toggle_label {
+    font-size: 0.9em;
+    font-weight: normal;
 }
 
 /* β版バッジ */
@@ -374,7 +515,8 @@
 }
 
 #optionContainer .help-wrap {
-    position: relative;
+    /* position は付けない。ツールチップは見出し行(.opt-title-with-help=relative)基準に配置して
+       サイドバー幅内に収める（旧popup時のはみ出し対策） */
     display: inline-flex;
     align-items: center;
 }
@@ -400,8 +542,9 @@
     left: 0;
     top: calc(100% + 6px);
     transform: none;
-    width: min(320px, calc(100vw - 48px));
-    max-width: 360px;
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
     background: #333;
     color: #eee;
     border: 1px solid #444;
@@ -483,7 +626,8 @@ li {
 #optionContainer input[type="text"] {
     padding: 0.45rem;
     border-radius: 0.25rem;
-    border: 1px solid #ccc;
+    /* ポップアップ外枠(--sb-popup-border)より濃い専用色。両テーマで視認できる中間グレー */
+    border: 1px solid var(--sb-input-border);
     font-size: 0.95rem;
     width: 9rem;
     outline: none;
