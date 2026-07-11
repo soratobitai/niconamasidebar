@@ -100,6 +100,18 @@
 - 修正: 列数計算の幅ソースを**「意図した幅」**に統一。`main.js` の各所（RO/onResize/トグルrAF/初期open・close）は `state.sidebarWidth.value`、`UpdateManager.updateSidebar` は `this.appState.sidebar.width` を使用。アニメ途中幅では列数を変えず、閉じていても「開き幅基準」で列を確定させておく。ドラッグ時は `onMouseMove` が `sidebarWidth.value` を即時更新するので列数のライブ追従は維持。
 - 既知の残ギャップ（別件・低）: cross-tab の `sidebarWidth` 変更は `state.sidebarWidth.value`・DOM幅ともに未反映（`onChanged` が幅を再適用しない既存仕様）。単一タブ運用では問題なし。
 
+## 🟢 S. `getLivePrograms()` 過剰呼び出し（「1分に10回」警告・✅ 2026-07-11 修正）
+- 症状: コンソールに「🚨 [異常検出] getLivePrograms()が1分以内に10回呼ばれています！」（`UpdateManager.getLivePrograms` の `getLiveProgramsTimestamps` が直近60秒で10件超）。想定は初回＋120秒ごと＝約0.5回/分。
+- 原因は3つの既存バグ（直近改修とは無関係と調査で確定）:
+  - **① 自動次番組の暴走ループ（最悪）**: `autoNextProgram='on'` かつ番組終了ガイド表示中、`status.js` の MutationObserver がデバウンス無しで毎変異 `onEnded→updateSidebar→getLivePrograms`。`updateSidebar` の `replaceChildren` が body に変異を撒くため自己駆動ループ（次番組リンク未発見の間 `scheduled` が立たず永久）。
+  - **② 開閉の二重発火**: 開閉ボタン1クリックで `handleSidebarOpenStateChange` が2回（直接呼び＋`setIsOpenSidebar`→`chrome.storage.onChanged` が自タブでも発火）→ 開くたび getLivePrograms 2回。
+  - **③ `performManualUpdate` の多重防止ガード欠如**（①②の増幅器）。
+- 修正:
+  - ①→ `observeProgramEnd` に**20秒スロットル＋再武装**（`PROGRAM_END_RECHECK_MIN_INTERVAL_MS`）。終了ガイド出現で即1回発火、以降は20秒間隔でのみ再チェック、ガイド消滅で再武装。次番組ジャンプの本来動作は維持。
+  - ②→ `main.js` の `onChanged` `isOpenSidebar` 分岐に `appState.sidebar.isOpen !== newIsOpen` ガード（自タブは反映済みなのでスキップ、他タブ由来のみ処理）。
+  - ③→ `UpdateManager.performManualUpdate` に `isPerformingManualUpdate` in-flight ガード。
+- 診断: `window.showApiStats()` で `getLivePrograms` 累計・直近1分の頻度を確認。放置で増える→①、開閉で+2→②、タブ往復で+1→復帰更新。
+
 ---
 
 ## 改修時チェックリスト

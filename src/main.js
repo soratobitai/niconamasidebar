@@ -553,10 +553,16 @@ chrome.storage.onChanged.addListener(function (changes) {
     }
     if (changes.programsSort) options.programsSort = changes.programsSort.newValue;
     if (changes.isOpenSidebar) {
-        options.isOpenSidebar = changes.isOpenSidebar.newValue;
-        appState.sidebar.isOpen = changes.isOpenSidebar.newValue;
-        // 開閉に応じて停止/再開・即時更新
-        handleSidebarOpenStateChange(appState.sidebar.isOpen);
+        const newIsOpen = changes.isOpenSidebar.newValue;
+        // 自タブのトグル操作は同期的に反映＆ handleSidebarOpenStateChange 呼び済み。
+        // storage.onChanged は書いた自タブでも発火するため、未反映（＝他タブ由来）の時だけ処理して
+        // 開閉あたり getLivePrograms が2回走る二重発火を防ぐ。
+        if (appState.sidebar.isOpen !== newIsOpen) {
+            options.isOpenSidebar = newIsOpen;
+            appState.sidebar.isOpen = newIsOpen;
+            // 開閉に応じて停止/再開・即時更新
+            handleSidebarOpenStateChange(appState.sidebar.isOpen);
+        }
     }
     if (changes.sidebarWidth) {
         options.sidebarWidth = changes.sidebarWidth.newValue;
