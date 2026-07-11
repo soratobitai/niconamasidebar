@@ -119,7 +119,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.warn('[警告] setup()は既に実行済みです。重複実行を防止しました。');
         return;
     }
-    
+
+    // API統計の初期化（開発・デバッグ用）。別窓くんの別窓(?popup=on)や #root 不在ページでは
+    // ここまで到達しないため、5分ごとの監視 setInterval も張られない（＝別窓では常時コストゼロ）。
+    // ※ window.apiCallCounter を UpdateManager コンストラクタが参照するため setup() より前に呼ぶ。
+    initApiStats();
+
     setup();
     isSetupCompleted = true;
 });
@@ -608,9 +613,6 @@ const insertSidebar = () => {
     // #root要素にスタイルを設定
     elems.root.style.flexGrow = '1';
 };
-
-// API統計の初期化（開発・デバッグ用）
-initApiStats();
 
 
 
