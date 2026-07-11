@@ -2,7 +2,8 @@
 
 `src/styles/main.css`（542行）の全セレクタと役割。DOM構造は `render/sidebar.js`・`AutoNextManager.js` が生成する。
 
-- テーマ: **ダーク**（サイドバー本体 `#111` 背景 / `#ccc` 文字）。オプションと自動移動モーダルは別配色。
+- テーマ: 既定**ダーク**／**ライト**対応。**CSSカスタムプロパティ `--sb-*`** を `body`（ダーク既定）と **`body.nicosidebar-light`**（ライト）で切替。主要ルールは `var(--sb-bg/-fg/-header-fg/-arrow/-spinner/-spinner-track/-thumb-bg/-icon-filter/-icon-filter-hover/-popup-*/-switch-*)` を使用。JSは `applyTheme` が body クラスをトグル。
+- テーマ切替トグル: **オプション設定内・`#optionForm` 末尾**の `#theme_toggle .theme_switch/.theme_switch_knob`。**ダーク=ON（ノブ右・青トラック `--sb-switch-track:#2a6fd8`）／ライト=OFF（ノブ左・グレー `#c9ccd2`）**、ラベルは左「ライト」右「ダーク」。左端ライン/開閉ボタンは `--sb-line`（ライトで着色）。既定テーマは**ライト**（`main.js` の `defaultOptions.sidebarTheme:'light'`、`applyTheme` はサイドバー挿入前に実行しちらつき回避）。
 - サイドバーは `position: sticky; top:0; height:100vh`。開閉は**幅(width)を 0 ⇔ 実幅** に変え、`transition: all .5s` でアニメ。
 
 ## 8.1 サイドバー枠・開閉
@@ -48,20 +49,22 @@
 | `#liveProgramContainer` | カードのラッパ（`display:flex; flex-wrap:wrap`＝多カラム対応） |
 | `#api_error` / `#api_error a` | 一覧API失敗時のログイン導線（既定 `display:none`。失敗時に `block`） |
 
-## 8.4 オプションポップアップ（`#optionContainer`）
+## 8.4 設定パネル（`#optionContainer`・サイドバー内）
 
-生成元: `buildSidebarShell` の `optionHtml`。表示制御は `main.js` の `openPopup/placePopup`。
+生成元: `buildSidebarShell` の `optionHtml`。**ポップアップではなくサイドバー内（`.sidebar_body`）に配置**し、番組リストと入れ替え表示（`.sidebar_body.show-settings` で `#liveProgramContainer`/`#api_error` を隠し `#optionContainer` を表示）。各項目は**セグメント型 `.opt-segment`**（ラジオ非表示＋ラベルボタン、選択は `--sb-accent`）、ヘッダー `.settings_header`＋`.settings_close`、テーマは `#theme_toggle` トグル。
 
 | セレクタ | 役割 |
 |---------|------|
-| `#optionContainer` | `position:fixed`。既定は画面外(-9999px)＋`display:none` |
-| `#optionContainer.show` | 表示（`main.js` が座標を計算して配置） |
-| `#optionContainer .container` | ポップアップ本体（幅360px, 角丸, ダーク, シャドウ, `max-height:70vh` スクロール） |
-| `h1` / `h2` | 見出し（`h2` は青い左ボーダー `#2a6fd8`） |
-| `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプアイコンとツールチップ（hover/focus で表示）。自動更新・オートオープン・自動移動の説明文 |
+| `#optionContainer` | サイドバー本文内に配置。既定 `display:none`、`.sidebar_body.show-settings` 時のみ表示 |
+| `.sidebar_body.show-settings` | 設定表示状態。`#liveProgramContainer`/`#api_error` を隠し（`!important`＝`#api_error` のインラインstyleに勝つため）`#optionContainer` を表示 |
+| `#optionContainer .container` | 設定本体ラッパ（**全幅**）。ヘッダー（設定/×）を左右いっぱいに広げるため上限なし、`color:var(--sb-fg)` |
+| `#optionContainer #optionForm` | 設定フォーム本体。**`max-width:440px` ＋ `margin:0 auto`** で幅を頭打ち＆**左右中央**（サイドバーが右へ無制限に広がってもフォームは中央の読みやすい幅、ヘッダーだけ全幅） |
+| `.settings_header` / `.settings_close` | 「設定」見出し行＋閉じる `×` ボタン（× or Esc で番組リストへ戻る） |
+| `.opt-section` / `.opt-label` | 設定1項目のブロックと見出し |
+| `.opt-segment` / `.opt-segment input[type=radio]` / `.opt-segment label` | **セグメント型選択**。ラジオは `display:none`、隣接ラベルをボタン化、`input:checked + label` を `--sb-accent` で反転（name/value は従来どおりで保存ロジック無改修） |
+| `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプ（hover/focus 表示）。ツールチップは**見出し行(`position:relative`)基準・`width:100%`** でサイドバー幅内に収める（`.help-wrap` に position を付けない） |
 | `.opt-beta-badge` | 🧪 見出し横の「β版」バッジ（動くサムネ設定用の黄色い小バッジ） |
-| `.flex` / `.setbox` / `.inputbox` / `label` | ラジオ項目のレイアウト |
-| `input[type="radio"]` / `input[type="text"]` | フォーム入力（text は現状未使用） |
+| `.theme_toggle_row` / `#theme_toggle` | テーマ切替トグル（`#optionForm` **末尾**）。ダーク=ON（ノブ右）／ライト=OFF（ノブ左） |
 | `#optionContainer a` / `a:hover` | リンク色 |
 
 ## 8.5 自動移動モーダル（`#auto_next_modal`）

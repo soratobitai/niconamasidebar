@@ -394,95 +394,66 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
     const sidebarLine = `<div id="sidebar_line"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`
 
     const optionHtml = `<div class="container">
-                            <h1>オプション</h1>
+                            <div class="settings_header">
+                                <h1>設定</h1>
+                                <button type="button" id="settings_close" class="settings_close" title="番組リストに戻る" aria-label="閉じる">×</button>
+                            </div>
                             <form id="optionForm">
-                                <h2>表示順序</h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="programsSort1" name="programsSort" value="newest">
-                                        <label for="programsSort1">新着順</label>
+                                <div class="opt-section">
+                                    <div class="opt-label">表示順序</div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="programsSort1" name="programsSort" value="newest"><label for="programsSort1">新着順</label>
+                                        <input type="radio" id="programsSort2" name="programsSort" value="active"><label for="programsSort2">人気順</label>
                                     </div>
                                 </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="programsSort2" name="programsSort" value="active">
-                                        <label for="programsSort2">人気順</label>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        自動更新
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="updateProgramsInterval1" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval1">60秒</label>
+                                        <input type="radio" id="updateProgramsInterval2" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval2">120秒</label>
+                                        <input type="radio" id="updateProgramsInterval3" name="updateProgramsInterval" value="180"><label for="updateProgramsInterval3">180秒</label>
                                     </div>
                                 </div>
-                                <h2 class="opt-title-with-help">
-                                    自動更新
-                                    <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（サイドバー内の更新ボタンで手動で更新することもできます）<br>サムネイル画像はこの設定とは関係なく自動更新されます。（20~60秒）</span></span>
-                                </h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval1" name="updateProgramsInterval" value="60">
-                                        <label for="updateProgramsInterval1">60秒</label>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        オートオープン
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">ページを開いた時にサイドバーを自動で開くか。「記憶」は前回の開閉状態を復元します。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="autoOpen1" name="autoOpen" value="1"><label for="autoOpen1">ON</label>
+                                        <input type="radio" id="autoOpen2" name="autoOpen" value="2"><label for="autoOpen2">OFF</label>
+                                        <input type="radio" id="autoOpen3" name="autoOpen" value="3"><label for="autoOpen3">記憶</label>
                                     </div>
                                 </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval2" name="updateProgramsInterval" value="120">
-                                        <label for="updateProgramsInterval2">120秒</label>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        自動移動
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">視聴中の番組終了後、サイドバー先頭の番組へ自動で移動します。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="autoNextProgramOn" name="autoNextProgram" value="on"><label for="autoNextProgramOn">ON</label>
+                                        <input type="radio" id="autoNextProgramOff" name="autoNextProgram" value="off"><label for="autoNextProgramOff">OFF</label>
                                     </div>
                                 </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="updateProgramsInterval3" name="updateProgramsInterval" value="180">
-                                        <label for="updateProgramsInterval3">180秒</label>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        動くサムネ<span class="opt-beta-badge">β版</span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネを切り替えてアニメ表示します。（ベータ版：不具合や重い場合はOFFに）</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
+                                        <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
                                     </div>
                                 </div>
-                                <h2 class="opt-title-with-help">
-                                    オートオープン
-                                    <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サイドバーを自動で開くかどうかを設定します。</span></span>
-                                </h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen1" name="autoOpen" value="1">
-                                        <label for="autoOpen1">ON</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen2" name="autoOpen" value="2">
-                                        <label for="autoOpen2">OFF</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoOpen3" name="autoOpen" value="3">
-                                        <label for="autoOpen3">ページを閉じる前の状態を記憶</label>
-                                    </div>
-                                </div>
-                                <h2 class="opt-title-with-help">
-                                    自動移動
-                                    <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">視聴中の番組終了後、サイドバーの先頭の番組へ移動します。</span></span>
-                                </h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoNextProgramOn" name="autoNextProgram" value="on">
-                                        <label for="autoNextProgramOn">ON</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="autoNextProgramOff" name="autoNextProgram" value="off">
-                                        <label for="autoNextProgramOff">OFF</label>
-                                    </div>
-                                </div>
-                                <h2 class="opt-title-with-help">
-                                    動くサムネ<span class="opt-beta-badge">β版</span>
-                                    <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネイルにマウスを乗せると、直近数枚のライブサムネを切り替えてアニメーション表示します。（ベータ版：不具合や動作が重い場合はOFFにしてください）</span></span>
-                                </h2>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on">
-                                        <label for="animatedThumbnailOn">ON</label>
-                                    </div>
-                                </div>
-                                <div class="setbox flex">
-                                    <div class="inputbox flex">
-                                        <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off">
-                                        <label for="animatedThumbnailOff">OFF</label>
+                                <div class="opt-section">
+                                    <div class="opt-label">テーマ</div>
+                                    <div class="theme_toggle_row">
+                                        <span class="theme_toggle_label">ライト</span>
+                                        <div id="theme_toggle" title="ライト/ダーク切替"><span class="theme_switch"><span class="theme_switch_knob"></span></span></div>
+                                        <span class="theme_toggle_label">ダーク</span>
                                     </div>
                                 </div>
                             </form>

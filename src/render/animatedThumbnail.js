@@ -328,9 +328,10 @@ function stopAnim() {
     if (animCard) {
         const overlay = getOverlay(animCard, false)
         if (overlay) {
+            // src は消さない。消すと fade-out 中に「壊れた画像」アイコンが一瞬出るため、
+            // opacity を 0 にする（.show を外す）だけにして最後のフレームのままフェードアウトさせる。
             overlay.querySelectorAll('.anim_thumb_layer').forEach((l) => {
                 l.classList.remove('show')
-                l.removeAttribute('src')
             })
         }
     }

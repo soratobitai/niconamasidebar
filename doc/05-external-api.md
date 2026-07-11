@@ -139,6 +139,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 | `autoOpen` | `'3'` | `1`/`2`/`3` | optionsHandler |
 | `updateProgramsInterval` | `'120'`（秒） | `60`/`120`/`180` | optionsHandler |
 | `sidebarWidth` | `360` | 数値(px) | `setSidebarWidth`（ドラッグ確定） |
+| `sidebarTheme` | `'light'` | `dark`/`light` | `setSidebarTheme`（設定パネル末尾のテーマトグル） |
 | `isOpenSidebar` | `false` | boolean | `setIsOpenSidebar`（開閉トグル） |
 | `autoNextProgram` | `'off'` | `on`/`off` | optionsHandler |
 
