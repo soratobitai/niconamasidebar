@@ -71,10 +71,12 @@ export function setProgramContainerWidth(elems, sidebarWidth) {
 	}
 	const programContainerWidth = 100 / columns + '%'
 
+	// カード幅のみ設定する。サムネ幅は CSS の `.program_thumbnail { width: 100% }` でカードいっぱいになる。
+	// （旧コードは thumbnail に `programContainerWidth + 'px'`＝例 '50%px' という無効値を代入しており、
+	//  ブラウザに無視されて実質何もしていなかった＝バグ。有効値 '50%' にすると逆にサムネがカードの半分に
+	//  縮む回帰になるため、正しい挙動＝CSSの100%を保つべく当該行を削除した。）
 	document.querySelectorAll('.program_container').forEach((element) => {
 		element.style.width = programContainerWidth
-		const program_thumbnail = element.querySelector('.program_thumbnail')
-		if (program_thumbnail) program_thumbnail.style.width = programContainerWidth + 'px'
 	})
 }
 
