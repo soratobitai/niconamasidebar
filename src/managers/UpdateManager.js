@@ -1,6 +1,6 @@
 import { fetchLivePrograms } from '../services/api.js';
 import { getProgramInfos as getProgramInfosFromStorage } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, refreshThumbnailObservations, flipReorder } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { updateThumbnailInterval, programInfoTtlMs } from '../config/constants.js';
@@ -365,7 +365,6 @@ export class UpdateManager {
             // DOM更新
             this.appState.update.isInserting = true;
             liveProgramContainer.replaceChildren(frag);
-            refreshThumbnailObservations();
 
             // 初回整列中は、キャッシュだけで人気順を確定できるか（＝詳細未取得の番組が無いか）で描画順を決める。
             // 全番組がキャッシュ済みなら最初から人気順で描画し、開くたびの並べ替え（移動）を避ける。

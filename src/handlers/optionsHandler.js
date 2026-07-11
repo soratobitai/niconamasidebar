@@ -1,5 +1,4 @@
 import { saveOptions as saveOptionsToStorage } from '../services/storage.js';
-import { refreshThumbnailObservations } from '../render/sidebar.js';
 
 /**
  * オプション設定の反映とイベントハンドリング
@@ -63,8 +62,6 @@ export function setupOptionsHandler(options, programInfoQueue, sortPrograms) {
                 const container = document.getElementById('liveProgramContainer');
                 if (container) {
                     sortPrograms(container);
-                    // サムネイルのIntersectionObserver監視を更新
-                    refreshThumbnailObservations();
                 }
                 return; // saveOptions()は既に呼ばれているのでreturn
             }

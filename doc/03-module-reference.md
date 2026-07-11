@@ -23,6 +23,7 @@
 | `thumbnailRetryMaxMs` | `60000` | サムネ再試行の最大間隔 |
 | `programInfoTtlMs` | `60000` | 番組詳細の再取得間引きTTL。✅ **TTLキャッシュとして稼働中**（`UpdateManager.updateSidebar` が `_fetchedAt` を見て60秒以内はキュー追加をスキップ） |
 | `loadingSessionTimeoutMs` | `60000` | ローディングセッションの強制終了タイムアウト |
+| `visibilityFullRefreshMs` | `60000` | ✅新規。長時間非表示から復帰した時に「しっかり更新」（更新ボタン相当＝全詳細再取得＋整列）する閾値。これより短い非表示は軽量更新 |
 
 ---
 
@@ -201,8 +202,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `community`(icon/community_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。旧形式(lv無し)データにも対応 |
 | `calculateActivePoint(data)` | 人気度スコア = `(viewers+1 + comments+1) / max(1, 経過分)`。`onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
-| `updateThumbnailsFromStorage(programInfos, {force,onComplete})` ★★ | localStorageの番組情報を元に各サムネを更新。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。可視画像(IntersectionObserver)があればそれを優先対象に |
-| `initThumbnailVisibilityObserver()` / `refreshThumbnailObservations()` / `teardownThumbnailVisibilityObserver()` | `#liveProgramContainer` 内の `.program_thumbnail_img` を IntersectionObserver で可視監視（`rootMargin:200px`）。可視集合 `visibleImages` を維持 |
+| `updateThumbnailsFromStorage(programInfos, {force,onComplete})` ★★ | localStorageの番組情報を元に各サムネを更新。**対象はコンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame` |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体） |
 | `flipReorder(container, reorderFn, duration=300)` ✅新規 | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。人気順の初回最終ソートで使用 |
 | `buildSidebarShell({reloadImageURL, optionsImageURL})` ★ | サイドバー枠HTML(`sidebarHtml`)・境界線(`sidebarLine`)・オプションフォーム(`optionHtml`)の文字列を返す。`main.js` が body に挿入。オプションフォームの全ラジオ(表示順序/自動更新/オートオープン/自動移動)はここに定義 |
@@ -328,7 +328,7 @@ API呼び出し頻度の可視化・異常検知（開発/本番共通の安全�
 | `setup()` ★ | サイドバー挿入→`reflectOptions()`→**3 Manager 生成**→レイアウト調整→resize/ResizeObserver/theaterボタン/更新ボタン/オプションポップアップ/サイドバーボタン/境界線ドラッグを配線→**初期開閉状態を適用**→`autoNextProgram==='on'` なら watcher 開始→`beforeunload/pagehide`で`cleanup`→**visibilitychange** 監視 |
 | `cleanup()` | `appState.cleanup()`＋キュー停止/クリア＋サムネ監視破棄＋onResize解除＋モーダル閉じ |
 | `stopAllTimers()` | thumbnail/todo/sidebar/autoNext をクリア＋キュー停止 |
-| `handleSidebarOpenStateChange(open)` ★ | 開: サムネ可視監視init＋thumbnail/sidebarタイマー開始＋（`oneTimeFlag`なら初回ロード、else 手動更新）を RAF/フォールバックで実行。閉: 全タイマー停止＋監視破棄 |
+| `handleSidebarOpenStateChange(open)` ★ | 開: thumbnail/sidebarタイマー開始＋（`oneTimeFlag`なら初回ロード、else 手動更新）を RAF/フォールバックで実行。閉: 全タイマー停止 |
 | `startThumbnailUpdate/startToDoListUpdate/startSidebarUpdate` | UpdateManager へ委譲 |
 | `ensure/show/hideAutoNextModal`, `scheduleAutoNextNavigation`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲 |
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |

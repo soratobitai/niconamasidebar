@@ -65,7 +65,7 @@
 | `managers/UpdateManager.js` | 更新タイマー3系統＋描画更新の司令塔（サイドバー/サムネ/番組詳細） | `class UpdateManager` |
 | `managers/LoadingManager.js` | 更新セッション単位のローディング表示制御（最低表示時間・タイムアウト） | `class LoadingManager` |
 | `managers/AutoNextManager.js` | 番組終了時の自動移動（モーダル・カウントダウン・遷移） | `class AutoNextManager` |
-| `render/sidebar.js` | 番組カードDOM生成・サムネ更新・可視監視・サイドバー枠HTML・並べ替えFLIP | `makeProgramElement`, `calculateActivePoint`, `updateThumbnailsFromStorage`, `init/refresh/teardownThumbnailVisibilityObserver`, `sortProgramsByActivePoint`, `flipReorder`, `buildSidebarShell`（※`handleThumbnailError` は内部関数、`makeProgramElement` から配線） |
+| `render/sidebar.js` | 番組カードDOM生成・サムネ更新（コンテナ内全img対象）・サイドバー枠HTML・並べ替えFLIP | `makeProgramElement`, `calculateActivePoint`, `updateThumbnailsFromStorage`, `sortProgramsByActivePoint`, `flipReorder`, `buildSidebarShell`（※`handleThumbnailError` は内部関数、`makeProgramElement` から配線。旧 IntersectionObserver 可視限定は撤去済み） |
 | `ui/layout.js` | 視聴ページ本体側の幅調整・サイドバー幅→カラム数計算 | `adjustWatchPageChild`, `setProgramContainerWidth` |
 | `ui/sidebarControl.js` | サイドバー開閉・幅ドラッグ・root幅追従 | `createSidebarControl` |
 | `handlers/optionsHandler.js` | オプションフォームの初期反映・変更保存・ソート即時反映 | `setupOptionsHandler` |
@@ -83,7 +83,7 @@ main.js
  ├─> config/constants.js
  ├─> utils/dom.js               (debounce)
  ├─> services/storage.js        (getOptions/saveOptions)
- ├─> render/sidebar.js          (buildSidebarShell, *ThumbnailVisibilityObserver)
+ ├─> render/sidebar.js          (buildSidebarShell)
  ├─> ui/sidebarControl.js       (createSidebarControl)
  ├─> ui/layout.js               (adjustWatchPageChild, setProgramContainerWidth)
  ├─> core/AppState.js           (AppState)
@@ -98,7 +98,7 @@ main.js
 UpdateManager.js
  ├─> services/api.js            (fetchLivePrograms)
  ├─> services/storage.js        (getProgramInfos)
- ├─> render/sidebar.js          (makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, refreshThumbnailObservations)
+ ├─> render/sidebar.js          (makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder)
  ├─> ui/layout.js               (setProgramContainerWidth)
  ├─> utils/sorting.js           (sortPrograms)
  └─> config/constants.js        (updateThumbnailInterval)
@@ -111,7 +111,7 @@ status.js           ─> （import なし。DOM のみ）
 sidebar.js          ─> config/constants.js (thumbnail* TTL)
 ui/layout.js        ─> （import なし。DOM/localStorage のみ）
 ui/sidebarControl.js─> config/constants.js (sidebarMinWidth), services/storage.js (setIsOpenSidebar/setSidebarWidth)
-handlers/optionsHandler.js ─> services/storage.js (saveOptions), render/sidebar.js (refreshThumbnailObservations)
+handlers/optionsHandler.js ─> services/storage.js (saveOptions)
 utils/sorting.js    ─> render/sidebar.js (sortProgramsByActivePoint)
 LoadingManager.js   ─> （import なし。AppState はコンストラクタ注入）
 ```

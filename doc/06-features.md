@@ -42,7 +42,8 @@
 
 ## 4. ライブサムネイル表示・遅延更新
 - カード初期src: `makeProgramElement`（user=スクショ`?cache=`、channel=大サイズ）。
-- 定期更新: `UpdateManager.startThumbnailUpdate`（**20秒**、`updateThumbnailInterval`）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・可視画像優先）。
+- 定期更新: `UpdateManager.startThumbnailUpdate`（**20秒**、`updateThumbnailInterval`）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。
+- ✅ **長時間非表示からの復帰（仕様変更）**: タブを `visibilityFullRefreshMs`(60秒)以上非表示にしてから戻ると、**更新ボタン相当のしっかり更新**（`forceRefetch`で全詳細再取得＋整列＋全サムネ最新化）を実行。長時間放置後に「サムネがアイコンのまま／情報が古い」問題への対策（`main.js` の `handleVisibilityChange` / `tabHiddenAt`）。60秒未満の復帰は軽量更新。
 - 対応設定: **直接のUI項目なし**（フォームのヘルプに「サムネは設定と無関係に20〜60秒で自動更新」と明記）。`updateThumbnailInterval` 保存キーは既定に無く実質固定20秒。
 
 ## 5. 定期自動更新（番組リスト）
@@ -75,7 +76,7 @@
 
 ## 9. 手動更新ボタン（リロード）
 - `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`**:
-  リスト更新（`notifybox` を毎回取得＝新着/終了番組を反映、人気順は再ソートを抑制のうえ即描画）→ **全番組の詳細を再取得（`forceRefetch`＝TTL無視、視聴者数等も最新化）** → **人気順なら1回だけFLIPで最新の人気順へ整える** → **サムネを強制更新**（10秒TTL・エラーバックオフをバイパス、可視サムネ対象）→ 最低1秒ローディング→ 定期タイマー再起動。
+  リスト更新（`notifybox` を毎回取得＝新着/終了番組を反映、人気順は再ソートを抑制のうえ即描画）→ **全番組の詳細を再取得（`forceRefetch`＝TTL無視、視聴者数等も最新化）** → **人気順なら1回だけFLIPで最新の人気順へ整える** → **サムネを強制更新**（10秒TTL・エラーバックオフをバイパス、コンテナ内全サムネ対象）→ 最低1秒ローディング→ 定期タイマー再起動。
   新着順への一時退避はしない（すでに人気順表示中のため）。
   ※明示操作なので**TTLを無視して全詳細を再取得**する（番組数が多いと詳細取得4件/秒で時間がかかる＝スピナー長め。その間もリスト/サムネは即更新済み・クリック可）。ページ開き時・自動更新はTTLを維持。
 - ローディング表示: `LoadingManager` が `.loading` ＋ `pointer-events:none`（60秒タイムアウト）。

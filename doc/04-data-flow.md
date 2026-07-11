@@ -53,11 +53,10 @@
 ## フェーズ3: 初回データ取得（サイドバーが開いている時のみ）
 
 23. **`handleSidebarOpenStateChange(true)`**:
-    1. `initThumbnailVisibilityObserver()`（IntersectionObserver生成）
-    2. なければ `startThumbnailUpdate()`（フェーズ5.1）
-    3. なければ `startSidebarUpdate()`（フェーズ5.3）
-    4. rAF内で分岐: `oneTimeFlag===true`（初回）→ `startToDoListUpdate()` / それ以外 → `performManualUpdate()`
-    5. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバック。
+    1. なければ `startThumbnailUpdate()`（フェーズ5.1）
+    2. なければ `startSidebarUpdate()`（フェーズ5.3）
+    3. rAF内で分岐: `oneTimeFlag===true`（初回）→ `startToDoListUpdate()` / それ以外 → `performManualUpdate()`
+    4. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバック。
 24. **`startToDoListUpdate()`（初回）** → `oneTimeFlag` が true なら **`performInitialLoad()`** 実行後 false化 → `programInfoQueue.start()` → `timers.todo='queue-managed'`。
 25. **`performInitialLoad()`**（人気順のガチャつき対策を含む）:
     1. **`appState.update.settling = true`**（整列確定中フラグ）
@@ -84,7 +83,7 @@
 28. **失敗系は既存DOM維持**: `false`（API失敗）も `length===0`（空）も再構築せずカウントだけ更新して return。`#api_error` 表示は `false` の時のみ。
 29. 差分再構築: 既存カードは**軽量更新**（active-point/title/link）、新規は `makeProgramElement`。各番組を `programInfoQueue.add(program.id)`。
     - ✅ **TTLキャッシュ（仕様変更）**: `data._fetchedAt` が直近 `programInfoTtlMs`(60秒) 以内なら**キュー追加をスキップ**（再取得しない）。2回目以降の読み込みが高速化。120秒周期の定期更新では60秒超のため通常どおり再取得され、詳細は古びない。
-30. `isInserting=true` → `replaceChildren(frag)` → `refreshThumbnailObservations()`
+30. `isInserting=true` → `replaceChildren(frag)`
 31. `sortPrograms(container, programsSort)`（active=人気順 / newest=ID降順）
 32. `setProgramContainerWidth` → `updateProgramCount` → `isInserting=false`
 
@@ -95,7 +94,7 @@
 ### 5.1 thumbnail（既定20秒・自己再帰 setTimeout）
 33. `startThumbnailUpdate()` … `updateThumbnail()` を**即時実行**し、完了後 `setTimeout(20s)` で再帰。
     - `updateThumbnail` は `isInserting` 中スキップ → `getProgramInfos()` → `updateThumbnailsFromStorage`。
-    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。可視画像優先。
+    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。**対象はコンテナ内の全img**（可視限定は撤去）。
 
 ### 5.2 todo（キュー、ProgramInfoQueue 内部タイマー）
 34. `programInfoQueue.start()` … `processLoop` を250ms間隔で回す。可視かつ `requestIdleCallback` 可ならアイドル処理、**バックグラウンドは間隔10倍**、空なら×3。
@@ -110,9 +109,9 @@
 
 ## フェーズ6: タブ可視状態変化（Page Visibility）
 
-39. `handleVisibilityChange`（`appState.sidebar.isOpen` が true の時のみ処理）:
-    - **復帰(visible)**: 停止中の thumbnail/todo/sidebar を再起動＋キューあれば `processNow()`＋rAFで `performManualUpdate()`（即時更新）。
-    - **背景移行(hidden)**: `thumbnail` タイマー停止（sidebar/todo はキュー側で間隔延長）。アクティブセッション残＆キュー空なら500ms後に `finishLoadingSession()`（セッション残留対策）。
+39. `handleVisibilityChange`:
+    - **背景移行(hidden)**: `tabHiddenAt=Date.now()` を記録。`appState.sidebar.isOpen` 時は `thumbnail` タイマー停止（sidebar/todo はキュー側で間隔延長）。アクティブセッション残＆キュー空なら500ms後に `finishLoadingSession()`（セッション残留対策）。
+    - **復帰(visible)**: 非表示だった時間 `hiddenMs` を計算し `tabHiddenAt` をリセット。`isOpen` 時は 停止中の thumbnail/todo/sidebar を再起動＋キューあれば `processNow()`＋rAFで **`performManualUpdate(thorough)`**。**`thorough = hiddenMs ≥ visibilityFullRefreshMs`(60秒)** の場合は更新ボタン相当のしっかり更新（`forceRefetch`で全詳細再取得＋整列＋全サムネ最新化）、それ未満は軽量更新。← 長時間非表示後にサムネがアイコン/情報が古い問題への対策。
 
 ## フェーズ7: 番組自動移動（AutoNext）
 

@@ -177,9 +177,9 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         if (onComplete) onComplete()
         return
     }
-    const sourceImgs = thumbObserver && visibleImages.size
-        ? Array.from(visibleImages).filter((img) => container.contains(img))
-        : Array.from(container.querySelectorAll('.program_thumbnail_img'))
+    // コンテナ内の全サムネを対象にする（可視限定の最適化は撤去。
+    // DOM再構築時の同期ずれで更新が漏れる不具合を避けるため、常に全imgを更新対象とする）。
+    const sourceImgs = Array.from(container.querySelectorAll('.program_thumbnail_img'))
     const now = Date.now()
 
     // 画像が存在しない場合、即座に完了コールバックを呼ぶ
@@ -291,45 +291,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         // 最初のtick実行後、更新対象がない（全てスキップされた）場合も完了とみなす
         checkComplete()
     })
-}
-
-// IntersectionObserver-based visibility tracking (optional optimization)
-let thumbObserver = null
-const visibleImages = new Set()
-
-export function initThumbnailVisibilityObserver() {
-    const container = document.getElementById('liveProgramContainer')
-    if (!container) return
-    if (thumbObserver) thumbObserver.disconnect()
-    visibleImages.clear()
-    thumbObserver = new IntersectionObserver(
-        (entries) => {
-            entries.forEach((entry) => {
-                const target = entry.target
-                if (!(target instanceof HTMLImageElement)) return
-                if (entry.isIntersecting) visibleImages.add(target)
-                else visibleImages.delete(target)
-            })
-        },
-        { root: container, rootMargin: '200px', threshold: 0.01 }
-    )
-    refreshThumbnailObservations()
-}
-
-export function refreshThumbnailObservations() {
-    if (!thumbObserver) return
-    const container = document.getElementById('liveProgramContainer')
-    if (!container) return
-    const imgs = container.querySelectorAll('.program_thumbnail_img')
-    imgs.forEach((img) => thumbObserver.observe(img))
-}
-
-export function teardownThumbnailVisibilityObserver() {
-    if (thumbObserver) {
-        thumbObserver.disconnect()
-        thumbObserver = null
-    }
-    visibleImages.clear()
 }
 
 export function sortProgramsByActivePoint(container) {

@@ -1,9 +1,9 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs } from './config/constants.js'
+import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs, visibilityFullRefreshMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, saveOptions as saveOptionsToStorage } from './services/storage.js'
-import { buildSidebarShell, initThumbnailVisibilityObserver, refreshThumbnailObservations, teardownThumbnailVisibilityObserver } from './render/sidebar.js'
+import { buildSidebarShell } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
@@ -58,6 +58,8 @@ let defaultOptions = {
 };
 let options = {};
 let elems = {};
+// タブが非表示になった時刻（復帰時に非表示だった時間を測り、しっかり更新するか判定する）
+let tabHiddenAt = null;
 
 // AppStateに設定とDOM要素の参照を保存
 appState.config.defaultOptions = defaultOptions;
@@ -373,10 +375,23 @@ const setup = async () => {
     const handleVisibilityChange = () => {
         const isVisible = !document.hidden;
         appState.setVisibility(isVisible);
-        
+
+        // 非表示だった時間を測る。復帰時は（サイドバー開閉に関わらず）必ずリセットし、
+        // 値が次回へ持ち越されないようにする。
+        let hiddenMs = 0;
+        if (isVisible) {
+            hiddenMs = tabHiddenAt ? (Date.now() - tabHiddenAt) : 0;
+            tabHiddenAt = null;
+        } else {
+            tabHiddenAt = Date.now();
+        }
+
         // サイドバーが開いている場合のみ処理
         if (appState.sidebar.isOpen) {
             if (isVisible) {
+                // 長時間非表示からの復帰かを判定（詳細・サムネが古くなっているため）
+                const thorough = hiddenMs >= visibilityFullRefreshMs;
+
                 // フォアグラウンドに戻ったとき：タイマーを再開し、即座に更新
                 if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
                 if (!appState.getTimer('todo')) {
@@ -389,11 +404,11 @@ const setup = async () => {
                     }
                 }
                 if (!appState.getTimer('sidebar')) startSidebarUpdate();
-                
-                // 即座に更新を実行
+
+                // 即座に更新を実行。長時間非表示からの復帰は「しっかり更新」
+                // （更新ボタン相当: TTLを無視して全詳細を再取得し、整列＋サムネも最新化）。
                 requestAnimationFrame(async () => {
-                    // 手動更新を実行
-                    await performManualUpdate();
+                    await performManualUpdate(thorough);
                 });
             } else {
                 // バックグラウンドに移行したとき：タイマーを停止（リソース消費を抑える）
@@ -435,10 +450,7 @@ const cleanup = () => {
     // キュー処理を停止
     programInfoQueue.stop();
     programInfoQueue.clear();
-    
-    // 外部で管理されているオブザーバーのクリーンアップ
-    teardownThumbnailVisibilityObserver();
-    
+
     // イベントハンドラーの削除
     const onResizeHandler = appState.getHandler('onResize');
     if (onResizeHandler) {
@@ -462,7 +474,6 @@ function stopAllTimers() {
 async function handleSidebarOpenStateChange(open) {
     if (open) {
         // タイマーを先に開始（UIの反応を優先）
-        initThumbnailVisibilityObserver();
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
         
@@ -495,7 +506,6 @@ async function handleSidebarOpenStateChange(open) {
         }, 100); // 100ms後にチェック
     } else {
         stopAllTimers();
-        teardownThumbnailVisibilityObserver();
     }
 }
 
