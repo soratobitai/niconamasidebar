@@ -14,6 +14,7 @@ import { UpdateManager } from './managers/UpdateManager.js'
 import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
 import { initApiStats } from './debug/apiStats.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
+import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails } from './render/animatedThumbnail.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
@@ -55,6 +56,7 @@ let defaultOptions = {
     sidebarWidth: 360,
     isOpenSidebar: false,
     autoNextProgram: 'off',
+    animatedThumbnail: 'off', // β版・既定OFF
 };
 let options = {};
 let elems = {};
@@ -359,6 +361,9 @@ const setup = async () => {
         startLiveStatusWatcher();
     }
 
+    // 動くサムネ（β版・設定でON/OFF、既定OFF。ホバー中のみ動作）
+    setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
+
     // レイアウト崩れ対策用
     const feedbackAnchor = document.querySelector('[class*="_feedback-anchor_"]');
     if (feedbackAnchor) {
@@ -444,6 +449,9 @@ const setup = async () => {
 
 // クリーンアップ関数
 const cleanup = () => {
+    // 動くサムネの停止とblob解放
+    teardownAnimatedThumbnails();
+
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
     
@@ -595,6 +603,10 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.autoNextProgram = changes.autoNextProgram.newValue;
         if (options.autoNextProgram === 'on') startLiveStatusWatcher();
         else stopLiveStatusWatcher();
+    }
+    if (changes.animatedThumbnail) {
+        options.animatedThumbnail = changes.animatedThumbnail.newValue;
+        setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
     }
 
     // 更新間隔が変更された場合はタイマーを再起動

@@ -19,6 +19,7 @@
 | 自動更新間隔 | `updateProgramsInterval` | `60`/`120`/`180`秒 | `updateProgramsInterval` | `'120'` | sidebar.js | onChanged→`restartSidebarUpdate` |
 | オートオープン | `autoOpen` | `1`(ON)/`2`(OFF)/`3`(状態記憶) | `autoOpen` | `'3'` | sidebar.js | 初期判定（次回ロードで有効） |
 | 自動移動 | `autoNextProgram` | `on`/`off` | `autoNextProgram` | `'off'` | sidebar.js | onChanged→watcher start/stop |
+| 動くサムネ（β版） | `animatedThumbnail` | `on`/`off` | `animatedThumbnail` | `'off'` | sidebar.js | onChanged→`setAnimatedThumbnailEnabled` |
 | サイドバー幅 | （フォーム外・ドラッグ） | — | `sidebarWidth` | `360` | — | onChanged |
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
 | サムネ間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数） | — | — |
@@ -96,6 +97,25 @@
 
 ## 13. デバッグ機能
 - `window.showApiStats()` で API 呼び出し統計をコンソール表示。5分ごとに異常頻度を自動警告。
+
+## 15. 動くサムネ（実験機能・ホバー中のみ / `feature/animated-thumbnail` ブランチ）
+- 目的: サムネにホバーすると、直近数枚のライブサムネを切り替えてアニメ表示する。
+- 実装: `src/render/animatedThumbnail.js`（`setAnimatedThumbnailEnabled` / `teardownAnimatedThumbnails`）。
+  - ライブサムネは**同一URLで内容が時間変化**するため、取得した瞬間の画像を保持する必要がある。
+  - **CORS対応が確認済み**なので `crossOrigin='anonymous'` で読み込み → 16×16の**知覚ハッシュ**で前フレームと比較し、
+    **変化した時だけ** blob URL のリングバッファ（N=`animatedThumbnailFrameCount`=5）に追加（重複排除。ニコ生の可変更新間隔でも「同じ画像が複数コマ」にならない）。
+  - 取得対象は**サイドバーに見えているカードのみ**（20秒間隔 `animatedThumbnailCaptureIntervalMs`）。保持枚数 N=`animatedThumbnailFrameCount`=**5**。フレームは**最大幅480pxに縮小**して保存（負荷・容量削減）。
+  - ⚠️ **読み込み中(更新ボタンが `.loading`＝初回ロード/更新の重い処理中)はキャプチャをスキップ**し、動画プレーヤーへのCPU/通信競合を避ける。
+  - **ホバー中のカードだけ**、`.anim_thumb_overlay`（2レイヤー）を重ねて `animatedThumbnailPlayIntervalMs`(700ms) 間隔で**クロスフェード**巡回。**2枚**貯まれば開始（保持中に2枚目が来れば自動開始）。**ホバー時に即キャプチャ**して貯まり＝開始を早める。
+  - blob は eviction/prune/無効化/teardown で `revokeObjectURL`。`beforeunload`/`pagehide` の cleanup で全解放。
+  - ✅ **永続化(IndexedDB)**: 新フレームを `services/animFrameStore.js` で番組IDキーに保存し、**リロード/番組移動後**にそのカードへ触れた時に復元→即アニメ（サイドバーの番組はページ間で同じなので有効）。TTL `animatedThumbnailPersistTtlMs`(30分, `updatedAt`=最後に異なるフレームが出た時刻 基準)超過は復元せず、起動時に `cleanupFrames`(上限 `animatedThumbnailPersistMaxEntries`=300)で掃除。※静止しがちな番組が誤って掃除されないよう長め。IndexedDB不可環境ではメモリのみで動作継続。
+- **β版・設定でON/OFF（既定OFF）**。`main.js` setup で `setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on')`、`onChanged`で反映。ホバー中のみ動作。OFF時は一切動作せず（リスナ/タイマー/fetchなし）＝初回負荷ゼロ。UIは「動くサムネ<β版>」＋ヘルプ。
+- ⚠️ 既存サムネ更新とは別に**可視カードを20秒毎に再取得**する（実質二重リクエスト）。非ホバー・サイドバー閉/タブ非表示時はキャプチャしない。
+- 制約: フレーム蓄積はニコ生のスクショ更新間隔（数十秒）に依存＝“ゆっくりした紙芝居”（N=5満タンには数分）。追加権限/Service Workerは不要。
+- 採用済み（**β版・既定OFF**。不具合や重さを感じたら設定でOFFにできる）。
+- ⚠️ **他拡張との共存**: 姉妹拡張「別窓くん」はサムネホバーで別窓ボタン(`.nicolive_link_button_wrap`, `z-index:2`)を出す。
+  オーバーレイの `z-index` を **1**（ボタンより下）にして覆い隠さないようにしている（main.css）。オーバーレイを作り直す際も、
+  必ず「ベースサムネの上・ホバーボタンの下」を維持すること。
 
 ## 14. 番組詳細のTTLキャッシュ（内部最適化・仕様変更）
 - 番組詳細は `ProgramInfoQueue` がレート制限（4件/秒）で取得し、`upsertProgramInfo` で localStorage `programInfos` に保存（保存時に `_fetchedAt` を付与）。
