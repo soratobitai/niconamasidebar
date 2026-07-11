@@ -22,16 +22,17 @@
 4. `localStorage.programInfos` が無ければ `'[]'` 初期化。
 5. 画像URLを `chrome.runtime.getURL` で解決。
 6. `DOMContentLoaded` リスナ登録／`chrome.storage.onChanged` リスナ登録。
-7. **`initApiStats()` 実行** → `window.apiCallCounter` 初期化＋**5分ごとの `setInterval` 監視を恒久起動**＋`window.showApiStats` 公開。
 
-> この段階で動く定期処理は **apiStats の5分 setInterval のみ**。番組/サムネ/キューのタイマーは未起動。
+> この段階では**定期処理は一切動かない**（apiStats の5分監視も含め、初期化系はすべて `DOMContentLoaded`→`setup` 経路で起動する）。番組/サムネ/キューのタイマーも未起動。
 
 ## フェーズ2: 初期化（`DOMContentLoaded` → `setup()`）
 
-8. `?popup=on` なら**即 return**（別窓くん対応）。
-9. `options = await getOptions()` … `chrome.storage.local.get` → defaults とマージ → **書き戻し** → `appState.sidebar.width/isOpen` に反映。
-10. `setElems()` でニコ生既存DOMを収集 → `#root` 不在なら return。
-11. `isSetupCompleted` で二重防止 → **`setup()`**（以降 true）。
+7. `?popup=on` なら**即 return**（別窓くん対応）。ここで抜けると以降の初期化・タイマー・`initApiStats` は一切走らない（＝別窓では常時コストゼロ）。
+8. `options = await getOptions()` … `chrome.storage.local.get` → defaults とマージ → **書き戻し** → `appState.sidebar.width/isOpen` に反映。
+9. `setElems()` でニコ生既存DOMを収集 → `#root` 不在なら return。
+10. `isSetupCompleted` で二重防止。
+11. **`initApiStats()` 実行**（popup/#root ガード通過時のみ）→ `window.apiCallCounter` 初期化＋**5分ごとの `setInterval` 監視起動**＋`window.showApiStats` 公開。`UpdateManager` が参照するため `setup()` の前に呼ぶ。
+12. **`setup()`**（以降 `isSetupCompleted=true`）。
 
 ### setup() の配線（順序が重要）
 12. `await insertSidebar()` … `buildSidebarShell` の結果を `body` 先頭に注入、`#optionContainer` を body直下へ移動、`body{position:relative;display:flex}`・`#root{flex-grow:1}` を破壊的設定。

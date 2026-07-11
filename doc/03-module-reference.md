@@ -296,7 +296,7 @@ API呼び出し頻度の可視化・異常検知（開発/本番共通の安全�
 
 | エクスポート | 説明 |
 |-------------|------|
-| `initApiStats()` ★ | `window.apiCallCounter` を初期化し、5分ごとの監視(`startApiMonitoring`)を開始、`window.showApiStats` を公開。`main.js` トップレベルで即実行される |
+| `initApiStats()` ★ | `window.apiCallCounter` を初期化し、5分ごとの監視(`startApiMonitoring`)を開始、`window.showApiStats` を公開。`DOMContentLoaded` 内・`?popup=on`/`#root` ガード通過後・`setup()` 直前に実行（別窓くんの別窓や #root 不在ページでは呼ばれず、監視タイマーも張られない） |
 | （内部）`startApiMonitoring()` | 5分ごと。直近1分の呼び出しが**200回超**で警告（レート上限240件/分に接近） |
 | （グローバル）`window.showApiStats()` | コンソールから累計/平均/直近頻度を表示 |
 
@@ -335,7 +335,7 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 - 全モジュールを import、`appState`・`programInfoQueue`（レート制限設定つき）を生成。
 - `defaultOptions`（下記）・`options`・`elems` を用意し `appState.config/elements` に接続。
 - `localStorage.programInfos` 未初期化なら `[]` で初期化。
-- `initApiStats()` を即実行。
+- （`initApiStats()` はトップレベルではなく `DOMContentLoaded` 内・popup/`#root` ガード後・`setup()` 直前で実行。別窓では呼ばれない）
 
 ### defaultOptions（既定設定）
 ```js
