@@ -98,7 +98,15 @@ dist/
    - `?popup=on` が付いていないか（別窓くんポップアップ時は起動しない仕様）
    - `#api_error`（ログイン導線）が表示されていないか＝一覧API失敗（未ログイン等）
 
-## 7.6 バージョン管理
-- 表示・審査上のバージョンは **`manifest.json`**（現 `1.7.0`）。
-- ✅ 2026-07-11に `package.json` も `1.7.0` へ同期済み（旧: 1.5.5 で乖離していた）。
-- **リリース時は両者を揃える**こと（`manifest.json` と `package.json`）。
+## 7.6 バージョン管理・リリース手順
+- 表示・審査上のバージョンは **`manifest.json`**（現 `1.10.7`）。**リリース時は `package.json` と必ず揃える**（現 `1.10.7`）。
+- コミットメッセージのバージョン付与規約: `<version>　<説明>`（バージョンと説明の間は**全角スペース U+3000**）。feature/fix はブランチで作業し `--no-ff` でマージ、マージコミットにバージョンを付ける（feature側コミットはプレーンな説明）。
+
+### リリース手順
+1. `master` が clean、`manifest.json`＝`package.json` のバージョン一致を確認。
+2. `npm run clean && NODE_ENV=production npm run build`（sourcemap 無しの本番ビルド。`postbuild` で `dist/**/*.map` を削除）。
+3. `dist/` の構成を確認（`main.js`/`style.css`/`manifest.json`/`icons/`/`images/`、`.map` が無いこと）。
+4. **Chrome ウェブストア用に zip 化**：`manifest.json` が **zip のルート**に来るよう `dist/` 直下の内容をまとめる。本リポジトリでは `release/niconamasidebar-<version>.zip` に出力する（`release/` は gitignore 済み）。
+   - PowerShell 例: `Compress-Archive -Path dist\* -DestinationPath release\niconamasidebar-<version>.zip -Force`
+5. Chrome ウェブストア デベロッパーダッシュボードへ zip をアップロード → 審査提出。
+6. （任意）リリース時点に `git tag v<version>` を付けておくと履歴を追いやすい。

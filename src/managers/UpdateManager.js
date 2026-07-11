@@ -143,7 +143,8 @@ export class UpdateManager {
                 });
             }
 
-            // 整列確定: settlingを解除し、人気順のときは1回だけ最終ソートをFLIPで滑らかに実行
+            // 整列確定: settlingを解除し、人気順のときは1回だけ最終ソートをFLIPで滑らかに実行。
+            // （新着順はソートせず notifybox のAPI順＝放送開始が新しい順を保つので、確定後の並べ替えは不要）
             this.appState.update.settling = false;
             const listContainer = document.getElementById('liveProgramContainer');
             if (listContainer && this.options.programsSort === 'active') {
@@ -313,7 +314,7 @@ export class UpdateManager {
             }
 
             let missingDetailCount = 0;
-            livePrograms.forEach((program) => {
+            livePrograms.forEach((program, apiIndex) => {
                 if (!program || !program.id) return;
 
                 const data = programInfos.find((info) => info.id === `lv${program.id}`);
@@ -325,6 +326,8 @@ export class UpdateManager {
                 if (existing) {
                     // 軽い更新（属性・タイトル・リンク先）
                     existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
+                    // 新着順は API順（notifybox は放送開始が新しい順で返す）を保つためのインデックス
+                    existing.setAttribute('data-api-index', String(apiIndex));
                     const titleEl = existing.querySelector('.program_title');
                     if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
                     const linkEl = existing.querySelector('.program_thumbnail a');
@@ -332,10 +335,11 @@ export class UpdateManager {
                     frag.appendChild(existing);
                 } else {
                     // DOM要素を直接作成
-                    const element = data 
-                        ? makeProgramElement(data, this.loadingImageURL) 
+                    const element = data
+                        ? makeProgramElement(data, this.loadingImageURL)
                         : makeProgramElement(program, this.loadingImageURL);
                     if (element) {
+                        element.setAttribute('data-api-index', String(apiIndex));
                         frag.appendChild(element);
                     }
                 }

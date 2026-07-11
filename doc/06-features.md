@@ -55,7 +55,8 @@
 - 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢60/120/180）。変更時 `restartSidebarUpdate`。
 
 ## 6. ソート（表示順序）
-- 実体: `utils/sorting.js` `sortPrograms`。`active`=`active-point`降順（人気順）、`newest`=ID降順（新着順）。
+- 実体: `utils/sorting.js` `sortPrograms`。`active`=`active-point`降順（人気順）、`newest`=**notifybox API の並び順を保持**（新着順）。
+- ✅ 2026-07-11修正: notifybox API は既に**放送開始が新しい順**で番組を返す（実機確認済み）。旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` が各カードに `data-api-index`（API配列の位置）を付与し、`newest` はそれを昇順に並べて**API順をそのまま保つ**（詳細取得に非依存・全番組に付与されるのでフォールバック沈みも無し）。同時刻/欠落時のみ lv番号降順フォールバック。
 - 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。詳細取得後 `updateActivePointsAndSort(shouldSort)` で再計算。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
@@ -64,7 +65,7 @@
   - **キャッシュで人気順を確定できる場合（全番組がキャッシュ済み）は、最初から人気順で表示（移動なし）**。← 変更前の挙動を維持
   - **詳細未取得の番組がある場合のみ**、確定するまで新着順で安定表示（オーバーレイ無し・クリック可）→ 出揃ったら1回だけ人気順へ [FLIP](./03-module-reference.md) で滑らかに並べ替え。
   - 進捗は更新ボタンのスピナー。制御は `AppState.update.settling` / `settlingNeedsNewest` ＋ `UpdateManager.getEffectiveSortType` / `performInitialLoad`。
-  - TTLキャッシュにより2回目以降はほぼ常に「最初から人気順・移動なし」。新着順選択時は挙動不変。詳細は [04-data-flow フェーズ3](./04-data-flow.md)。
+  - TTLキャッシュにより2回目以降はほぼ常に「最初から人気順・移動なし」。新着順は notifybox のAPI順を保つため、初回から放送開始順で表示され並べ替え（FLIP）は起きない。詳細は [04-data-flow フェーズ3](./04-data-flow.md)。
 
 ## 7. オートオープン（自動でサイドバーを開く）
 - 初期判定: `setup()` の `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`。
