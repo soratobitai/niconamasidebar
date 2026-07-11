@@ -94,6 +94,12 @@
   - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須・**リスク高め**）。
   - `updateSidebar` 内の `getElementById('liveProgramContainer')` 4回取得 → 1回に集約（低価値・delicateな関数のため保留）。
 
+## 🟢 R. サイドバー開閉時の列数パタつき（✅ 2026-07-11 修正）
+- 症状: 開閉の一瞬、番組サムネが巨大化しレイアウトが崩れて見えた。
+- 原因: `#sidebar` は幅を 0⇔実幅 に 0.5s の CSS transition でアニメする。列数計算 `setProgramContainerWidth`（幅が小さいほど列数少＝カード幅%大）が**アニメ途中の `#sidebar.offsetWidth`** で呼ばれ、序盤（幅<300）に1列＝カード100%になる一方、`#sidebar_container` は開いた瞬間に目標幅(例360px)固定なので**カードが360px＝巨大サムネ**化→完了時に多列へスナップしていた。`resizeObserver_sidebar` が `#sidebar` を監視しアニメ中毎フレーム発火するのが主な発火源。`UpdateManager.updateSidebar` のリスト再描画も同じ `offsetWidth` を使っていた。
+- 修正: 列数計算の幅ソースを**「意図した幅」**に統一。`main.js` の各所（RO/onResize/トグルrAF/初期open・close）は `state.sidebarWidth.value`、`UpdateManager.updateSidebar` は `this.appState.sidebar.width` を使用。アニメ途中幅では列数を変えず、閉じていても「開き幅基準」で列を確定させておく。ドラッグ時は `onMouseMove` が `sidebarWidth.value` を即時更新するので列数のライブ追従は維持。
+- 既知の残ギャップ（別件・低）: cross-tab の `sidebarWidth` 変更は `state.sidebarWidth.value`・DOM幅ともに未反映（`onChanged` が幅を再適用しない既存仕様）。単一タブ運用では問題なし。
+
 ---
 
 ## 改修時チェックリスト
