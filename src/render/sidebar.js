@@ -1,4 +1,22 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl } from '../config/constants.js'
+
+/**
+ * 番組詳細から「ライブサムネのベースURL」を providerType 別に選ぶ（共通ロジック）。
+ * user: ライブスクショ(middle) → thumbnailUrl / channel: large1280x720 → thumbnailUrl。
+ * ?cache 付与・変更検知キー・会員限定判定は呼び出し側の責務。
+ * @param {Object} info - 番組詳細
+ * @returns {string|null} ベースURL（該当なしは null）
+ */
+export function resolveLiveThumbnailBaseUrl(info) {
+    if (!info) return null
+    if (info.providerType === 'user') {
+        return (info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle) || info.thumbnailUrl || null
+    }
+    if (info.providerType === 'channel') {
+        return info.large1280x720ThumbnailUrl || info.thumbnailUrl || null
+    }
+    return null
+}
 
 /**
  * 番組情報からDOM要素を直接作成（innerHTMLを使用せず、セキュアに）
@@ -23,7 +41,7 @@ export function makeProgramElement(data, loadingImageURL) {
             user_page_url = `https://www.nicovideo.jp/user/${data.contentOwner.id}`
         }
         community_name = (data.contentOwner && data.contentOwner.name) || 'コミュニティ名不明'
-        thumbnail_link_url = `https://live.nicovideo.jp/watch/${data.id}`
+        thumbnail_link_url = `${watchPageBaseUrl}${data.id}`
         thumbnail_url = data.thumbnailUrl || ''
         icon_url = (data.contentOwner && data.contentOwner.icon) || ''
 
@@ -196,22 +214,12 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     function computeNext(info) {
         if (!info) return { nextUrl: null, key: '' }
         if (info.isMemberOnly) return { nextUrl: null, key: 'member' }
-
-        if (info.providerType === 'user') {
-            const urls = info.liveScreenshotThumbnailUrls
-            const base = urls && urls.middle ? urls.middle : info.thumbnailUrl || null
-            if (!base) return { nextUrl: null, key: '' }
-            // ユーザー配信はスクショURLをベースにする（?cache はTTLで間引くためここでは付けない）
-            return { nextUrl: base, key: `u|${base}` }
-        }
-
-        if (info.providerType === 'channel') {
-            const base = info.large1280x720ThumbnailUrl || info.thumbnailUrl || null
-            if (!base) return { nextUrl: null, key: '' }
-            return { nextUrl: base, key: `c|${base}` }
-        }
-
-        return { nextUrl: null, key: '' }
+        // ベースURL選定は共通ヘルパーに集約（?cache はTTLで間引くためここでは付けない）
+        const base = resolveLiveThumbnailBaseUrl(info)
+        if (!base) return { nextUrl: null, key: '' }
+        // 変更検知キーは providerType 別プレフィックス＋URL
+        const prefix = info.providerType === 'channel' ? 'c' : 'u'
+        return { nextUrl: base, key: `${prefix}|${base}` }
     }
 
     function checkComplete() {

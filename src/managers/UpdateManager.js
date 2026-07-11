@@ -3,7 +3,7 @@ import { getProgramInfos as getProgramInfosFromStorage } from '../services/stora
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, programInfoTtlMs } from '../config/constants.js';
+import { updateThumbnailInterval, programInfoTtlMs, watchPageBaseUrl } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -322,7 +322,7 @@ export class UpdateManager {
                     const titleEl = existing.querySelector('.program_title');
                     if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
                     const linkEl = existing.querySelector('.program_thumbnail a');
-                    if (linkEl) linkEl.href = data && data.id ? `https://live.nicovideo.jp/watch/${data.id}` : `https://live.nicovideo.jp/watch/lv${program.id}`;
+                    if (linkEl) linkEl.href = data && data.id ? `${watchPageBaseUrl}${data.id}` : `${watchPageBaseUrl}lv${program.id}`;
                     frag.appendChild(existing);
                 } else {
                     // DOM要素を直接作成
