@@ -1,0 +1,87 @@
+# 09. 技術的負債・潜在バグ・改修時の注意
+
+コード精読とワークフロー横断分析で確認した「非自明な事実・落とし穴・負債」の一覧。
+**改修前・バグ調査前に必読**。
+
+> **2026-07-11 更新**: 下記 A〜E, J, L を修正済み（独立エージェントによる敵対的レビューで回帰なしを確認、`npm run build` 成功）。
+> 詳細な差分は `git log`／各ファイル参照。未対応項目（設計判断・情報）は後半にまとめた。
+
+---
+
+# ✅ 修正済み（2026-07-11）
+
+## ✅ A. 自動移動の `updateSidebar` がIIFEで未解決だった（🔴→修正済み）
+- **旧問題**: `AutoNextManager.startWatcher()` が `typeof updateSidebar === 'function'` で `main.js` のモジュールローカル関数をグローバル参照しようとしていた。IIFEバンドルでは未解決（`typeof` は `'undefined'` を返す）で、かつ `startWatcher()` は引数なし呼び出しだったため、**番組終了時にサイドバーの再取得が一切走らず**、古い先頭番組へ遷移していた。
+- **修正**: `main.js` の `startLiveStatusWatcher()` が `autoNextManager.startWatcher(updateSidebar)` と**更新関数を注入**。`AutoNextManager` 側は `typeof updateSidebarFn === 'function'` で注入関数のみを使用するよう変更。これで終了検知時に最新リストを取得してから次番組を選定するようになった。
+- 対象: `src/main.js`, `src/managers/AutoNextManager.js`
+
+## ✅ B. サムネイルの `<img>` error フォールバックが未配線だった（🔴→修正済み）
+- **旧問題**: `handleThumbnailError`（data-src→loading.gif フォールバック）を配線する `attachThumbnailErrorHandlers` が**どこからも呼ばれておらず**、画像ロード失敗時の救済が発動しなかった。
+- **修正**: `makeProgramElement` 内で生成する `thumbnailImg` に `addEventListener('error', handleThumbnailError)` を**直接配線**。全カードにフォールバックが効くようになった。冗長になった `attachThumbnailErrorHandlers`（未使用export）は削除。
+- 対象: `src/render/sidebar.js`
+
+## ✅ C. `setHandler('reloadBtn', ...)` が no-op だった（🟡→修正済み）
+- **旧問題**: `AppState.handlers` が `{ onResize }` のみ宣言で、`setHandler` の `if (name in this.handlers)` ガードにより `'reloadBtn'` がセットされず、更新ボタンの「既存リスナ削除→追加」ロジックが機能しなかった。
+- **修正**: `AppState.handlers` に `reloadBtn: null` を宣言追加。リスナ重複防止ロジックが実効化。
+- 対象: `src/core/AppState.js`
+
+## ✅ D. `clearTimer('queueRestart')` が no-op（デッドコード）だった（🟡→修正済み）
+- **旧問題**: `queueRestart` は `AppState.timers` に存在しないキーで、セット箇所も無く、`stopAllTimers()` の該当行は常に no-op。
+- **修正**: `stopAllTimers()` から当該行を削除。
+- 対象: `src/main.js`
+
+## ✅ E. `programInfoTtlMs` の未使用 import を削除（🟢→整理済み）
+- **旧問題**: `api.js` が `programInfoTtlMs` を import するが未使用。
+- **修正**: import から除去。※定数 `programInfoTtlMs` 自体は `constants.js` に**残置**（将来 TTL 間引きを実装する際の受け皿。実装するなら `upsertProgramInfo` に取得時刻を持たせ `fetchAndSave` 前に判定）。
+- 対象: `src/services/api.js`
+
+## ✅ J. `calculateActivePoint` の誤った `@deprecated` を修正（🟢→修正済み）
+- **旧問題**: JSDoc に `@deprecated` とあるが、実際はソート・active-point算出で現役使用。
+- **修正**: 実態に沿った説明（人気度スコア算出の現役関数）へ書き換え。
+- 対象: `src/render/sidebar.js`
+
+## ✅ L. バージョンの二重管理を解消（🟢→修正済み）
+- **旧問題**: `manifest.json`=1.7.0 に対し `package.json`=1.5.5 で乖離。
+- **修正**: `package.json` を 1.7.0 に同期。以後リリース時は両者を揃える運用推奨。
+- 対象: `package.json`
+
+---
+
+# ⏳ 未対応（設計判断・情報 / 今回は変更せず）
+
+以下は「明確なバグ」ではなく、設計上の選択・大きめのリファクタ・情報のため、今回は据え置いた項目。改修時の参考に。
+
+## 🟡 G. フラジャイルなニコ生DOM依存（仕様変更で壊れる筆頭）
+- `setElems`/`layout.js`/`status.js` がハッシュ付きクラスを `[class*="..."]` の**部分一致**で掴む。`adjustWatchPageChild` はマジックナンバー（1024/1152/1500/1792, `innerHeight*1.777778` 等）に依存。
+- ニコ生の視聴ページ改修で**レイアウト崩れ・自動移動不発**が起きやすい。UI更新時はここを最初に疑う。恒久対策はセレクタの constants 化・defensive 化。
+
+## 🟢 H. 本番でも console 出力が有効
+- `utils/error.js` `_detectDevelopmentMode()` は `chrome.runtime` があれば常に `true`。本番でも警告/エラーがコンソールに出続ける。監視目的で意図的な可能性があり、今回は変更せず。抑制したい場合は判定を厳密化。
+
+## 🟢 I. `AppState` のデッドフィールド / レガシー
+- `queues.programInfo`（実キューは別クラス）、`loading.operations`＋`startLoading/finishLoading`（判定は `updateSession` ベース）、`observers.thumbnail`（実体は sidebar.js のモジュール変数）は未使用/レガシー。害はないため今回は残置。
+
+## 🟢 K. リスナ/タイマーのライフサイクル非対称
+- `#optionForm` change、各ボタン click、`document` 全体 click（resize強制）、`apiStats` の5分 setInterval などは cleanup で明示解除されない。単一ページ寿命では問題になりにくい。SPA的な再setup対応や厳密なリーク対策をするなら要整理。
+
+## 🟢 M. `getOptions` の副作用（get が set する）
+- 取得ついでにマージ結果を書き戻す（初回に既定値を永続化する意図）。「読むだけ」で呼ぶと storage 書き込みが走る点に注意。
+
+## 🟢 N. `fetchProgramInfo` は Cookie を送らない
+- リストAPIは `credentials:'include'` だが詳細APIは付けていない。現状は足りているが、ログイン依存の詳細が必要になったら見直す（意図的か要確認のため今回は変更せず）。
+
+## 🟢 O. 「開いた瞬間の描画」と「定期タイマー初回」は別物
+- `startSidebarUpdate` の初回実行も `updateProgramsInterval`（既定120秒）後。開いた直後の即描画は `performInitialLoad`/`performManualUpdate` が担う。二層構造を混同しないこと。
+
+## 🟢 P. `options` オブジェクトの参照整合（現状はOK）
+- 現状は `onChanged` が in-place 更新するため整合が取れている。**以後 `options` を再代入しないこと**（Manager 側の参照とズレる）。
+
+---
+
+## 改修時チェックリスト
+- [ ] ニコ生DOMに触る変更 → `setElems`/`layout.js`/`status.js` のセレクタを確認（項目G）
+- [ ] 状態を足す → まず `AppState` に。グローバル変数やモジュール間グローバル参照を作らない（教訓: 旧項目A）
+- [ ] タイマー/リスナを足す → `AppState` 管理下に置き `cleanup()` で解放（項目K）
+- [ ] ビルドは IIFE。モジュール間で「グローバル関数」を当てにしない（教訓: 旧項目A）
+- [ ] リリース → `manifest.json` と `package.json` のバージョンを揃える、`dist/style.css` 生成確認（[07](./07-build-and-deploy.md)）
+- [ ] `npm run build` 後、実ページ（要ログイン）で動作確認（[07 §7.5](./07-build-and-deploy.md)）
