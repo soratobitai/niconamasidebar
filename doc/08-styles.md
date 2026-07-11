@@ -38,6 +38,7 @@
 | セレクタ | 役割 |
 |---------|------|
 | `.program_container` | 1番組カード。`id`=番組数値ID、属性 `active-point`（人気順ソートのキー） |
+| `.program_thumbnail .anim_thumb_overlay` / `.anim_thumb_layer` / `.show` | 🧪実験。動くサムネのホバー用オーバーレイ（div, `inset:0`, `pointer-events:none`, **`z-index:1`**）。内部に2枚の `.anim_thumb_layer`(img) を重ね、`opacity`(0.4s)でクロスフェード。生成/制御は `render/animatedThumbnail.js`。⚠️ **`z-index` は必ずベースサムネの上・ホバーボタンの下**（「別窓くん」の `.nicolive_link_button_wrap` は `z-index:2`）。div自身が stacking context になり内部レイヤーの z-index は外に漏れない |
 | `.program_container .community` | 配信者行（アイコン＋名前） |
 | `.community a` / `.community img` | 丸いユーザーアイコン（40px, `border-radius:50%`） |
 | `.community .community_name` | 配信者名（1行省略 `text-overflow:ellipsis`） |
@@ -58,6 +59,7 @@
 | `#optionContainer .container` | ポップアップ本体（幅360px, 角丸, ダーク, シャドウ, `max-height:70vh` スクロール） |
 | `h1` / `h2` | 見出し（`h2` は青い左ボーダー `#2a6fd8`） |
 | `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプアイコンとツールチップ（hover/focus で表示）。自動更新・オートオープン・自動移動の説明文 |
+| `.opt-beta-badge` | 🧪 見出し横の「β版」バッジ（動くサムネ設定用の黄色い小バッジ） |
 | `.flex` / `.setbox` / `.inputbox` / `label` | ラジオ項目のレイアウト |
 | `input[type="radio"]` / `input[type="text"]` | フォーム入力（text は現状未使用） |
 | `#optionContainer a` / `a:hover` | リンク色 |

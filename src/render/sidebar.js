@@ -469,6 +469,22 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <label for="autoNextProgramOff">OFF</label>
                                     </div>
                                 </div>
+                                <h2 class="opt-title-with-help">
+                                    動くサムネ<span class="opt-beta-badge">β版</span>
+                                    <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネイルにマウスを乗せると、直近数枚のライブサムネを切り替えてアニメーション表示します。（ベータ版：不具合や動作が重い場合はOFFにしてください）</span></span>
+                                </h2>
+                                <div class="setbox flex">
+                                    <div class="inputbox flex">
+                                        <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on">
+                                        <label for="animatedThumbnailOn">ON</label>
+                                    </div>
+                                </div>
+                                <div class="setbox flex">
+                                    <div class="inputbox flex">
+                                        <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off">
+                                        <label for="animatedThumbnailOff">OFF</label>
+                                    </div>
+                                </div>
                             </form>
                         </div>`
 

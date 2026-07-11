@@ -24,6 +24,11 @@
 | `programInfoTtlMs` | `60000` | 番組詳細の再取得間引きTTL。✅ **TTLキャッシュとして稼働中**（`UpdateManager.updateSidebar` が `_fetchedAt` を見て60秒以内はキュー追加をスキップ） |
 | `loadingSessionTimeoutMs` | `60000` | ローディングセッションの強制終了タイムアウト |
 | `visibilityFullRefreshMs` | `60000` | ✅新規。長時間非表示から復帰した時に「しっかり更新」（更新ボタン相当＝全詳細再取得＋整列）する閾値。これより短い非表示は軽量更新 |
+| `animatedThumbnailFrameCount` | `5` | 🧪実験(branch)。動くサムネのリングバッファ保持枚数 |
+| `animatedThumbnailCaptureIntervalMs` | `20000` | 🧪実験。動くサムネのフレーム取得（重複排除）間隔（可視カードのみ） |
+| `animatedThumbnailPlayIntervalMs` | `700` | 🧪実験。ホバー時の1コマ表示時間(ms) |
+| `animatedThumbnailPersistTtlMs` | `1800000` | 🧪実験。保存フレームの復元TTL(30分, updatedAt基準)。超過は復元せず削除。静止番組が誤削除されないよう長め |
+| `animatedThumbnailPersistMaxEntries` | `300` | 🧪実験。保存する番組レコード数の上限（古い順に掃除） |
 
 ---
 
@@ -297,6 +302,31 @@ API呼び出し頻度の可視化・異常検知（開発/本番共通の安全�
 | （グローバル）`window.showApiStats()` | コンソールから累計/平均/直近頻度を表示 |
 
 ---
+
+## render/animatedThumbnail.js 🧪（実験機能 / `feature/animated-thumbnail`）
+
+「動くサムネ」（ホバー中のみ）。**β版・設定でON/OFF（既定OFF）**（`main.js` setup で `setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on')`、onChangedで反映）。詳細は [06-features §15](./06-features.md)。
+
+| エクスポート | 説明 |
+|-------------|------|
+| `setAnimatedThumbnailEnabled(on)` | 有効/無効の切替（冪等）。有効時: `#liveProgramContainer` に委譲hoverリスナ付与＋20秒間隔の可視カードキャプチャ開始。無効時: タイマー/リスナ停止＋全blob解放（cleanup用） |
+| `teardownAnimatedThumbnails()` | `setAnimatedThumbnailEnabled(false)` に委譲（cleanupから呼ぶ） |
+
+内部の要点:
+- `captureFrame`: `crossOrigin='anonymous'`＋cache-bustで取得→16×16知覚ハッシュ(`computeSignature`)→`signatureDiffers`(閾値8)で**変化時のみ** `canvas.toBlob`→`createObjectURL` をリングバッファ(N=5)に追加、超過分は `revokeObjectURL`（アニメ表示中カードは遅延revoke）。
+- `captureVisibleFrames`: 可視 `.program_container` のみ対象（`isCardVisible`は`#sidebar`矩形と交差判定）。リストから消えた番組は `releaseBuffer` でprune。**`isSidebarLoading()`（更新ボタンが`.loading`）中はスキップ**（初回ロード等の負荷/通信競合回避）。フレームは最大幅`MAX_FRAME_W`=480pxに縮小。
+- ホバー: `setHoverCard`（+`captureHoveredCard`でホバー即キャプチャ）/`tryStartAnim`/`stopAnim`。`.anim_thumb_overlay` 内の**2レイヤーを opacity でクロスフェード**巡回（開始は**2枚**から、保持中に2枚目が来れば自動開始）。DOM再構築・枚数不足・非enabled時は停止（`document.contains`ガード）。
+- 永続化: `captureFrame` は追加の前に `ensureHydrated`（IndexedDBから復元）→ 追加 → `persistBuffer`（保存）。ホバー時も `ensureHydrated` で復元して即開始。TTL/上限の掃除は enable 時 `cleanupFrames`。ストアは `services/animFrameStore.js`。
+- 防御: taint検出時 `captureUnsupported=true` で以降の取得を停止（CORS OK確認済みなので通常不発）。IndexedDB不可でも try/catch でメモリのみ継続。
+
+### services/animFrameStore.js 🧪（動くサムネのフレーム永続化）
+IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま保存。エラー時は静かに no-op/null（グレースフル）。
+
+| エクスポート | 説明 |
+|-------------|------|
+| `saveFrames(id, {frames:[{blob,sig}], lastSig, updatedAt})` | put で置換保存 |
+| `loadFrames(id)` | レコード取得（無ければ null） |
+| `cleanupFrames(ttlMs, maxEntries)` | TTL失効を削除＋上限超過を古い順に削除 |
 
 ## main.js ★★★（エントリ／オーケストレータ）
 

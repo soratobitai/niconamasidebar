@@ -25,6 +25,7 @@ export function setupOptionsHandler(options, programInfoQueue, sortPrograms) {
             const updateProgramsIntervalElement = document.querySelector('input[name="updateProgramsInterval"]:checked');
             const programsSortElement = document.querySelector('input[name="programsSort"]:checked');
             const autoNextProgramElement = document.querySelector('input[name="autoNextProgram"]:checked');
+            const animatedThumbnailElement = document.querySelector('input[name="animatedThumbnail"]:checked');
 
             if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
                 return;
@@ -34,6 +35,8 @@ export function setupOptionsHandler(options, programInfoQueue, sortPrograms) {
             options.updateProgramsInterval = updateProgramsIntervalElement.value;
             options.programsSort = programsSortElement.value;
             options.autoNextProgram = autoNextProgramElement.value;
+            // 動くサムネ（β版・後方互換のためガード対象外・存在すれば反映）
+            if (animatedThumbnailElement) options.animatedThumbnail = animatedThumbnailElement.value;
 
             saveOptionsToStorage(options);
         } catch (error) {
@@ -46,6 +49,7 @@ export function setupOptionsHandler(options, programInfoQueue, sortPrograms) {
     updateCheckedState('updateProgramsInterval', options.updateProgramsInterval);
     updateCheckedState('autoOpen', options.autoOpen);
     updateCheckedState('autoNextProgram', options.autoNextProgram);
+    updateCheckedState('animatedThumbnail', options.animatedThumbnail);
 
     // フォームに変更があったら保存する
     const optionForm = document.getElementById('optionForm');

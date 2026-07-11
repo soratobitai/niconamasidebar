@@ -69,6 +69,8 @@
 | `ui/layout.js` | 視聴ページ本体側の幅調整・サイドバー幅→カラム数計算 | `adjustWatchPageChild`, `setProgramContainerWidth` |
 | `ui/sidebarControl.js` | サイドバー開閉・幅ドラッグ・root幅追従 | `createSidebarControl` |
 | `handlers/optionsHandler.js` | オプションフォームの初期反映・変更保存・ソート即時反映 | `setupOptionsHandler` |
+| `render/animatedThumbnail.js` 🧪 | 動くサムネ（実験・ホバー中のみ）。CORS＋canvas知覚ハッシュで重複排除しblobリングバッファに保持、ホバーで巡回表示 | `setAnimatedThumbnailEnabled`, `teardownAnimatedThumbnails` |
+| `services/animFrameStore.js` 🧪 | 動くサムネのフレーム永続化（IndexedDB, blob保存, TTL/件数掃除）。リロード/番組移動をまたいで復元 | `saveFrames`, `loadFrames`, `cleanupFrames` |
 | `utils/dom.js` | `debounce` | `debounce` |
 | `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`, `ErrorManager`, `ErrorType`, `ErrorLevel` |
 | `utils/sorting.js` | 番組リストのソート（新着順=ID降順 / 人気順=active-point） | `sortPrograms` |
