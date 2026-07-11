@@ -125,27 +125,30 @@ export class AutoNextManager {
     }
 
     /**
+     * autoNext カウントダウンタイマーを安全に停止（存在すれば clearInterval＋登録解除）
+     */
+    _clearAutoNextTimer() {
+        const timer = this.appState.getTimer('autoNext');
+        if (timer) {
+            try { clearInterval(timer); } catch (_e) {}
+            this.appState.clearTimer('autoNext');
+        }
+    }
+
+    /**
      * 自動次番組への遷移をスケジュール
      * @param {string} nextHref - 遷移先URL
      * @param {Object} preview - プレビュー情報
      */
     scheduleNavigation(nextHref, preview) {
         // 既存のカウントダウンが生きていれば停止
-        const existingTimer = this.appState.getTimer('autoNext');
-        if (existingTimer) {
-            try { clearInterval(existingTimer); } catch (_e) {}
-            this.appState.clearTimer('autoNext');
-        }
+        this._clearAutoNextTimer();
         
         let remaining = 10;
         this.appState.autoNext.canceled = false;
         
         this.showModal(remaining, preview, () => {
-            const timer = this.appState.getTimer('autoNext');
-            if (timer) {
-                clearInterval(timer);
-                this.appState.clearTimer('autoNext');
-            }
+            this._clearAutoNextTimer();
             this.appState.autoNext.scheduled = true;
         });
         
@@ -157,15 +160,13 @@ export class AutoNextManager {
             if (countEl) countEl.textContent = String(Math.max(0, remaining));
             
             if (this.appState.autoNext.canceled) {
-                clearInterval(timer);
-                this.appState.clearTimer('autoNext');
+                this._clearAutoNextTimer();
                 this.hideModal();
                 return;
             }
             
             if (remaining <= 0) {
-                clearInterval(timer);
-                this.appState.clearTimer('autoNext');
+                this._clearAutoNextTimer();
                 this.hideModal();
                 if (!this.appState.autoNext.canceled) {
                     try { location.assign(nextHref); } catch (_e) {}
@@ -248,12 +249,8 @@ export class AutoNextManager {
             this.appState.autoNext.liveStatusStopper = null;
         }
         
-        const existingTimer = this.appState.getTimer('autoNext');
-        if (existingTimer) {
-            try { clearInterval(existingTimer); } catch (_e) {}
-            this.appState.clearTimer('autoNext');
-        }
-        
+        this._clearAutoNextTimer();
+
         this.hideModal();
         this.appState.autoNext.scheduled = false;
         this.appState.autoNext.selectingNext = false;

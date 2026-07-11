@@ -80,14 +80,15 @@
 
 ## 🟢 Q. コード整理（2026-07-11 実施ぶん / 残りの候補）
 - ✅ **実施済み（デッドコード削除・敵対的検証済み）**: 旧オプションポップアップ由来の未使用CSS（`#optionContainer p/ul/li/.flex/.setbox/.inputbox/label/input[type=text]/a`・`.sidebar_display_none`）、未使用CSS変数（`--sb-popup-bg/-fg/-heading`）、未使用の委譲ラッパー関数（`ensure/showAutoNextModal`・`scheduleAutoNextNavigation`・`performInitialLoad`/`updateThumbnail`/`updateProgramCount`/`updateLoadingState`/`finishLoadingSessionWithMinDuration`）、`AppState` レガシー（`queues`・`loading.operations`・`startLoading/finishLoading`・`getObserver`）、`UpdateManager.stopAllTimers`（未使用。main.js 版が実体）、未使用 export の内部化（`ErrorType/ErrorLevel/ErrorManager`・`setProgramInfos`）、未使用 import/引数/デッド変数（main.js の `saveOptionsToStorage`・`computeNext` の `parentId`・`getLivePrograms` の `callId`）、空 no-op コールバック（`onProcessStart`/`onQueueEmpty`）。
+- ✅ **実施済み②（低〜中リスクのリファクタ・挙動等価を敵対的検証済み）**:
+  - `watch/` 視聴ページURLを `constants.watchPageBaseUrl` に定数化（`sidebar.makeProgramElement`・`UpdateManager` の計3箇所）。
+  - ライブサムネのベースURL選定を純関数 `sidebar.resolveLiveThumbnailBaseUrl(info)` に集約し `sidebar.computeNext`・`animatedThumbnail.getScreenshotUrl` で共用（`makeProgramElement` は初期src用に `?cache` 付与・`||''` フォールバック等の固有ロジックがあるため据え置き）。
+  - AutoNext のカウントダウンタイマー後始末を `AutoNextManager._clearAutoNextTimer()` に集約（開始/キャンセル/interval×2/stopWatcher の5箇所）。
 - ⏭ **残りの整理候補（動作変更を伴うため未実施・要検証）**:
-  - ライブサムネURL選定ロジックの3重複（`animatedThumbnail.getScreenshotUrl` / `sidebar.computeNext` / `sidebar.makeProgramElement`）→ 共通ヘルパー抽出。
-  - `https://live.nicovideo.jp/watch/` の直書き重複（`UpdateManager`・`sidebar.js`）→ `constants` 化。
   - 直近60秒フィルタ `filter(t => now - t < 60000)` の重複＋`60000` マジックナンバー（`apiStats`・`UpdateManager`）→ 共通ユーティリティ＋定数化。
   - `apiCallCounter` 初期化の二系統（`apiStats.initApiStats` と `UpdateManager` コンストラクタ）→ 一元化。
   - `layout.js` の段階的しきい値/レイアウト定数のベタ書き（項目G）→ テーブル駆動/名前付き定数化。
-  - AutoNext タイマー後始末の4重複 → `_clearAutoNextTimer()` 抽出。
-  - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須）。
+  - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須・リスク高め）。
   - `updateSidebar` 内の `getElementById('liveProgramContainer')` 4回取得 → 1回に集約。
 
 ---

@@ -1,4 +1,5 @@
 import { getProgramInfos as getProgramInfosFromStorage } from '../services/storage.js'
+import { resolveLiveThumbnailBaseUrl } from './sidebar.js'
 import { saveFrames, loadFrames, cleanupFrames } from '../services/animFrameStore.js'
 import {
     animatedThumbnailFrameCount as FRAME_COUNT,
@@ -146,16 +147,10 @@ function signatureDiffers(a, b, threshold = 8) {
     return sum / a.length > threshold
 }
 
-// ---- 番組詳細からライブサムネURLを得る ----
+// ---- 番組詳細からライブサムネURLを得る（会員限定は除外し、ベース選定は共通ヘルパーに委譲） ----
 function getScreenshotUrl(info) {
     if (!info || info.isMemberOnly) return null
-    if (info.providerType === 'user') {
-        return (info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle) || info.thumbnailUrl || null
-    }
-    if (info.providerType === 'channel') {
-        return info.large1280x720ThumbnailUrl || info.thumbnailUrl || null
-    }
-    return null
+    return resolveLiveThumbnailBaseUrl(info)
 }
 
 // ---- 1カード分のフレーム取得（重複排除して保持） ----
