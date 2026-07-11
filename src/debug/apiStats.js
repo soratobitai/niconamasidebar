@@ -3,6 +3,8 @@
  * 本番環境でもAPI過負荷の検出に使用
  */
 
+import { apiRateWindowMs } from '../config/constants.js'
+
 /**
  * API呼び出しカウンターを初期化
  */
@@ -42,7 +44,7 @@ function startApiMonitoring() {
             apiCallCounter.recentTimestamps = [];
         }
         const now = Date.now();
-        apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
+        apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < apiRateWindowMs);
         const recentRate = apiCallCounter.recentTimestamps.length;
         
         // 異常な頻度の場合のみ警告（レート制限: 4件/秒 = 240件/分、警告閾値: 200件/分）
@@ -72,7 +74,7 @@ function showApiStats() {
         apiCallCounter.recentTimestamps = [];
     }
     const now = Date.now();
-    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < 60000);
+    apiCallCounter.recentTimestamps = apiCallCounter.recentTimestamps.filter(t => now - t < apiRateWindowMs);
     const recentRate = apiCallCounter.recentTimestamps.length;
     
     console.log('=== API呼び出し統計 ===');

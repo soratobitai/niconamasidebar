@@ -84,12 +84,14 @@
   - `watch/` 視聴ページURLを `constants.watchPageBaseUrl` に定数化（`sidebar.makeProgramElement`・`UpdateManager` の計3箇所）。
   - ライブサムネのベースURL選定を純関数 `sidebar.resolveLiveThumbnailBaseUrl(info)` に集約し `sidebar.computeNext`・`animatedThumbnail.getScreenshotUrl` で共用（`makeProgramElement` は初期src用に `?cache` 付与・`||''` フォールバック等の固有ロジックがあるため据え置き）。
   - AutoNext のカウントダウンタイマー後始末を `AutoNextManager._clearAutoNextTimer()` に集約（開始/キャンセル/interval×2/stopWatcher の5箇所）。
-- ⏭ **残りの整理候補（動作変更を伴うため未実施・要検証）**:
-  - 直近60秒フィルタ `filter(t => now - t < 60000)` の重複＋`60000` マジックナンバー（`apiStats`・`UpdateManager`）→ 共通ユーティリティ＋定数化。
-  - `apiCallCounter` 初期化の二系統（`apiStats.initApiStats` と `UpdateManager` コンストラクタ）→ 一元化。
-  - `layout.js` の段階的しきい値/レイアウト定数のベタ書き（項目G）→ テーブル駆動/名前付き定数化。
-  - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須・リスク高め）。
-  - `updateSidebar` 内の `getElementById('liveProgramContainer')` 4回取得 → 1回に集約。
+- ✅ **実施済み③（低リスク整理・挙動等価を敵対的検証済み）**:
+  - API呼び出し頻度フィルタの窓 `60000` を `constants.apiRateWindowMs` に定数化（`apiStats`×2・`UpdateManager`×1）。
+  - `setProgramContainerWidth` の8連ifを、ブレークポイント配列 `columnBreakpoints=[300,500,700,900,1100,1300,1500]` を走査するループに置換（全境界値で挙動等価を確認）。
+- ⏭ **残りの整理候補（未実施。低価値/高リスクのため保留）**:
+  - `apiCallCounter` 初期化の二系統（`apiStats.initApiStats` と `UpdateManager` コンストラクタ）→ 一元化（デバッグ用・低価値）。
+  - `layout.js` の `adjustWatchPageChild` のレイアウト定数（`1024`/`1.777778`/`220.44444` 等）ベタ書き（項目G）→ 名前付き定数化（値の意味が不透明でドメイン知識が要るため保留）。
+  - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須・**リスク高め**）。
+  - `updateSidebar` 内の `getElementById('liveProgramContainer')` 4回取得 → 1回に集約（低価値・delicateな関数のため保留）。
 
 ---
 

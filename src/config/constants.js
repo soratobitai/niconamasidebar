@@ -18,6 +18,9 @@ export const programInfoTtlMs = 60000;
 // ローディングセッションのタイムアウト（ミリ秒）
 export const loadingSessionTimeoutMs = 60000; // 60秒
 
+// API呼び出し頻度の集計窓（ミリ秒）。直近この時間内の呼び出し回数で過負荷を検出する
+export const apiRateWindowMs = 60000; // 直近1分
+
 // 長時間の非表示から復帰した時に「しっかり更新」（更新ボタン相当＝全詳細を再取得して整列）を
 // 行う閾値（ミリ秒）。これより短い非表示からの復帰は軽量更新のまま。
 export const visibilityFullRefreshMs = 60000; // 60秒
