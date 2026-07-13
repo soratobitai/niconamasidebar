@@ -112,6 +112,9 @@
 
 ## 13. デバッグ機能
 - `window.showApiStats()` で API 呼び出し統計をコンソール表示。5分ごとに異常頻度を自動警告。
+- `window.showAnimThumbStats()`（モジュール読込時に無条件公開＝`showApiStats`同様。content scriptのisolated worldに定義されるためコンソールは拡張コンテキストを選ぶ）で②の統計を表示: **①給餌数(ingested)**・②自前取得(fetches＝主にホバー)・解析/新規保存/重複破棄・CORS汚染(taintStops)。給餌方式(§15)の効き目確認用で、**ingestedが主・fetchesがホバーのみ・taintStops=0が正常**。`setAnimatedThumbnailEnabled(true)` のたびにリセット。
+- 定期の自動ログは**リリース向けに廃止**（計測で一本化を検証済みのため。2026-07-13）。統計は `window.showAnimThumbStats()` の手動呼び出しで確認する。
+- **CORS汚染時のみ警告**: 万一 crossOrigin 画像が canvas を汚染して解析不可になった場合、`computeSignature` で**1回だけ** `console.warn`（`⚠️ 動くサムネ: CORS汚染で…`）を出し、以降①は平文取得へ自動フォールバック。`console.warn` はコンソールのコンテキスト選択に関係なく `top` にも表示されるため、実機テスト中もこの重要シグナルは見逃さない。
 
 ## 15. 動くサムネ（実験機能・ホバー中のみ / `feature/animated-thumbnail` ブランチ）
 - 目的: サムネにホバーすると、直近数枚のライブサムネを切り替えてアニメ表示する。
@@ -119,13 +122,16 @@
   - ライブサムネは**同一URLで内容が時間変化**するため、取得した瞬間の画像を保持する必要がある。
   - **CORS対応が確認済み**なので `crossOrigin='anonymous'` で読み込み → 16×16の**知覚ハッシュ**で前フレームと比較し、
     **変化した時だけ** blob URL のリングバッファ（N=`animatedThumbnailFrameCount`=5）に追加（重複排除。ニコ生の可変更新間隔でも「同じ画像が複数コマ」にならない）。
-  - 取得対象は**サイドバーに見えているカードのみ**（20秒間隔 `animatedThumbnailCaptureIntervalMs`）。保持枚数 N=`animatedThumbnailFrameCount`=**5**。フレームは**最大幅480pxに縮小**して保存（負荷・容量削減）。
+  - 取得方式（**給餌方式・2026-07-13**）: 最新サムネの取得は①(通常サムネ更新 `updateThumbnailsFromStorage`)へ**一本化**。②ON時、①はプリロードを `crossOrigin='anonymous'` で読み、成功画像を `ingestAnimatedThumbnailFrame(cardId, img)` へ渡す（**再取得なし**）。②は定期の自前取得をせず、**ホバー即時取得のみ**自前で行う。対象は①が更新する**サイドバー内の全カード（可視/画面外を問わず）**。保持枚数 N=`animatedThumbnailFrameCount`=**5**、最大幅480pxに縮小保存。
+    - ✅ 2026-07-13(a): 旧 `isCardVisible` の可視ゲートを撤去し全カード対象に（画面下の番組もフレームが貯まるよう均一化、`isCardVisible`削除）。
+    - ✅ 2026-07-13(b): ①②が同一サムネを別々に取得する**二重通信を解消**。②の定期自前取得(`captureVisibleFrames`)を廃止し①からの給餌に一本化（②は `storeFrameFromImage` を共通化、`ingestAnimatedThumbnailFrame`/`isAnimatedThumbnailEnabled` を追加。②の定期処理は `pruneAbsentBuffers`＝消えた番組のバッファ解放のみ）。①のcrossOrigin配線は `main.js` の `setAnimThumbnailFeed({ isEnabled, ingest })`。①側は `sidebar.js` に `setAnimThumbnailFeed` フック＋プリロードの `feeding` 分岐（成功で `ingest`、CORS失敗は平文フォールバック）。
   - ⚠️ **読み込み中(更新ボタンが `.loading`＝初回ロード/更新の重い処理中)はキャプチャをスキップ**し、動画プレーヤーへのCPU/通信競合を避ける。
   - **ホバー中のカードだけ**、`.anim_thumb_overlay`（2レイヤー）を重ねて `animatedThumbnailPlayIntervalMs`(700ms) 間隔で**クロスフェード**巡回。**2枚**貯まれば開始（保持中に2枚目が来れば自動開始）。**ホバー時に即キャプチャ**して貯まり＝開始を早める。
   - blob は eviction/prune/無効化/teardown で `revokeObjectURL`。`beforeunload`/`pagehide` の cleanup で全解放。
   - ✅ **永続化(IndexedDB)**: 新フレームを `services/animFrameStore.js` で番組IDキーに保存し、**リロード/番組移動後**にそのカードへ触れた時に復元→即アニメ（サイドバーの番組はページ間で同じなので有効）。TTL `animatedThumbnailPersistTtlMs`(30分, `updatedAt`=最後に異なるフレームが出た時刻 基準)超過は復元せず、起動時に `cleanupFrames`(上限 `animatedThumbnailPersistMaxEntries`=300)で掃除。※静止しがちな番組が誤って掃除されないよう長め。IndexedDB不可環境ではメモリのみで動作継続。
 - **β版・設定でON/OFF（既定OFF）**。`main.js` setup で `setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on')`、`onChanged`で反映。ホバー中のみ動作。OFF時は一切動作せず（リスナ/タイマー/fetchなし）＝初回負荷ゼロ。UIは「動くサムネ<β版>」＋ヘルプ。
-- ⚠️ 既存サムネ更新とは別に**可視カードを20秒毎に再取得**する（実質二重リクエスト）。非ホバー・サイドバー閉/タブ非表示時はキャプチャしない。
+- ✅ **二重取得は解消済み（給餌方式）**: 最新サムネは①のみが取得し②へ給餌。②が自前でネットに出すのは**ホバー即時のみ**。①の `crossOrigin` が失敗する環境では①が**平文で表示だけ確保**し（表示は無傷）②へは渡さない（アニメのみ休止）＝コア表示は無リスク。サイドバー閉/タブ非表示/読み込み中は給餌もスキップ（`ingest` 側に同ガード）。
+- 🔎 **一本化の記録（2026-07-13・実装済み）**: 検討時は A案（①を常時crossOrigin化＝全ユーザーにCORSリスク・非推奨）/ B案（②が唯一fetchで表示も駆動＝①のTTL/バックオフ再実装が必要）/ C案（キャッシュトークン共有＝crossOriginと平文でキャッシュキーが別のため無効）を比較。実測(`showAnimThumbStats`)で **crossOrigin取得の失敗率0%**（72回中0）を確認しリスク小と判断。最終的に**「①を取得役のまま残し、②ON時だけ①がcrossOriginで読んで②へ給餌／CORS失敗は平文フォールバック」**を採用（①の枯れたTTL/バックオフ/フル更新を再実装せず活かせるA/B折衷）。※ニコ生サムネの実更新は時間帯変動で最速20秒のため**取得間隔は延ばさない**（重複DLは想定内）→ [[nicolive-thumbnail-update-cadence]]。計測の見方は§13。
 - 制約: フレーム蓄積はニコ生のスクショ更新間隔（数十秒）に依存＝“ゆっくりした紙芝居”（N=5満タンには数分）。追加権限/Service Workerは不要。
 - 採用済み（**β版・既定OFF**。不具合や重さを感じたら設定でOFFにできる）。
 - ⚠️ **他拡張との共存**: 姉妹拡張「別窓くん」はサムネホバーで別窓ボタン(`.nicolive_link_button_wrap`, `z-index:2`)を出す。

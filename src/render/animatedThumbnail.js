@@ -17,13 +17,17 @@ import {
  * 直前フレームと違う時だけ blob として保持する（重複排除。ニコ生の更新間隔が時間帯で変わっても
  * 「同じ画像が複数コマ」にならない）。
  *
- * - 対象は「サイドバーに見えているカード」のみ（メモリ/通信の節約。アニメはホバー時しか使わないため）。
+ * - 対象はサイドバー内の全カード（可視/画面外を問わず）。画面外の番組でもフレームが貯まり、
+ *   どの番組でも均等にアニメが用意される（旧: 可視カードのみ→下の番組が貯まらない差が出ていた）。
  * - 各カードにつき直近 FRAME_COUNT 枚を blob URL のリングバッファで保持。
  * - ホバー中のカードだけ、貯まったフレームを一定間隔で巡回表示（オーバーレイimgをフェード）。
  * - 追加権限・Service Worker は不要（すべて content script 内で完結）。
  *
- * 注意: ON時は既存のサムネ更新（updateThumbnailsFromStorage）とは別に、可視カードの画像を
- * 20秒ごとに追加取得する（同一サムネへ実質二重リクエスト）。ONにした時だけの通信増。
+ * 取得方式（給餌方式・二重取得の解消）:
+ *   最新サムネの取得は①(通常サムネ更新 updateThumbnailsFromStorage)へ一本化。②ON時、①はプリロードを
+ *   crossOrigin で読み、成功画像を ingestAnimatedThumbnailFrame へ渡す（再取得なし）。②は自前の定期取得をせず、
+ *   ホバー即時取得（captureFrame）だけ自前で行う。これで「同一サムネを①②が別々に取る二重通信」をなくす。
+ *   ①の crossOrigin が失敗した環境では①が平文で表示だけ確保し（表示は無傷）、②へは渡さない（アニメのみ休止）。
  */
 
 // programId(数値文字列) -> { frames: [{ url, sig }], lastSig, lastCaptureAt }
@@ -39,6 +43,34 @@ let enabled = false
 let captureTimer = null
 // CORSが想定外にtaintした場合、無駄な取得を止めるためのフラグ
 let captureUnsupported = false
+
+// ---- 計測（デバッグ用・一本化の効き目確認のため） ----
+// window.showAnimThumbStats() でコンソール確認。給餌方式(①一本化)が効いているかを見る。
+//   - ingested = ①から再取得なしで受け取ったフレーム数（一本化で二重を消した分。これが主役になるのが正常）
+//   - fetches  = ②が自前でネットへ出した回数（ホバー即時が主。定期は0が正常）
+//   - taintStops = crossOrigin 給餌が汚染で失敗した回数（0が正常。出ると①は平文へ自動フォールバック）
+//   - dup破棄率  = 解析したが直前と同じで捨てた割合（ニコ生更新が最速20秒＝想定内。間隔短縮/延長の判断には使わない）
+// ON時のみ意味を持つ（OFF時は一切動作しない）。計測は enable のたびにリセット。
+const STATS_WINDOW_MS = 60000 // 「直近1分」の集計窓
+const stats = {
+    startedAt: 0,
+    fetches: 0,       // ②が自前でネットワークへ出した取得回数（captureFrame＝主にホバー）
+    periodic: 0,      // うち定期(通常は0＝①給餌に一本化済み)
+    hover: 0,         // うちホバー即時
+    ingested: 0,      // ①(通常サムネ更新)から受け取ったフレーム数（再取得なし＝二重解消分）
+    loaded: 0,        // 解析まで到達した画像数(storeFrameFromImage)
+    errors: 0,        // ②自前取得の読み込み失敗(onerror)
+    stored: 0,        // 新規フレームとして保存(署名が変化)
+    dupDiscarded: 0,  // 読めたが直前と同じで破棄(重複)
+    taintStops: 0,    // CORS汚染で取得停止（①は自動で平文へ戻る）
+    recent: [],       // 直近の②自前取得タイムスタンプ(req/分算出用)
+}
+function resetStats() {
+    stats.startedAt = Date.now()
+    stats.fetches = stats.periodic = stats.hover = stats.ingested = 0
+    stats.loaded = stats.errors = stats.stored = stats.dupDiscarded = stats.taintStops = 0
+    stats.recent = []
+}
 
 // ホバー状態（カーソル下のカードと、アニメ再生状態を分離）
 let hoverCard = null   // カーソル下のカード
@@ -133,7 +165,12 @@ function computeSignature(img) {
         }
         return lum
     } catch (_e) {
-        // CORSがtaintした場合（本来CORS OK確認済みなので通常は起きない）→ 以降の取得を止める
+        // CORSがtaintした場合（本来CORS OK確認済みなので通常は起きない）→ 以降の取得を止める。
+        // 給餌方式では①がcrossOrigin失敗をonerrorで検知して平文にフォールバックするため通常ここには来ないが、
+        // 万一到達したら1回だけ警告（コンソールのコンテキスト選択に関係なく top にも表示される）。
+        if (!captureUnsupported) {
+            console.warn('⚠️ 動くサムネ: CORS汚染で解析不可 → 以降は①が平文取得へ自動フォールバック（表示は維持）')
+        }
         captureUnsupported = true
         return null
     }
@@ -153,11 +190,60 @@ function getScreenshotUrl(info) {
     return resolveLiveThumbnailBaseUrl(info)
 }
 
-// ---- 1カード分のフレーム取得（重複排除して保持） ----
-function captureFrame(id, url) {
+// ---- 読み込み済み画像をフレーム化（重複排除して保持） ----
+// 自前取得(captureFrame)と①からの給餌(ingestAnimatedThumbnailFrame)の共通後半。
+// b は呼び出し側が用意したバッファ（給餌時は必ず存在、自前取得時は取得中の解放を考慮済み）。
+function storeFrameFromImage(id, img, b) {
+    stats.loaded++
+    const sig = computeSignature(img)
+    if (!sig) { if (captureUnsupported) stats.taintStops++; return }
+    if (!signatureDiffers(sig, b.lastSig)) { stats.dupDiscarded++; return } // 重複 → 破棄
+
+    // toBlobは非同期のため、キャプチャcanvasは共有せず都度生成する（競合防止）。
+    // 最大幅 MAX_FRAME_W まで縮小して描画・エンコード負荷とサイズを抑える。
+    const nw = img.naturalWidth || 320
+    const nh = img.naturalHeight || 180
+    const scale = Math.min(1, MAX_FRAME_W / nw)
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, Math.round(nw * scale))
+    c.height = Math.max(1, Math.round(nh * scale))
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+    c.toBlob(async (blob) => {
+        if (!blob || !enabled) return
+        // 追加の前に、IndexedDBの保存フレームを取り込む（上書き・欠落防止）
+        await ensureHydrated(id)
+        const b2 = buffers.get(id)
+        if (!b2 || !enabled) return
+        // 復元後の最新フレームとの重複を再チェック
+        if (!signatureDiffers(sig, b2.lastSig)) return
+        const objUrl = URL.createObjectURL(blob)
+        b2.frames.push({ url: objUrl, sig, blob })
+        b2.lastSig = sig
+        stats.stored++
+        while (b2.frames.length > FRAME_COUNT) {
+            const old = b2.frames.shift()
+            // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延
+            if (animCard && animCard.id === id) pendingRevokes.add(old.url)
+            else URL.revokeObjectURL(old.url)
+        }
+        persistBuffer(id) // IndexedDBへ保存（fire-and-forget）
+        // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
+        tryStartAnim()
+    }, 'image/jpeg', 0.8)
+}
+
+// ---- 1カード分を②が自前取得（ホバー即時用。定期取得は①給餌へ一本化済み） ----
+// source: 'hover'(ホバー即時) / 'periodic'(通常は使わない)。計測の内訳用。
+function captureFrame(id, url, source) {
     // バッファを用意し、取得開始時刻を記録（ホバー即キャプチャのスロットル用）
     const buf = getOrCreateBuffer(id)
     buf.lastCaptureAt = Date.now()
+
+    // 計測: 実際にネットワークへ出す取得を記録
+    stats.fetches++
+    if (source === 'hover') stats.hover++
+    else stats.periodic++
+    stats.recent.push(Date.now())
 
     const img = new Image()
     img.crossOrigin = 'anonymous'
@@ -165,76 +251,41 @@ function captureFrame(id, url) {
         if (!enabled) return
         const b = buffers.get(id)
         if (!b) return // 取得中に解放された（リストから消えた）
-        const sig = computeSignature(img)
-        if (!sig) return
-        if (!signatureDiffers(sig, b.lastSig)) return // 重複 → 破棄
-
-        // toBlobは非同期のため、キャプチャcanvasは共有せず都度生成する（競合防止）。
-        // 最大幅 MAX_FRAME_W まで縮小して描画・エンコード負荷とサイズを抑える。
-        const nw = img.naturalWidth || 320
-        const nh = img.naturalHeight || 180
-        const scale = Math.min(1, MAX_FRAME_W / nw)
-        const c = document.createElement('canvas')
-        c.width = Math.max(1, Math.round(nw * scale))
-        c.height = Math.max(1, Math.round(nh * scale))
-        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
-        c.toBlob(async (blob) => {
-            if (!blob || !enabled) return
-            // 追加の前に、IndexedDBの保存フレームを取り込む（上書き・欠落防止）
-            await ensureHydrated(id)
-            const b2 = buffers.get(id)
-            if (!b2 || !enabled) return
-            // 復元後の最新フレームとの重複を再チェック
-            if (!signatureDiffers(sig, b2.lastSig)) return
-            const objUrl = URL.createObjectURL(blob)
-            b2.frames.push({ url: objUrl, sig, blob })
-            b2.lastSig = sig
-            while (b2.frames.length > FRAME_COUNT) {
-                const old = b2.frames.shift()
-                // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延
-                if (animCard && animCard.id === id) pendingRevokes.add(old.url)
-                else URL.revokeObjectURL(old.url)
-            }
-            persistBuffer(id) // IndexedDBへ保存（fire-and-forget）
-            // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
-            tryStartAnim()
-        }, 'image/jpeg', 0.8)
+        storeFrameFromImage(id, img, b)
     }
-    img.onerror = () => { /* CORS/読込失敗時は静かにスキップ（ベースサムネには影響しない） */ }
+    img.onerror = () => { stats.errors++ /* CORS/読込失敗時は静かにスキップ（ベースサムネには影響しない） */ }
     img.src = url + (url.includes('?') ? '&' : '?') + 'cache=' + Date.now()
 }
 
-// ---- カードがサイドバー内で見えているか ----
-function isCardVisible(card) {
-    const r = card.getBoundingClientRect()
-    let top = 0
-    let bottom = window.innerHeight
-    const sb = document.getElementById('sidebar')
-    if (sb) {
-        const sr = sb.getBoundingClientRect()
-        top = Math.max(top, sr.top)
-        bottom = Math.min(bottom, sr.bottom)
-    }
-    return r.bottom > top && r.top < bottom && r.right > 0 && r.left < window.innerWidth
+// ---- ①(通常サムネ更新)が crossOrigin で読み込んだ画像を受け取り、再取得せずフレーム化する ----
+// これにより「最新サムネを①②が別々に取得する二重通信」をなくす（給餌方式）。
+// ①は各カードのプリロード成功時に呼ぶ。ここでは自前取得しない（stats.fetchesは増えない）。
+export function ingestAnimatedThumbnailFrame(id, img) {
+    // 旧・自前キャプチャと同じガード（初回ロード/重い更新中・タブ非表示中は解析を控え、動画プレーヤーとの競合を避ける）
+    if (!enabled || captureUnsupported || document.hidden || isSidebarLoading() || !id || !img) return
+    stats.ingested++
+    const b = getOrCreateBuffer(id) // ①は現在DOMにある番組のみ渡すのでバッファを用意してよい
+    storeFrameFromImage(id, img, b)
 }
 
-// ---- 可視カードのフレームを取得＋不要バッファのprune ----
-function captureVisibleFrames() {
-    // 読み込み中（初回ロード等）は負荷/通信競合を避けてスキップ
-    if (!enabled || captureUnsupported || document.hidden || isSidebarLoading()) return
+// ①が「crossOriginで読んで②へ給餌するか」を判断するためのフラグ。
+// taint(CORS汚染)後は false に戻し、①を平文取得へ自動フォールバックさせる。
+export function isAnimatedThumbnailEnabled() {
+    return enabled && !captureUnsupported
+}
+
+// ---- 定期メンテナンス: リストから消えた番組のバッファ解放（prune）----
+// フレーム取得は①(通常サムネ更新)の給餌に一本化したため、ここでは自前取得しない
+// （画面外含む全カードのフレームは①のプリロード成功時に ingestAnimatedThumbnailFrame で貯まる）。
+// 役割は、外れた番組の blob を解放してメモリを保つことのみ（20秒周期）。
+function pruneAbsentBuffers() {
+    if (!enabled) return
     const container = getContainer()
     if (!container) return
 
-    const infos = getProgramInfosFromStorage()
-    const infoMap = new Map((infos || []).map((i) => [i.id, i]))
     const presentIds = new Set()
-
     container.querySelectorAll('.program_container').forEach((card) => {
-        if (!card.id) return
-        presentIds.add(card.id)
-        if (!isCardVisible(card)) return
-        const url = getScreenshotUrl(infoMap.get('lv' + card.id))
-        if (url) captureFrame(card.id, url)
+        if (card.id) presentIds.add(card.id)
     })
 
     // リストから消えた番組のバッファを解放
@@ -346,7 +397,7 @@ function captureHoveredCard(card) {
     const infos = getProgramInfosFromStorage()
     const info = (infos || []).find((i) => i.id === 'lv' + card.id)
     const url = getScreenshotUrl(info)
-    if (url) captureFrame(card.id, url)
+    if (url) captureFrame(card.id, url, 'hover')
 }
 
 function setHoverCard(card) {
@@ -377,6 +428,34 @@ function onMouseOut(e) {
     if (!to || !container.contains(to)) setHoverCard(null)
 }
 
+// ---- 統計表示（コンソールから手動確認: window.showAnimThumbStats()） ----
+function showAnimThumbStats() {
+    const now = Date.now()
+    const elapsed = stats.startedAt ? (now - stats.startedAt) / 1000 : 0
+    const mins = elapsed / 60
+    stats.recent = stats.recent.filter((t) => now - t < STATS_WINDOW_MS)
+    const ingPerMin = mins > 0 ? stats.ingested / mins : 0
+    const selfPerMin = mins > 0 ? stats.fetches / mins : 0
+    const dupRate = stats.loaded ? (stats.dupDiscarded / stats.loaded) * 100 : 0
+    const container = getContainer()
+    const cards = container ? container.querySelectorAll('.program_container').length : 0
+    console.log('=== 動くサムネ 取得統計（②・①給餌方式） ===')
+    console.log(`状態: ${enabled ? 'ON' : 'OFF（最後の計測値）'} / 番組カード数: ${cards} / バッファ保持: ${buffers.size}`)
+    console.log(`経過: ${elapsed.toFixed(0)}秒 (${mins.toFixed(1)}分)`)
+    console.log(`①給餌(通常更新から/再取得なし): ${stats.ingested}回  平均: ${ingPerMin.toFixed(1)}回/分`)
+    console.log(`②自前取得(ネット/主にホバー): ${stats.fetches}回  = 定期${stats.periodic} + ホバー${stats.hover}  平均: ${selfPerMin.toFixed(1)}回/分（直近1分${stats.recent.length}）`)
+    console.log(`フレーム化: 解析${stats.loaded}  新規保存${stats.stored}  重複破棄${stats.dupDiscarded}（約${dupRate.toFixed(0)}%）`)
+    console.log(`②自前取得の失敗(onerror): ${stats.errors}回`)
+    if (stats.taintStops) console.warn(`⚠️ CORS汚染(tainted): ${stats.taintStops}回 → ①は自動で平文取得へフォールバック（表示は維持）`)
+    console.log('— 一本化の効き目 —')
+    console.log('・「①給餌」が主で「②自前取得」がホバー分だけなら、最新サムネの二重取得は解消できている。')
+    console.log('・「CORS汚染」が0なら crossOrigin 給餌は安定。出た場合のみ①が平文へ自動フォールバックし表示を守る。')
+    return { ...stats }
+}
+// モジュール読込時に無条件で公開（showApiStatsと同様）。ON前でも呼べば「まだ計測なし」を返す。
+// ※content scriptのisolated worldに定義される。コンソールは拡張の実行コンテキストを選ぶこと。
+if (typeof window !== 'undefined') window.showAnimThumbStats = showAnimThumbStats
+
 // ---- 公開API ----
 export function setAnimatedThumbnailEnabled(on) {
     const next = !!on
@@ -386,14 +465,15 @@ export function setAnimatedThumbnailEnabled(on) {
     const container = getContainer()
     if (enabled) {
         captureUnsupported = false
+        resetStats() // 計測をリセット（enableごと）
         // 起動時に期限切れ/上限超過の保存フレームを掃除（fire-and-forget）
         cleanupFrames(PERSIST_TTL_MS, PERSIST_MAX_ENTRIES)
         if (container) {
             container.addEventListener('mouseover', onMouseOver)
             container.addEventListener('mouseout', onMouseOut)
         }
-        captureVisibleFrames()
-        captureTimer = setInterval(captureVisibleFrames, CAPTURE_INTERVAL_MS)
+        pruneAbsentBuffers()
+        captureTimer = setInterval(pruneAbsentBuffers, CAPTURE_INTERVAL_MS)
     } else {
         if (captureTimer) {
             clearInterval(captureTimer)

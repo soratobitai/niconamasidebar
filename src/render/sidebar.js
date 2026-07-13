@@ -182,6 +182,13 @@ function handleThumbnailError() {
     }
 }
 
+// ---- 動くサムネ(②)への給餌フック ----
+// ②ON時、①(この通常サムネ更新)のプリロードを crossOrigin で読み、読めた画像を②へ渡して
+// 「最新サムネを①②が別々に取得する二重通信」をなくす。main.js が setAnimThumbnailFeed で注入。
+// feed = { isEnabled(): boolean, ingest(cardId, HTMLImageElement): void }
+let animThumbFeed = null
+export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
+
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
     const onComplete = options.onComplete || null
@@ -261,27 +268,44 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
             pendingImages++
-            const pre = new Image()
             const urlForAttempt = key.startsWith('u|') ? `${nextUrl}?cache=${now}` : nextUrl
-            pre.onload = () => {
-                pendingImages--
+            // 成功時の共通処理（表示差替え＋成功記録）。
+            // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
+            const applySuccess = () => {
                 if (img.src !== urlForAttempt) img.src = urlForAttempt
                 img.dataset.key = key
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
-                // 画像読み込み完了時はcheckComplete()を呼ばない
-                // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続
             }
-            pre.onerror = () => {
-                pendingImages--
+            // 失敗時のバックオフ記録（表示は handleThumbnailError／現状維持に任せ、次周期まで維持）。
+            const applyBackoff = () => {
                 const errors = Number(img.dataset.errors || 0) + 1
                 const delay = Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1))
                 img.dataset.errors = String(errors)
                 img.dataset.nextTryAt = String(Date.now() + delay)
-                // 表示は handleThumbnailError に任せる（既にerrorハンドラが付与済み）
-                // エラーを明示的に発火させず、次周期まで現状を維持
-                // 画像読み込みエラー時もcheckComplete()を呼ばない
+            }
+            // 動くサムネON時は crossOrigin で読み、読めた画像を②へ給餌（②の自前取得＝二重通信を止める）。
+            // CORSで読めない環境でも表示は守るため、失敗時は平文で読み直して表示だけ確保する。
+            const feeding = !!(animThumbFeed && animThumbFeed.isEnabled())
+            const pre = new Image()
+            if (feeding) pre.crossOrigin = 'anonymous'
+            pre.onload = () => {
+                pendingImages--
+                applySuccess()
+                if (feeding) animThumbFeed.ingest(card.id, pre) // 再取得なしでフレーム化（②側でON/汚染を再判定）
+            }
+            pre.onerror = () => {
+                if (feeding) {
+                    // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
+                    const plain = new Image()
+                    plain.onload = () => { pendingImages--; applySuccess() }
+                    plain.onerror = () => { pendingImages--; applyBackoff() }
+                    plain.src = urlForAttempt
+                    return
+                }
+                pendingImages--
+                applyBackoff()
             }
             pre.src = urlForAttempt
         }

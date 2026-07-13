@@ -27,7 +27,7 @@ export const visibilityFullRefreshMs = 60000; // 60秒
 
 // 動くサムネ（ホバー中のみ）関連
 export const animatedThumbnailFrameCount = 5;            // 保持する直近フレーム数（リングバッファ）
-export const animatedThumbnailCaptureIntervalMs = 20000; // フレーム取得（重複排除）間隔（可視カードのみ）
+export const animatedThumbnailCaptureIntervalMs = 20000; // 定期メンテ(消えた番組のバッファ解放)周期。フレーム取得は①給餌へ一本化済み
 export const animatedThumbnailPlayIntervalMs = 700;      // ホバー時の1コマ表示時間（ミリ秒）
 // 動くサムネの永続化（IndexedDB）: リロード/番組移動をまたいでフレームを復元
 // TTLは「最後に“異なる”フレームが出た時刻(updatedAt)」からの経過で判定。静止しがちな番組は

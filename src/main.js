@@ -3,7 +3,7 @@ import './styles/main.css'
 import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs, visibilityFullRefreshMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, setSidebarTheme } from './services/storage.js'
-import { buildSidebarShell } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
@@ -14,7 +14,7 @@ import { UpdateManager } from './managers/UpdateManager.js'
 import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
 import { initApiStats } from './debug/apiStats.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
-import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails } from './render/animatedThumbnail.js'
+import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
@@ -341,6 +341,10 @@ const setup = async () => {
     if (options.autoNextProgram === 'on') {
         startLiveStatusWatcher();
     }
+
+    // 動くサムネ(②)を①(通常サムネ更新)の取得へ相乗りさせ、最新サムネの二重取得をなくす（給餌方式）。
+    // ①ONのプリロード成功画像を②へ渡す経路をここで配線。②OFF時は isEnabled()=false で①は通常動作のまま。
+    setAnimThumbnailFeed({ isEnabled: isAnimatedThumbnailEnabled, ingest: ingestAnimatedThumbnailFrame });
 
     // 動くサムネ（β版・設定でON/OFF、既定OFF。ホバー中のみ動作）
     setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
