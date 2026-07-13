@@ -76,8 +76,13 @@ function resetStats() {
 let hoverCard = null   // カーソル下のカード
 let animCard = null    // オーバーレイ再生中のカード
 let animTimer = null
-let animIndex = 0
-let animFront = 0      // クロスフェードの表レイヤー(0/1)
+let animIndex = 0      // 現在表示中のフレーム番号（リングバッファ内）
+let animGen = 0        // 再生世代。stop/再開のたび++し、遅延中の decode/commit コールバックを無効化する
+// クロスフェードのフェード時間。CSS .anim_thumb_layer の transition: opacity 0.4s と一致させること。
+const FADE_MS = 400
+// フェード完了後、次コマへ進むまでの静止時間。1コマの周期 ≈ FADE_MS + HOLD_MS ≈ PLAY_INTERVAL_MS。
+// setInterval ではなく「commit 後に次を予約」する自己連鎖にし、decode が遅い時もサイクルが重ならないようにする。
+const HOLD_MS = Math.max(0, PLAY_INTERVAL_MS - FADE_MS)
 
 // 署名（重複排除）用の使い回しcanvas
 const SIG_SIZE = 16
@@ -222,9 +227,14 @@ function storeFrameFromImage(id, img, b) {
         stats.stored++
         while (b2.frames.length > FRAME_COUNT) {
             const old = b2.frames.shift()
-            // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延
-            if (animCard && animCard.id === id) pendingRevokes.add(old.url)
-            else URL.revokeObjectURL(old.url)
+            // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延し、
+            // shift で全体が前へ詰まる分 animIndex も1つ戻して再生位置のズレ（コマ飛び）を防ぐ
+            if (animCard && animCard.id === id) {
+                pendingRevokes.add(old.url)
+                if (animIndex > 0) animIndex--
+            } else {
+                URL.revokeObjectURL(old.url)
+            }
         }
         persistBuffer(id) // IndexedDBへ保存（fire-and-forget）
         // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
@@ -330,6 +340,12 @@ function getOverlay(card, create) {
 }
 
 // ホバー中カードが条件を満たせばアニメ開始（冪等：既に再生中/枚数不足なら何もしない）
+// クロスフェード方式（別カットの一瞬混入を防ぐ）:
+//   - layers[0]=base を「常に不透明で現在のコマ」を表示する下地に固定 → フェード中も合計不透明度が
+//     100%を保ち、下の実サムネ（最新カット）が透けて混ざらない。
+//   - layers[1]=fader（DOM後ろ＝base の上に描画）に次コマを載せ、decode 完了を待ってから 0→1 で
+//     フェードイン → 古い絵の一瞬の露出を防ぐ。フェード後、base を次コマへ差し替えて fader を
+//     即座に隠す（下地が同じ絵なので不可視に切替）。
 function tryStartAnim() {
     if (!enabled || animTimer) return
     const card = hoverCard
@@ -342,33 +358,58 @@ function tryStartAnim() {
     const layers = overlay.querySelectorAll('.anim_thumb_layer')
     if (layers.length < 2) return
 
+    const base = layers[0]   // 下地（常に不透明で現在のコマ）
+    const fader = layers[1]  // 上に重ねて次コマをフェードインする専用レイヤー
+
     animCard = card
     animIndex = 0
-    animFront = 0
+    const gen = ++animGen
 
-    // クロスフェード: 次フレームを裏レイヤーに載せてfade in、表レイヤーをfade out、表裏を入れ替え。
-    // 裏レイヤーは前サイクルでfade out済み(opacity0)なので、src差し替えは見えず自然に切り替わる。
+    // 初期コマは base に即載せる（ホバー直後の即時表示）。fader は隠しておく。
+    base.src = buf.frames[0].url
+    base.classList.add('show')
+    fader.classList.remove('show')
+
     const showNext = () => {
+        if (animGen !== gen) return
         const b = buffers.get(card.id)
         if (!enabled || hoverCard !== card || !b || b.frames.length < 2 || !document.contains(card)) {
             stopAnim()
             return
         }
-        const incoming = layers[1 - animFront]
-        const outgoing = layers[animFront]
-        incoming.src = b.frames[animIndex % b.frames.length].url
-        incoming.classList.add('show')
-        outgoing.classList.remove('show')
-        animFront = 1 - animFront
-        animIndex++
+        animIndex = (animIndex + 1) % b.frames.length
+        const nextUrl = b.frames[animIndex].url
+
+        const reveal = () => {
+            if (animGen !== gen) return
+            fader.classList.add('show') // base(不透明)の上に 0→1。下地が常に不透明＝実サムネは透けない
+            // フェード完了後、base を次コマへ確定し fader を即座に隠す（下地が同じ絵なので不可視）
+            setTimeout(() => {
+                if (animGen !== gen) return
+                base.src = nextUrl
+                // transition を一瞬無効化して fader を瞬時に opacity0 へ（下地と同じ絵なので見えない）。
+                // 次のフェードインで transition を効かせるため、reflow 後に戻す。
+                fader.style.transition = 'none'
+                fader.classList.remove('show')
+                void fader.offsetWidth
+                fader.style.transition = ''
+                // 次コマは commit 後に予約（decode 遅延時もサイクルが重ならない＝ちらつき防止）
+                animTimer = setTimeout(showNext, HOLD_MS)
+            }, FADE_MS)
+        }
+        // 次コマをデコード完了まで待ってから見せる（古い絵の一瞬の露出を防ぐ）
+        fader.src = nextUrl
+        if (fader.decode) fader.decode().then(reveal).catch(reveal)
+        else reveal()
     }
-    showNext()
-    animTimer = setInterval(showNext, PLAY_INTERVAL_MS)
+    // 自己連鎖で開始（frame0 を少し見せてから frame1 へ進む）
+    animTimer = setTimeout(showNext, HOLD_MS)
 }
 
 function stopAnim() {
+    animGen++ // 遅延中の decode/commit コールバックを無効化（再生停止・カード切替時）
     if (animTimer) {
-        clearInterval(animTimer)
+        clearTimeout(animTimer)
         animTimer = null
     }
     if (animCard) {
@@ -383,7 +424,6 @@ function stopAnim() {
     }
     animCard = null
     animIndex = 0
-    animFront = 0
     // 表示中だったために遅延していた revoke をここで実行
     flushPendingRevokes()
 }
