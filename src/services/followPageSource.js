@@ -32,15 +32,38 @@ function mapProviderType(pt) {
 }
 
 /**
+ * ライブスクショURLかどうか（配信者が設定した「固定画像」と区別する）。
+ * 実測パターン: ライブスクショは常に asset*.dlive.nicovideo.jp/.../screenshot/.../screenshot.jpg 形。
+ * 固定画像は listing-thumbnail.live.nicovideo.jp?image=...thumbnail_{ts}.png 形。
+ */
+function isLiveScreenshotUrl(u) {
+    if (typeof u !== 'string' || !u) return false
+    return u.includes('/screenshot/') || /(^|\/\/|\.)dlive\.nicovideo\.jp\//i.test(u)
+}
+
+/**
+ * 常にライブスクショを選ぶ（配信者設定の固定画像は使わない、というユーザー要件）。
+ * 実測: 固定画像設定時 listingThumbnail=固定・flippedListingThumbnail=ライブ／未設定時 listingThumbnail=ライブ・flipped無し。
+ * → 両候補からライブスクショ形を最優先。どちらもライブ形でなければ空（=固定画像は表示せず、
+ *   makeProgramElement/updateThumbnailsFromStorage 側でローディング/現状維持に委ねる）。
+ * @param {object} value
+ * @returns {string}
+ */
+function pickLiveThumbnail(value) {
+    const cands = [value && value.listingThumbnail, value && value.flippedListingThumbnail].filter(Boolean)
+    return cands.find(isLiveScreenshotUrl) || ''
+}
+
+/**
  * embedded-data の1番組(value) を、詳細API相当の内部 programInfo 形へ変換する。
  * @param {object} value - followedPrograms.onairProgramListState.domain.items[].value
  * @returns {object|null}
  */
 export function mapFollowItemToProgramInfo(value) {
     if (!value || !value.nicoliveProgramId) return null
-    // listingThumbnail が主。片方が listing-thumbnail プロキシ形(?付き)の番組は
-    // flippedListingThumbnail 側が素の asset2 URL(クエリ無し)のことがあるので候補にする。
-    const thumb = value.listingThumbnail || value.flippedListingThumbnail || ''
+    // 配信者が設定した固定画像は使わず、常にライブスクショを選ぶ（要件）。
+    // 固定画像設定時は listingThumbnail が固定画像・flippedListingThumbnail がライブになる。
+    const thumb = pickLiveThumbnail(value)
     const supplier = value.supplier || {}
     const icons = supplier.icons || {}
     const stats = value.statistics || {}
