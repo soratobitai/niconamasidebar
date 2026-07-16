@@ -10,6 +10,7 @@ export class AppState {
             todo: null,
             sidebar: null,
             autoNext: null,
+            newProgramScan: null, // 新番組先行検知スキャン（NewProgramWatcher）
         };
 
         // オブザーバー管理
@@ -83,7 +84,7 @@ export class AppState {
 
     /**
      * タイマーを設定
-     * @param {string} name - タイマー名 ('thumbnail' | 'todo' | 'sidebar' | 'autoNext')
+     * @param {string} name - タイマー名 ('thumbnail' | 'todo' | 'sidebar' | 'autoNext' | 'newProgramScan')
      * @param {number|object} timer - タイマーIDまたはタイマーオブジェクト
      */
     setTimer(name, timer) {

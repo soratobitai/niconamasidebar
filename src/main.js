@@ -11,6 +11,7 @@ import { ProgramInfoQueue } from './services/queue.js'
 import { LoadingManager } from './managers/LoadingManager.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { UpdateManager } from './managers/UpdateManager.js'
+import { NewProgramWatcher } from './managers/NewProgramWatcher.js'
 import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
 import { initApiStats } from './debug/apiStats.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
@@ -63,6 +64,7 @@ appState.elements = elems;
 let loadingManager = null;
 let autoNextManager = null;
 let updateManager = null;
+let newProgramWatcher = null;
 
 // localStorage初期化
 if (!localStorage.getItem('programInfos')) {
@@ -143,6 +145,7 @@ const setup = async () => {
     loadingManager = new LoadingManager(appState, loadingSessionTimeoutMs);
     autoNextManager = new AutoNextManager(appState);
     updateManager = new UpdateManager(appState, programInfoQueue, loadingManager, options, elems, loadingImageURL);
+    newProgramWatcher = new NewProgramWatcher(appState, updateManager, programInfoQueue);
 
     // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
     // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
@@ -394,6 +397,7 @@ const setup = async () => {
                     }
                 }
                 if (!appState.getTimer('sidebar')) startSidebarUpdate();
+                if (newProgramWatcher && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
 
                 // 即座に更新を実行。長時間非表示からの復帰は「しっかり更新」
                 // （更新ボタン相当: TTLを無視して全詳細を再取得し、整列＋サムネも最新化）。
@@ -405,6 +409,8 @@ const setup = async () => {
                 // ただし、完全に停止せず、間隔を延長する方式はqueue.jsで実装済み
                 // ここではサムネイル更新などの重い処理を停止
                 appState.clearTimer('thumbnail');
+                // 新番組先行検知も停止（scanタイマー＋全 per-id リトライタイマー）。非表示中は動かさない。
+                if (newProgramWatcher) newProgramWatcher.stop();
                 // sidebarとtodoはqueue.jsで間隔が延長されるため、停止しない
                 
                 // バックグラウンドに移行した時にセッションが完了していない場合、
@@ -437,6 +443,9 @@ const cleanup = () => {
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 
+    // 新番組先行検知の停止（scanタイマー＋全 per-id リトライタイマー）
+    if (newProgramWatcher) newProgramWatcher.stop();
+
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
     
@@ -461,6 +470,8 @@ function stopAllTimers() {
     appState.clearTimer('todo');
     appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');
+    // 新番組先行検知（scanタイマー＋全 per-id リトライタイマー）も停止
+    if (newProgramWatcher) newProgramWatcher.stop();
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
@@ -469,7 +480,8 @@ async function handleSidebarOpenStateChange(open) {
         // タイマーを先に開始（UIの反応を優先）
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
-        
+        if (newProgramWatcher) newProgramWatcher.start();
+
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
         // requestAnimationFrameで次のフレームに延期して、開閉アニメーションを優先
         // ただし、タブが非アクティブの場合、requestAnimationFrameが実行されない可能性があるため、

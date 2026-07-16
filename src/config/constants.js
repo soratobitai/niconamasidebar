@@ -7,6 +7,18 @@ export const maxSaveProgramInfos = 200;
 export const toDolistsInterval = 0.25; // 秒
 export const updateThumbnailInterval = 20; // 秒
 
+// 新番組先行検知（新しく始まった番組を、通常のリスト更新 updateProgramsInterval[既定120秒] を
+// 待たずに早く列へ載せる）。開いている×可視のときのみ稼働。
+export const newProgramScanIntervalMs = 30000; // 先行検知スキャン周期（notifybox軽量ポーリング）
+// ライブサムネURL未生成（放送開始直後は liveScreenshotThumbnailUrls がまだ空のことがある）対応。
+// その番組は fetchAndSave が「保存せず false」を返すため詳細が localStorage に載らない。
+// partial は保存しない（保存すると _fetchedAt が付き TTL[programInfoTtlMs] で再取得が止まる）まま、
+// 番組ごとにバックオフで「詳細だけ」再取得し、用意でき次第すぐ描画する。
+export const newProgramNotReadyBaseMs = 3000;      // 未生成リトライの初期遅延
+export const newProgramNotReadyMaxDelayMs = 30000; // バックオフ上限（×2で増加。3→6→12→24→30…）
+export const newProgramNotReadyMaxAttempts = 6;    // 諦め回数（超えたら通常120秒サイクルへ委譲）
+export const newProgramNotReadyMaxTotalMs = 90000; // 諦め総経過（firstSeenAtから。回数と併用）
+
 // サムネイル更新の安定化用
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）
 export const thumbnailRetryBaseMs = 2000; // エラー時の再試行ベース間隔

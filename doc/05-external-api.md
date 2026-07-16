@@ -44,10 +44,11 @@ URLは `src/config/constants.js` にリテラル定義。実装は `src/services
 | `onAirTime.beginAt` | 日時文字列 | `calculateActivePoint` の経過分算出 |
 
 - **保存スキップ条件**（`ProgramInfoQueue.fetchAndSave`）: `providerType==='user' && !liveScreenshotThumbnailUrls` は保存せず `false`。
+  - 放送開始直後はライブサムネURLがまだ空でこの条件に当たる。`NewProgramWatcher` はこの「保存されない＝未生成」を storage 観測で判定し、**partial を保存しないまま**バックオフで詳細だけ再取得する（`_fetchedAt` を刻まずTTL抑止を回避）。→ [06-features §5.5](./06-features.md)
 
 ### 1-3. 呼び出し制御
 - **詳細取得はキュー経由**（`ProgramInfoQueue`）: 1件ずつ、`processInterval=250ms`、**`maxRequestsPerSecond=4`（4件/秒）**、`maxSize=200`。フォアグラウンドは `requestIdleCallback` 併用、バックグラウンドは間隔10倍。
-- **リスト取得**は `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新。
+- **リスト取得**は `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新＋**新番組先行検知の30秒スキャン**（`NewProgramWatcher`、`getLivePrograms` 経由で計測・in-flight dedupe共有）。定常時の notifybox は合計約2.5回/分（しきい値10回/分に余裕）。
 - **監視**: `window.apiCallCounter`（`debug/apiStats.js`）。5分ごとに直近1分200回超で `console.warn`（上限4件/秒=240件/分）。`window.showApiStats()` で手動確認。
 
 ---

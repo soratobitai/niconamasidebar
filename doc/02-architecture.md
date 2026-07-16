@@ -140,18 +140,20 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 | `config` | `options` / `defaultOptions` | 設定（参照保持） |
 | `elements` | （動的） | DOM要素参照 |
 
-## 2.6 3つのタイマー系統（心臓部）
+## 2.6 4つのタイマー系統（心臓部）
 
-サイドバーが開いている間に走る、独立した3つの定期処理。`UpdateManager` が起動・停止する。
+サイドバーが開いている間に走る、独立した定期処理。`UpdateManager` と `NewProgramWatcher` が起動・停止する。
 
 | タイマー | 間隔 | 何をするか | 実装 |
 |---------|------|-----------|------|
 | **sidebar** | `updateProgramsInterval` 秒（既定120） | 通知ボックスAPIで放送中番組リストを再取得し、DOMを差分更新＋ソート | `UpdateManager.startSidebarUpdate` → `updateSidebar` |
 | **thumbnail** | `updateThumbnailInterval` 秒（既定20） | localStorageの番組詳細を元にライブサムネを更新（TTL/バックオフ付き） | `UpdateManager.startThumbnailUpdate` → `updateThumbnail` |
 | **todo（キュー）** | `processInterval`（0.25秒）＋レート制限4件/秒 | 一覧に載った番組の「詳細」を1件ずつ取得し localStorage に upsert | `ProgramInfoQueue.start` |
+| **newProgramScan** | `newProgramScanIntervalMs`（既定30秒） | 通知ボックスAPIを軽量ポーリングし、**新しく始まった番組**を120秒サイクルを待たず検知→カード化＋詳細取得。サムネURL未生成の番組は per-番組バックオフで再取得（下記） | `NewProgramWatcher.start` → `_runScan` |
 
-- これらは **`handleSidebarOpenStateChange(open)`** で一括起動/停止される。
-- **タブがバックグラウンド**になると `thumbnail` は停止、`todo` は間隔10倍で延命（`queue.js`）。
+- これらは **`handleSidebarOpenStateChange(open)`** で一括起動/停止される（`newProgramScan` も `start/stop`）。
+- **タブがバックグラウンド**になると `thumbnail` と `newProgramScan` は停止、`todo` は間隔10倍で延命（`queue.js`）。
+- **`newProgramScan`** はスキャン本体のほかに、サムネURL未生成番組ごとの再取得タイマー（`pending` の per-id `setTimeout`）を持つ。`stop()` で全て掃除する。詳細は [06-features §5.5](./06-features.md)。
 - 詳細な起動〜停止のシーケンスは [04-data-flow.md](./04-data-flow.md)。
 
 ## 2.7 データの2段構え

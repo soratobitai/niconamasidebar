@@ -24,6 +24,7 @@
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
 | ライト/ダーク | （設定画面**末尾**のトグル。ON=ダーク） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `#theme_toggle`） | onChanged→`applyTheme` |
 | サムネ間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数） | — | — |
+| 新番組先行検知（常時ON・実質固定） | （UI/保存なし） | — | `newProgramScanIntervalMs` 他（既定に無し） | 30秒（定数） | — | — |
 
 ---
 
@@ -53,6 +54,33 @@
 - タイマー: `UpdateManager.startSidebarUpdate`（`updateProgramsInterval` 秒ごと、**初回も120秒後**）。
 - 取得→描画: `updateSidebar()`（`fetchLivePrograms` → 差分再構築 → ソート → カウント更新、各番組をキュー add）。失敗時 `#api_error`。
 - 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢60/120/180）。変更時 `restartSidebarUpdate`。
+
+## 5.5 新番組先行検知（NewProgramWatcher）
+- 目的: 新しく始まった番組を、**通常の120秒リスト更新を待たず**に早く列へ載せ、ライブサムネを速く表示する。
+  検知遅延 最悪120秒→**最悪30秒（平均約15秒）**。
+- タイマー: `NewProgramWatcher.start` → `_runScan`（`newProgramScanIntervalMs`=**30秒**、自己再スケジュール）。
+  稼働は**サイドバーOPEN×タブ可視**時のみ（`handleSidebarOpenStateChange`/`handleVisibilityChange`/`cleanup` で start/stop）。
+- 検知: 各tickで **既存 `updateManager.getLivePrograms(100)`**（計測付き・in-flight dedupe共有）で notifybox を取得し、
+  **DOMに描画中の番組id**（`#liveProgramContainer` の子の `el.id`）と差分して未知idを抽出。`updateSidebar` と同じid規約
+  （`String(program.id)`）なので**重複カードを作らない**。新規idは既存 `updateSidebar({ preloadedList, silent })` に委譲して
+  カード生成＋詳細エンキュー（`silent`=更新ボタンのスピナー無し、`preloadedList`=取得済みリスト再利用で**二重fetch無し**）。
+- **サムネURL未生成対応（肝）**: ニコ生の詳細API(`liveInfoAPI`)は放送開始直後、`liveScreenshotThumbnailUrls` がまだ空のことがある。
+  その番組は `fetchAndSave` が「保存せず false」を返す（`queue.js`）ため localStorage に詳細が載らない。
+  - watcher は **partial を一切保存しない**（保存すると `_fetchedAt` が付き `programInfoTtlMs`(60秒) で `updateSidebar` の
+    再取得が止まる＝既知の落とし穴）まま、番組ごとに**バックオフ**で「詳細だけ」再取得する。
+    間隔 `3s→6s→12s→24s→30s上限`（`newProgramNotReadyBaseMs`/`…MaxDelayMs`）、**6回 または 90秒**で諦め
+    （`…MaxAttempts`/`…MaxTotalMs`）。全て `ProgramInfoQueue` 経由＝4件/秒レート制限・重複排除を通す。
+  - 未生成の判定は **storage 観測**（`getProgramInfos` に `lv{id}` が現れたか）で行う＝**queue.js は無改修**。
+    詳細が保存でき次第 `updateThumbnail(true)` で**次の20秒tickを待たず即描画**（近接解決は150msでまとめる）。
+  - 諦め後は placeholder カードが残るので次スキャンで**再検知ループにならず**、通常120秒サイクルへ委譲（CDNがURLを出した
+    時点で収束＝二重の安全網）。
+- キュー確実処理: サイドバーを閉じて開き直した直後は連続処理ループ(`ProgramInfoQueue.start`)が停止していることがあるため、
+  enqueue後に `_kickQueue()`（`processNow` を合流1回・`isLoading`中はsettleに委譲）で確実に drain する。ループ稼働中でも
+  `isProcessing`ガード＋dedupe＋レート制限で協調するので無害。
+- API負荷: notifybox は定常時 30秒スキャンで **+2回/分**（120秒サイクル0.5回/分と合わせ約2.5回/分＝異常検出しきい値10回/分に余裕）。
+  detail は新番組があるときだけ＋未生成リトライ（1番組最大6回/90秒）で、いずれも4件/秒枠内。閉/非表示時は0。
+- 対応設定: **UI項目なし・常時ON**（`newProgramScanIntervalMs` 等の定数のみ。負荷が有界＝OPEN×可視時のみ稼働のためトグル不要）。
+- 実装: `src/managers/NewProgramWatcher.js`。→ [02-architecture §2.6](./02-architecture.md) / [09-gotchas](./09-gotchas-and-techdebt.md)
 
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`。`active`=`active-point`降順（人気順）、`newest`=**notifybox API の並び順を保持**（新着順）。

@@ -279,16 +279,21 @@ export class UpdateManager {
 
     /**
      * サイドバーを更新
+     * @param {Object} [opts]
+     * @param {Array<any>|null} [opts.preloadedList=null] - 取得済みの放送中番組リスト（notifybox_content）。
+     *   渡すと getLivePrograms を再取得せずそのまま使う（新番組先行検知の二重fetch回避）。
+     * @param {boolean} [opts.silent=false] - true のときローディングセッション（更新ボタンのスピナー）を
+     *   開始しない。先行検知の裏側更新で使う（スピナーを光らせず・セッションもリークさせない）。
      */
-    async updateSidebar() {
-        // ローディングセッション開始
-        this.loadingManager.startSession();
-        
+    async updateSidebar({ preloadedList = null, silent = false } = {}) {
+        // ローディングセッション開始（サイレント時は開始しない＝スピナー無し）
+        if (!silent) this.loadingManager.startSession();
+
         try {
             // localStorageから番組情報を取得
             const programInfos = getProgramInfosFromStorage();
 
-            const livePrograms = await this.getLivePrograms(100);
+            const livePrograms = preloadedList || await this.getLivePrograms(100);
             if (!livePrograms) {
                 // 失敗時は既存の番組数を維持
                 const container = document.getElementById('liveProgramContainer');

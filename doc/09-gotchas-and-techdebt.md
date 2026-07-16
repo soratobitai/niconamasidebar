@@ -112,6 +112,12 @@
   - ③→ `UpdateManager.performManualUpdate` に `isPerformingManualUpdate` in-flight ガード。
 - 診断: `window.showApiStats()` で `getLivePrograms` 累計・直近1分の頻度を確認。放置で増える→①、開閉で+2→②、タブ往復で+1→復帰更新。
 
+## 🟢 T. 新番組先行検知（`NewProgramWatcher`）で踏んではいけない点
+- **partial を保存しない**: サムネURL未生成番組（`fetchAndSave` が保存せず false）を「タイトルだけでも見せたい」等で `upsertProgramInfo` すると `_fetchedAt` が付き、`updateSidebar` の TTL(60秒)判定で**再取得が止まる**（未生成のまま固定化）。watcher は詳細だけ再取得し、未生成判定は **storage 観測**（保存されたか）で行う。カードのタイトル/静的サムネは notifybox の暫定描画に任せる。
+- **監視登録とカード生成は同tick・同条件で**: `_startWatch`（バックオフ開始）だけ先に走らせ、カード生成（`updateSidebar`）を別条件にすると「監視したのにカードが無い→`_check`でcleanup→次スキャンで再検知」の軽い再検知ループになる。`isLoading` 中はこの tick の新番組処理を丸ごと見送る（両方やらない）ことで、**諦め後に placeholder カードが必ず残る＝再検知されない**不変条件を保つ。
+- **キューは再オープン後に止まっていることがある**: 閉じる時 `programInfoQueue.stop()`、再オープン（初回フラグOFF）は `performManualUpdate` のみで連続ループを再開しない。watcher は enqueue 後 `_kickQueue()`（`processNow` 合流1回・`isLoading`中はsettleに委譲）で確実に drain する。ループ稼働中でも `isProcessing`ガード＋dedupe＋4件/秒制限で協調するので無害。
+- **notifybox 回数**: 30秒スキャンで +2回/分。合計約2.5回/分で項目Sのしきい値(10回/分)には余裕があるが、スキャン間隔を縮める場合は項目Sの再燃に注意。→ [06-features §5.5](./06-features.md)
+
 ---
 
 ## 改修時チェックリスト
