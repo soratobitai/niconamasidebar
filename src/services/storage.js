@@ -137,4 +137,32 @@ export function upsertProgramInfo(programInfo) {
     setProgramInfos(list)
 }
 
+/**
+ * 複数の番組情報を1回の read/merge/write でまとめて upsert する（bulk）。
+ * フォロー中ページ・スクレイプ方式は毎サイクル全番組を書き戻すため、upsertProgramInfo を件数分
+ * 呼ぶと O(N^2) になる。これを1回の読み書きに畳む。id 一致は上書き、無ければ追加、末尾から上限トリム。
+ * 各レコードに _fetchedAt を付与する（＝スクレイプ経路は「毎回フルレコードで上書き」なので、
+ * サムネ未生成のまま _fetchedAt が固定化する gotcha-T は構造的に起きない。ただしキュー再取得を
+ * この経路で復活させないこと＝needsDetailQueue=false を不変条件とする）。
+ * @param {Array<object>} programInfos
+ */
+export function upsertProgramInfos(programInfos) {
+    if (!Array.isArray(programInfos) || programInfos.length === 0) return
+    const list = getProgramInfos()
+    const byId = new Map(list.map((info) => [info.id, info]))
+    const now = Date.now()
+    for (const info of programInfos) {
+        if (!info || !info.id) continue
+        // 既存idは一度消してから入れ直し、touchしたレコードを末尾（=最新）へ移す。
+        // これで上限トリム(先頭shift)は「今回更新されなかった古いレコード(=放送終了済み等)」から落ちる。
+        byId.delete(info.id)
+        byId.set(info.id, { ...info, _fetchedAt: now })
+    }
+    const merged = Array.from(byId.values())
+    while (merged.length > maxSaveProgramInfos) {
+        merged.shift()
+    }
+    setProgramInfos(merged)
+}
+
 

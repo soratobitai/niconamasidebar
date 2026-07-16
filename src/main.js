@@ -52,8 +52,15 @@ let defaultOptions = {
     sidebarTheme: 'light', // 'dark' | 'light'（既定ライト）
     autoNextProgram: 'off',
     animatedThumbnail: 'off', // β版・既定OFF
+    // 【実験】データソース: 'api'（従来のnotifybox+詳細API）/ 'followPage'（フォロー中ページ・スクレイプ）/
+    // 'auto'（followPage優先＋失敗時api自動降格、Stage5予定）。既定は 'api'（挙動不変）。
+    // UIは未提供。テストは window.__setDataSource('followPage') で chrome.storage.local 経由に切替。
+    dataSource: 'api',
 };
 let options = {};
+
+// followPage経路では20秒スクレイプループが新番組検知を兼ねるため NewProgramWatcher は不要（api経路のみ起動）。
+const useApiSource = () => (options.dataSource || 'api') === 'api';
 let elems = {};
 // タブが非表示になった時刻（復帰時に非表示だった時間を測り、しっかり更新するか判定する）
 let tabHiddenAt = null;
@@ -400,7 +407,7 @@ const setup = async () => {
                     }
                 }
                 if (!appState.getTimer('sidebar')) startSidebarUpdate();
-                if (newProgramWatcher && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
+                if (newProgramWatcher && useApiSource() && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
 
                 // 即座に更新を実行。長時間非表示からの復帰は「しっかり更新」
                 // （更新ボタン相当: TTLを無視して全詳細を再取得し、整列＋サムネも最新化）。
@@ -483,7 +490,7 @@ async function handleSidebarOpenStateChange(open) {
         // タイマーを先に開始（UIの反応を優先）
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
-        if (newProgramWatcher) newProgramWatcher.start();
+        if (newProgramWatcher && useApiSource()) newProgramWatcher.start();
 
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
         // requestAnimationFrameで次のフレームに延期して、開閉アニメーションを優先
@@ -599,6 +606,18 @@ chrome.storage.onChanged.addListener(function (changes) {
     if (changes.animatedThumbnail) {
         options.animatedThumbnail = changes.animatedThumbnail.newValue;
         setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
+    }
+    if (changes.dataSource) {
+        options.dataSource = changes.dataSource.newValue;
+        // ソース切替: followPage では20秒スクレイプループが新番組検知を兼ねるので watcher を止める。api では起動。
+        if (appState.sidebar.isOpen) {
+            if (useApiSource()) {
+                if (newProgramWatcher && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
+            } else if (newProgramWatcher) {
+                newProgramWatcher.stop();
+            }
+        }
+        needsRestart = true; // 間隔（scrapeIntervalMs⇔updateProgramsInterval）とソースを反映
     }
 
     // 更新間隔が変更された場合はタイマーを再起動

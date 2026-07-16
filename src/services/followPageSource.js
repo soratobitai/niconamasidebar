@@ -143,4 +143,12 @@ export async function debugTestFollowScrape() {
     })))
     return list
 }
-if (typeof window !== 'undefined') window.__testFollowScrape = debugTestFollowScrape
+if (typeof window !== 'undefined') {
+    window.__testFollowScrape = debugTestFollowScrape
+    // データソースを切替（'api' | 'followPage' | 'auto'）。chrome.storage.local 経由で onChanged が反映。
+    // 例: window.__setDataSource('followPage') / window.__setDataSource('api')
+    window.__setDataSource = (v) => {
+        try { chrome.storage.local.set({ dataSource: v }, () => console.log('dataSource =', v)) }
+        catch (e) { console.warn('[followScrape] dataSource切替失敗:', e) }
+    }
+}

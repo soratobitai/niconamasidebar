@@ -1,9 +1,10 @@
 import { fetchLivePrograms } from '../services/api.js';
-import { getProgramInfos as getProgramInfosFromStorage } from '../services/storage.js';
+import { fetchFollowedProgramsViaPage } from '../services/followPageSource.js';
+import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, programInfoTtlMs, watchPageBaseUrl, apiRateWindowMs } from '../config/constants.js';
+import { updateThumbnailInterval, programInfoTtlMs, watchPageBaseUrl, apiRateWindowMs, scrapeIntervalMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -78,21 +79,23 @@ export class UpdateManager {
             // settle中の processNow（最大数十秒）に割り込んで途中ソートやセッション上書きが
             // 起きるのを防ぐ（ローディングセッションは60秒でタイムアウトするため詰まらない）。
             if (this.appState.isLoading()) {
-                const retryTimer = setTimeout(updateSidebarInterval, Number(this.options.updateProgramsInterval) * 1000);
+                const retryTimer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
                 this.appState.setTimer('sidebar', retryTimer);
                 return;
             }
-            await this.updateSidebar();
-            // 定期更新時：最低1秒のローディング時間を確保して終了
-            if (this.loadingManager.getCurrentSessionId()) {
+            // followPage経路の定期スクレイプはスピナーを出さない（20秒周期の点滅回避）。
+            // api経路は従来どおりスピナー表示＋最低1秒のローディング確保。
+            const silent = this._resolveDataSource() === 'followPage';
+            await this.updateSidebar({ silent });
+            if (!silent && this.loadingManager.getCurrentSessionId()) {
                 await this.loadingManager.finishSessionWithMinDuration(1000);
             }
             // 完了後にタイマーをセット
-            const timer = setTimeout(updateSidebarInterval, Number(this.options.updateProgramsInterval) * 1000);
+            const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
             this.appState.setTimer('sidebar', timer);
         };
-        
-        const timer = setTimeout(updateSidebarInterval, Number(this.options.updateProgramsInterval) * 1000);
+
+        const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
         this.appState.setTimer('sidebar', timer);
     }
 
@@ -244,9 +247,48 @@ export class UpdateManager {
     }
 
     /**
-     * ライブ番組リストを取得
+     * 表示に使うデータソースを解決する（'api' | 'followPage'）。
+     * options.dataSource: 'api'（従来のnotifybox+詳細API）/ 'followPage'（フォロー中ページ・スクレイプ）/
+     * 'auto'（followPage優先・失敗時はapiへ自動降格。降格判定はStage5で実装予定）。
+     * @returns {'api'|'followPage'}
+     */
+    _resolveDataSource() {
+        const s = (this.options && this.options.dataSource) || 'api';
+        if (s === 'followPage') return 'followPage';
+        if (s === 'auto') return this._degradedToApi ? 'api' : 'followPage';
+        return 'api';
+    }
+
+    // 直近の getLivePrograms が使ったソース由来の能力フラグ（updateSidebar のゲートに使う）
+    get needsDetailQueue() { return this._activeListSource !== 'followPage'; }      // followPageは詳細同梱→キュー不要
+    get detailsArriveWithList() { return this._activeListSource === 'followPage'; } // 初回から人気順で描画可（settling不要）
+
+    /** 現在のソースに応じたサイドバー更新ループの間隔(ms) */
+    _currentUpdateIntervalMs() {
+        if (this._resolveDataSource() === 'followPage') return scrapeIntervalMs;
+        return Number(this.options.updateProgramsInterval) * 1000;
+    }
+
+    /**
+     * ライブ番組リストを取得（ソース抽象化の継ぎ目）。
+     * どちらのソースでも「notifybox互換のリスト（{id: bare番号, title} 配列, 新着順）」を返し、
+     * 以降の updateSidebar は共通処理でカードを組む。失敗時は false。
      */
     async getLivePrograms(rows = 100) {
+        const source = this._resolveDataSource();
+        this._activeListSource = source;
+        const result = source === 'followPage'
+            ? await this._getLiveProgramsViaScrape(rows)
+            : await this._getLiveProgramsViaApi(rows);
+        // ログイン/取得状態は最終結果で判定（scrape失敗でも #api_error を出す）
+        if (this.elems.apiErrorElement) {
+            this.elems.apiErrorElement.style.display = result ? 'none' : 'block';
+        }
+        return result;
+    }
+
+    /** 従来の notifybox 取得（api経路）。計測カウンタは従来どおりここで加算する。 */
+    async _getLiveProgramsViaApi(rows = 100) {
         this.apiCallCounter.getLivePrograms++;
         this.apiCallCounter.totalCalls++;
 
@@ -256,7 +298,7 @@ export class UpdateManager {
             this.apiCallCounter.recentTimestamps = [];
         }
         this.apiCallCounter.recentTimestamps.push(now);
-        
+
         // 異常検出：getLiveProgramsが1分以内に10回以上呼ばれた場合のみ警告
         if (!this.apiCallCounter.getLiveProgramsTimestamps) {
             this.apiCallCounter.getLiveProgramsTimestamps = [];
@@ -264,17 +306,25 @@ export class UpdateManager {
         this.apiCallCounter.getLiveProgramsTimestamps.push(now);
         // 1分以上前のタイムスタンプを削除
         this.apiCallCounter.getLiveProgramsTimestamps = this.apiCallCounter.getLiveProgramsTimestamps.filter(t => now - t < apiRateWindowMs);
-        
+
         if (this.apiCallCounter.getLiveProgramsTimestamps.length >= 10) {
             console.error(`🚨 [異常検出] getLivePrograms()が1分以内に${this.apiCallCounter.getLiveProgramsTimestamps.length}回呼ばれています！`);
         }
-        
-        const result = await fetchLivePrograms(rows);
-        
-        if (this.elems.apiErrorElement) {
-            this.elems.apiErrorElement.style.display = result ? 'none' : 'block';
-        }
-        return result;
+
+        return await fetchLivePrograms(rows);
+    }
+
+    /**
+     * 【実験】フォロー中ページをスクレイプして notifybox 互換のリストを返す。
+     * 全番組の詳細（視聴者数/コメント/ライブサムネ/配信者/providerType/会員限定/開始時刻）は
+     * ここで storage に一括upsertされるので、以降のキュー投入は不要（needsDetailQueue=false）。
+     */
+    async _getLiveProgramsViaScrape() {
+        const scraped = await fetchFollowedProgramsViaPage(); // 内部programInfo形の配列 or null
+        if (!scraped) return false; // 失敗（未ログイン/構造崩れ/通信）。Stage5で auto-fallback。
+        upsertProgramInfos(scraped); // 全件フルレコードで書き戻し（_fetchedAt付与）
+        // notifybox 形（bare id + title）を beginTime降順（=新着順）のまま返す
+        return scraped.map((p) => ({ id: String(p.id).replace(/^lv/, ''), title: p.title }));
     }
 
     /**
@@ -356,7 +406,9 @@ export class UpdateManager {
                 // 2回目以降の読み込みを高速化＆API負荷を軽減する。
                 // forceRefetch（更新ボタン）時はTTLを無視して全番組を再取得する。
                 const isFresh = data && data._fetchedAt && (Date.now() - data._fetchedAt) < programInfoTtlMs;
-                if (this.appState.update.forceRefetch || !isFresh) {
+                // followPage経路(needsDetailQueue=false)は詳細が同梱済みなのでキュー投入しない。
+                // forceRefetch(手動更新)でも投入しない＝再スクレイプで全詳細が更新されるため。
+                if (this.needsDetailQueue && (this.appState.update.forceRefetch || !isFresh)) {
                     this.programInfoQueue.add(program.id);
                 }
             });
@@ -374,8 +426,9 @@ export class UpdateManager {
             // 全番組がキャッシュ済みなら最初から人気順で描画し、開くたびの並べ替え（移動）を避ける。
             // ただし settleAllowNewest が false（更新ボタン）のときは新着順への退避はしない。
             if (this.appState.update.settling) {
+                // followPage経路(detailsArriveWithList)は初回から詳細が揃う→新着待避不要（settlingNeedsNewest=false）。
                 this.appState.update.settlingNeedsNewest =
-                    this.appState.update.settleAllowNewest && missingDetailCount > 0;
+                    !this.detailsArriveWithList && this.appState.update.settleAllowNewest && missingDetailCount > 0;
             }
 
             // ソート

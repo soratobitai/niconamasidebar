@@ -1,6 +1,19 @@
 import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl } from '../config/constants.js'
 
 /**
+ * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
+ * ライブサムネのプロキシURL（listing-thumbnail.live.nicovideo.jp?image=...&v=...）は既にクエリを持つため、
+ * 素朴に `?cache=` を付けると '?' が二重になって壊れる。フォロー中ページ・スクレイプ方式で顕在化する。
+ * @param {string} url
+ * @param {number|string} ts
+ * @returns {string}
+ */
+function appendCacheParam(url, ts) {
+    if (!url) return url
+    return url + (url.includes('?') ? '&' : '?') + 'cache=' + ts
+}
+
+/**
  * 番組詳細から「ライブサムネのベースURL」を providerType 別に選ぶ（共通ロジック）。
  * user: ライブスクショ(middle) → thumbnailUrl / channel: large1280x720 → thumbnailUrl。
  * ?cache 付与・変更検知キー・会員限定判定は呼び出し側の責務。
@@ -48,7 +61,7 @@ export function makeProgramElement(data, loadingImageURL) {
         if (data.providerType === 'user') {
             live_thumbnail_url = data.thumbnailUrl || ''
             if (data.liveScreenshotThumbnailUrls && data.liveScreenshotThumbnailUrls.middle) {
-                live_thumbnail_url = `${data.liveScreenshotThumbnailUrls.middle}?cache=${Date.now()}`
+                live_thumbnail_url = appendCacheParam(data.liveScreenshotThumbnailUrls.middle, Date.now())
             }
         }
         if (data.providerType === 'channel') {
@@ -268,7 +281,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
             pendingImages++
-            const urlForAttempt = key.startsWith('u|') ? `${nextUrl}?cache=${now}` : nextUrl
+            const urlForAttempt = key.startsWith('u|') ? appendCacheParam(nextUrl, now) : nextUrl
             // 成功時の共通処理（表示差替え＋成功記録）。
             // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
             const applySuccess = () => {

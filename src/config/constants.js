@@ -19,6 +19,13 @@ export const newProgramNotReadyMaxDelayMs = 30000; // バックオフ上限（×
 export const newProgramNotReadyMaxAttempts = 6;    // 諦め回数（超えたら通常120秒サイクルへ委譲）
 export const newProgramNotReadyMaxTotalMs = 90000; // 諦め総経過（firstSeenAtから。回数と併用）
 
+// 【実験】フォロー中ページ・スクレイプ方式の取得間隔（followPage時のサイドバー更新ループ周期）。
+// 1リクエスト(~160ms)で リスト＋視聴者数/コメント＋ライブサムネURL＋新番組検知 を全部兼ねるため、
+// この1本のループが notifybox(120s)＋NewProgramWatcher(30s)＋詳細API×N＋サムネ20秒ループ を置換する。
+// 20秒はニコ生サムネ更新の下限（[[nicolive-thumbnail-update-cadence]] / doc09）に一致。延ばさないこと
+// （リスト鮮度・視聴者数・サムネ・動くサムネ②のフレーム蓄積 の4役を同時に担う“動かせない”間隔）。
+export const scrapeIntervalMs = 20000;
+
 // サムネイル更新の安定化用
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）
 export const thumbnailRetryBaseMs = 2000; // エラー時の再試行ベース間隔
