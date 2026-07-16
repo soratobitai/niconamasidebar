@@ -16,6 +16,9 @@ import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
 import { initApiStats } from './debug/apiStats.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
+// 【実験】フォロー中ページ・スクレイプ方式のデータソース（並走アダプタ）。
+// 副作用インポート: window.__testFollowScrape() を登録し、実ページのConsoleから動作確認できるようにする。
+import './services/followPageSource.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
