@@ -83,12 +83,27 @@ export class UpdateManager {
                 this.appState.setTimer('sidebar', retryTimer);
                 return;
             }
-            // followPage経路の定期スクレイプはスピナーを出さない（20秒周期の点滅回避）。
-            // api経路は従来どおりスピナー表示＋最低1秒のローディング確保。
-            const silent = this._resolveDataSource() === 'followPage';
-            await this.updateSidebar({ silent });
-            if (!silent && this.loadingManager.getCurrentSessionId()) {
-                await this.loadingManager.finishSessionWithMinDuration(1000);
+            // followPage経路: 非表示中はスクレイプしない（背景での20秒取得を避ける。可視復帰時に
+            // performManualUpdate が拾う）。タイマーは生かして次回に回す。
+            const isFollowPage = this._resolveDataSource() === 'followPage';
+            if (isFollowPage && !this.appState.isVisible()) {
+                const idleTimer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
+                this.appState.setTimer('sidebar', idleTimer);
+                return;
+            }
+            try {
+                // followPage経路の定期スクレイプはスピナーを出さない（20秒周期の点滅回避）。
+                // api経路は従来どおりスピナー表示＋最低1秒のローディング確保。
+                await this.updateSidebar({ silent: isFollowPage });
+                if (!isFollowPage && this.loadingManager.getCurrentSessionId()) {
+                    await this.loadingManager.finishSessionWithMinDuration(1000);
+                }
+            } catch (error) {
+                console.error('[updateSidebarInterval] エラー:', error);
+            } finally {
+                // followPage経路はサムネ更新を独立タイマーで回さず、スクレイプ直後にここで反映（20秒ループ一本化）。
+                // 途中で throw してもサムネが更新されるよう finally に置く。api経路は thumbnail タイマーが担当。
+                if (isFollowPage) this.updateThumbnail();
             }
             // 完了後にタイマーをセット
             const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());

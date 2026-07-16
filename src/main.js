@@ -396,7 +396,8 @@ const setup = async () => {
                 const thorough = hiddenMs >= visibilityFullRefreshMs;
 
                 // フォアグラウンドに戻ったとき：タイマーを再開し、即座に更新
-                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+                // followPage経路は独立サムネタイマーを使わない（スクレイプ末尾で反映）→ api のみ起動。
+                if (!appState.getTimer('thumbnail') && useApiSource()) startThumbnailUpdate();
                 if (!appState.getTimer('todo')) {
                     startToDoListUpdate();
                     // キューがあれば即座に処理開始
@@ -488,7 +489,8 @@ function stopAllTimers() {
 async function handleSidebarOpenStateChange(open) {
     if (open) {
         // タイマーを先に開始（UIの反応を優先）
-        if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+        // followPage経路は独立サムネタイマーを使わず、スクレイプ末尾でサムネ反映するので api のみ起動。
+        if (!appState.getTimer('thumbnail') && useApiSource()) startThumbnailUpdate();
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
         if (newProgramWatcher && useApiSource()) newProgramWatcher.start();
 
@@ -609,12 +611,15 @@ chrome.storage.onChanged.addListener(function (changes) {
     }
     if (changes.dataSource) {
         options.dataSource = changes.dataSource.newValue;
-        // ソース切替: followPage では20秒スクレイプループが新番組検知を兼ねるので watcher を止める。api では起動。
+        // ソース切替。followPage では20秒スクレイプループが「新番組検知」も「サムネ更新」も兼ねるので、
+        // NewProgramWatcher と独立サムネタイマーを止める。api では両方起動する。
         if (appState.sidebar.isOpen) {
             if (useApiSource()) {
                 if (newProgramWatcher && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
-            } else if (newProgramWatcher) {
-                newProgramWatcher.stop();
+                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+            } else {
+                if (newProgramWatcher) newProgramWatcher.stop();
+                appState.clearTimer('thumbnail');
             }
             // 新ソースで即時に取り直して反映（サイドバータイマーは performManualUpdate 内で新間隔で再起動される）
             requestAnimationFrame(() => performManualUpdate());
