@@ -68,7 +68,13 @@ export class AutoNextManager {
         preview.appendChild(titleDiv);
         
         dialog.appendChild(preview);
-        
+
+        // ヒント（サムネクリックで即移動）
+        const hint = document.createElement('div');
+        hint.className = 'hint';
+        hint.textContent = 'サムネイルをクリックすると今すぐ移動します';
+        dialog.appendChild(hint);
+
         // アクション
         const actions = document.createElement('div');
         actions.className = 'actions';
@@ -86,7 +92,7 @@ export class AutoNextManager {
     /**
      * モーダルを表示
      */
-    showModal(seconds, preview, onCancel) {
+    showModal(seconds, preview, onCancel, onConfirm) {
         const modal = this.ensureModal();
         const countEl = modal.querySelector('#auto_next_count');
         const cancelBtn = modal.querySelector('#auto_next_cancel');
@@ -101,7 +107,24 @@ export class AutoNextManager {
             if (titleEl && preview && typeof preview.title === 'string') titleEl.textContent = preview.title;
             if (providerEl && preview && typeof preview.provider === 'string') providerEl.textContent = preview.provider;
         } catch (_e) {}
-        
+
+        // サムネイルクリックで即移動（カウントダウンを待たない）。
+        // モーダル(img/枠)は使い回すため addEventListener ではなく onclick で上書きし、ハンドラ重複を防ぐ。
+        try {
+            const thumbArea = modal.querySelector('.preview .thumb');
+            if (thumbArea) {
+                if (typeof onConfirm === 'function') {
+                    thumbArea.classList.add('is-clickable');
+                    thumbArea.title = 'クリックで今すぐこの番組へ移動';
+                    thumbArea.onclick = (e) => { e.preventDefault(); onConfirm(); };
+                } else {
+                    thumbArea.classList.remove('is-clickable');
+                    thumbArea.removeAttribute('title');
+                    thumbArea.onclick = null;
+                }
+            }
+        } catch (_e) {}
+
         modal.classList.add('show');
         
         const onCancelHandler = (e) => {
@@ -147,10 +170,19 @@ export class AutoNextManager {
         let remaining = 10;
         this.appState.autoNext.canceled = false;
         
+        // サムネクリックで即移動（カウントダウンを待たず nextHref へ）。タイマー停止→遷移。
+        const goNow = () => {
+            if (this.appState.autoNext.canceled) return;
+            this._clearAutoNextTimer();
+            this.appState.autoNext.scheduled = true;
+            this.hideModal();
+            try { location.assign(nextHref); } catch (_e) {}
+        };
+
         this.showModal(remaining, preview, () => {
             this._clearAutoNextTimer();
             this.appState.autoNext.scheduled = true;
-        });
+        }, goNow);
         
         const modal = this.ensureModal();
         const countEl = modal.querySelector('#auto_next_count');

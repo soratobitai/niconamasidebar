@@ -74,6 +74,7 @@
 
 ## 8. 番組自動移動（自動次番組）
 - 管理: `AutoNextManager`。終了検知 `observeProgramEnd`（MutationObserver）→ `updateSidebar` → 現在と異なる先頭番組を選定 → `scheduleNavigation`（モーダル＋10秒カウントダウン → `location.assign`）。キャンセル可。
+- ✅ **サムネクリックで即移動（2026-07-13）**: モーダルのプレビューサムネ枠(`.preview .thumb`)クリックでカウントダウンを待たず即 `location.assign(nextHref)`。`scheduleNavigation` が `showModal(..., onConfirm=goNow)` を渡し、`goNow` がタイマー停止→遷移。枠は使い回すため `onclick` 上書き（重複防止）。`.is-clickable` でカーソル/ホバー枠、`.hint` で「サムネイルをクリックすると今すぐ移動します」を表示。
 - 起動/停止: `setup()` で `on` なら開始、onChanged で on/off に応じて start/stop。
 - 対応設定: **`autoNextProgram`**（既定 `'off'`）。
 - ✅ 2026-07-11修正: 終了時の `updateSidebar` は `main.js` から注入され、**実際に最新リストを取得**してから次番組を選定する（旧: IIFEビルドで未解決だった）。→ [09-gotchas A](./09-gotchas-and-techdebt.md)
