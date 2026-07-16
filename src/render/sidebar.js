@@ -494,6 +494,17 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     </div>
                                 </div>
                                 <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        データ取得方式<span class="opt-beta-badge">実験</span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組情報の取得元。API=従来のニコ生API。ページ取得=フォロー中ページを1回取得して全詳細を得る実験方式（API激減）。自動=ページ取得を優先し失敗時はAPIへ。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="dataSourceApi" name="dataSource" value="api"><label for="dataSourceApi">API</label>
+                                        <input type="radio" id="dataSourceFollow" name="dataSource" value="followPage"><label for="dataSourceFollow">ページ取得</label>
+                                        <input type="radio" id="dataSourceAuto" name="dataSource" value="auto"><label for="dataSourceAuto">自動</label>
+                                    </div>
+                                </div>
+                                <div class="opt-section">
                                     <div class="opt-label">テーマ</div>
                                     <div class="theme_toggle_row">
                                         <span class="theme_toggle_label">ライト</span>

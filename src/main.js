@@ -616,8 +616,9 @@ chrome.storage.onChanged.addListener(function (changes) {
             } else if (newProgramWatcher) {
                 newProgramWatcher.stop();
             }
+            // 新ソースで即時に取り直して反映（サイドバータイマーは performManualUpdate 内で新間隔で再起動される）
+            requestAnimationFrame(() => performManualUpdate());
         }
-        needsRestart = true; // 間隔（scrapeIntervalMs⇔updateProgramsInterval）とソースを反映
     }
 
     // 更新間隔が変更された場合はタイマーを再起動
