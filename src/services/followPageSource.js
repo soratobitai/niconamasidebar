@@ -16,9 +16,10 @@ import { fetchProgramInfo } from './api.js'
  *
  * ページング: offset は「0始まりのページ番号」（offset=0 が先頭 limit 件、offset=1 が次の limit 件）。
  * total まで offset を進めて取り切る（放送中フォローが limit を超えても全件カバー）。安全上限あり。
- * サムネ: JSON APIは listingThumbnail 1枠のみで、配信者が固定画像を設定していると（＝放送直後で
- * 未生成のときも）ライブスクショが取れない。その番組だけ詳細API(fetchProgramInfo)で
- * liveScreenshotThumbnailUrls を補完する（全番組には叩かない＝旧方式の重さを避ける）。
+ * 選択補完(fillMissingDetails): フォローAPIだけでは埋まらない情報を、対象番組だけ詳細API
+ * (fetchProgramInfo)で補う（全番組には叩かない＝旧方式の重さを避ける）。
+ *  - user で固定画像設定/未生成によりライブサムネが空 → liveScreenshotThumbnailUrls を補完。
+ *  - channel/official はフォローAPIが配信者名/アイコン(programProvider)を持たない → contentOwner を補完。
  * 出力は内部 programInfo 形（従来の詳細APIと同じshape）に揃えてあり、makeProgramElement /
  * resolveLiveThumbnailBaseUrl / calculateActivePoint がそのまま読める。
  */
@@ -57,14 +58,19 @@ function isLiveScreenshotUrl(u) {
  */
 export function mapApiProgramToInfo(p) {
     if (!p || !p.id) return null
-    // listingThumbnail がライブスクショ形のときだけ採用（固定画像は空にして表示しない）
-    const thumb = isLiveScreenshotUrl(p.listingThumbnail) ? p.listingThumbnail : ''
+    const providerType = mapProviderType(p.providerType)
+    // user は配信者設定の固定画像を出さずライブスクショのみ採用。
+    // channel/official は listingThumbnail がそのイベントの正規サムネ（固定画像形でも）なのでそのまま使う。
+    const rawThumb = p.listingThumbnail || ''
+    const thumb = providerType === 'user'
+        ? (isLiveScreenshotUrl(rawThumb) ? rawThumb : '')
+        : rawThumb
     const provider = p.programProvider || {}
     const stats = p.statistics || {}
     return {
         id: String(p.id),                                    // "lv..."
         title: p.title || 'タイトル不明',
-        providerType: mapProviderType(p.providerType),
+        providerType,
         contentOwner: {
             id: provider.id != null ? String(provider.id) : '',
             name: provider.name || '',
@@ -104,26 +110,52 @@ async function fetchOnePage(offset) {
 }
 
 /**
- * フォローAPIがライブサムネを返さなかった番組（配信者が固定画像を設定／放送直後で未生成）だけ、
- * 詳細API(fetchProgramInfo)を叩いて liveScreenshotThumbnailUrls（ライブスクショ）を補完する。
- * 固定画像番組は listingThumbnail=固定画像だが、詳細APIには別枠でライブスクショが入っている。
- * 全番組には叩かない（空の少数だけ・上限あり）＝旧方式の「全番組×詳細API」の重さを避けたまま穴だけ埋める。
+ * フォローAPIだけでは埋まらない情報を、番組詳細API(fetchProgramInfo)で選択的に補完する。
+ *  - user でライブサムネが空（固定画像配信者／放送直後で未生成）→ liveScreenshotThumbnailUrls を補う。
+ *  - channel/official → フォローAPIは programProvider（配信者名/アイコン）を持たないので、詳細APIの
+ *    contentOwner で名前/アイコンを補う（イベントサムネが空なら large1280x720ThumbnailUrl も）。
+ * 全番組には叩かない（対象の少数だけ・上限あり）＝旧方式の「全番組×詳細API」の重さを避けて穴だけ埋める。
  * @param {Array<object>} programs - map済みの内部 programInfo 配列（破壊的に補完する）
  */
-async function fillMissingLiveThumbnails(programs) {
-    const missing = programs.filter((p) => p && !p.thumbnailUrl)
-    if (missing.length === 0) return
-    const targets = missing.slice(0, MAX_DETAIL_FALLBACK)
+async function fillMissingDetails(programs) {
+    const targets = programs.filter((p) => p && (
+        (p.providerType === 'user' && !p.thumbnailUrl) ||
+        (p.providerType === 'channel' && (!p.contentOwner || !p.contentOwner.name || !p.thumbnailUrl))
+    )).slice(0, MAX_DETAIL_FALLBACK)
+    if (targets.length === 0) return
     await Promise.all(targets.map(async (p) => {
         try {
             const detail = await fetchProgramInfo(String(p.id).replace(/^lv/, ''))
             if (!detail) return
-            const ss = detail.liveScreenshotThumbnailUrls
-            const cand = (ss && (ss.middle || ss.large || ss.small)) || detail.large1280x720ThumbnailUrl || ''
-            if (isLiveScreenshotUrl(cand)) {
-                p.liveScreenshotThumbnailUrls = { middle: cand }
-                p.large1280x720ThumbnailUrl = cand
-                p.thumbnailUrl = cand
+            // 配信者名/アイコン（公式/チャンネルはフォローAPIに無いので補完）
+            const co = detail.contentOwner
+            if (co && (!p.contentOwner || !p.contentOwner.name)) {
+                p.contentOwner = {
+                    id: co.id != null ? String(co.id) : ((p.contentOwner && p.contentOwner.id) || ''),
+                    name: co.name || ((p.contentOwner && p.contentOwner.name) || ''),
+                    icon: co.icon || ((p.contentOwner && p.contentOwner.icon) || ''),
+                }
+            }
+            // サムネ
+            if (!p.thumbnailUrl) {
+                if (p.providerType === 'user') {
+                    // user はライブスクショのみ（固定画像は出さない）
+                    const ss = detail.liveScreenshotThumbnailUrls
+                    const cand = (ss && (ss.middle || ss.large || ss.small)) || ''
+                    if (isLiveScreenshotUrl(cand)) {
+                        p.liveScreenshotThumbnailUrls = { middle: cand }
+                        p.large1280x720ThumbnailUrl = cand
+                        p.thumbnailUrl = cand
+                    }
+                } else {
+                    // channel/official はイベントサムネ（固定画像形でも可）を採用
+                    const cand = detail.large1280x720ThumbnailUrl
+                        || (detail.liveScreenshotThumbnailUrls && detail.liveScreenshotThumbnailUrls.middle) || ''
+                    if (cand) {
+                        p.large1280x720ThumbnailUrl = cand
+                        p.thumbnailUrl = cand
+                    }
+                }
             }
         } catch (_e) { /* 個別失敗は空のまま（次サイクルで再挑戦） */ }
     }))
@@ -150,8 +182,8 @@ export async function fetchFollowedProgramsViaPage() {
             if (all.length >= total) break   // total まで取り切った
         }
         const mapped = all.map(mapApiProgramToInfo).filter(Boolean)
-        // 固定画像配信者などライブサムネが空の番組だけ、詳細APIで補完
-        await fillMissingLiveThumbnails(mapped)
+        // フォローAPIで埋まらない情報（固定画像userのライブサムネ／公式・chの名前アイコン）を選択補完
+        await fillMissingDetails(mapped)
         return mapped
     } catch (error) {
         handleError(error, { fn: 'fetchFollowedProgramsViaPage' })
