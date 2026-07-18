@@ -273,14 +273,19 @@ export class UpdateManager {
             const programInfos = getProgramInfosFromStorage();
 
             const container = document.getElementById('liveProgramContainer');
-            const frag = document.createDocumentFragment();
+            if (!container) return;
+
+            // 現在DOMのカードを id で引けるように
             const existingMap = new Map();
-            if (container) {
-                Array.from(container.children).forEach((el) => {
-                    if (el && el.id) existingMap.set(el.id, el);
-                });
+            for (const el of container.children) {
+                if (el && el.id) existingMap.set(el.id, el);
             }
 
+            // Phase1: 既存カードは「その場で属性だけ更新」（DOMは動かさない）。新規カードは作成して保持。
+            //         リスト構造（追加/削除/並び替え）が要るかを判定する（差分更新）。
+            let structuralChange = false;
+            const orderedIds = [];         // livePrograms の並び順（API順）で有効な id
+            const newElements = new Map(); // id -> 新規作成した要素
             livePrograms.forEach((program, apiIndex) => {
                 if (!program || !program.id) return;
 
@@ -288,12 +293,12 @@ export class UpdateManager {
                 // （詳細がスクレイプに無い番組＝ページング超過やスクレイプ失敗時に不正データを踏んでも
                 //   サイドバー全体が空にならないようにする防御）
                 try {
-                    const data = programInfos.find((info) => info.id === `lv${program.id}`);
                     const id = String(program.id);
+                    const data = programInfos.find((info) => info.id === `lv${program.id}`);
                     const existing = existingMap.get(id);
 
                     if (existing) {
-                        // 軽い更新（属性・タイトル・リンク先）
+                        // その場更新（属性・タイトル・リンク先）。カードのDOMは移動しない。
                         existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
                         // 新着順は API順（notifybox は放送開始が新しい順で返す）を保つためのインデックス
                         existing.setAttribute('data-api-index', String(apiIndex));
@@ -301,15 +306,17 @@ export class UpdateManager {
                         if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
                         const linkEl = existing.querySelector('.program_thumbnail a');
                         if (linkEl) linkEl.href = data && data.id ? `${watchPageBaseUrl}${data.id}` : `${watchPageBaseUrl}lv${program.id}`;
-                        frag.appendChild(existing);
+                        orderedIds.push(id);
                     } else {
-                        // DOM要素を直接作成
+                        // DOM要素を直接作成（構造変更）
                         const element = data
                             ? makeProgramElement(data, this.loadingImageURL)
                             : makeProgramElement(program, this.loadingImageURL);
                         if (element) {
                             element.setAttribute('data-api-index', String(apiIndex));
-                            frag.appendChild(element);
+                            newElements.set(id, element);
+                            orderedIds.push(id);
+                            structuralChange = true;
                         }
                     }
                 } catch (e) {
@@ -317,30 +324,68 @@ export class UpdateManager {
                 }
             });
 
-            const liveProgramContainer = document.getElementById('liveProgramContainer');
-            if (!liveProgramContainer) {
-                return;
+            // 削除: 現在DOMにあって新リストに無い番組があれば構造変更
+            if (!structuralChange) {
+                const wanted = new Set(orderedIds);
+                for (const el of container.children) {
+                    if (el && el.id && !wanted.has(el.id)) { structuralChange = true; break; }
+                }
             }
 
-            // DOM更新
-            this.appState.update.isInserting = true;
-            liveProgramContainer.replaceChildren(frag);
+            // 追加/削除が無くても、その場更新で順位（active-point / API順）が入れ替わっていれば並べ替えが必要
+            if (!structuralChange && this._sortOrderChanged(container)) {
+                structuralChange = true;
+            }
 
-            // ソート（詳細が揃っているので最初から programsSort で確定できる）
-            this.sortProgramsInContainer(liveProgramContainer);
-
-            // 列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅(offsetWidth)を
-            // 使うと、開いた直後のリスト再描画がアニメ中に走った時に1列⇔多列がパタついてサムネが一瞬巨大化するため。
-            setProgramContainerWidth(this.elems, this.appState.sidebar.width);
+            if (structuralChange) {
+                // 構造が変わった時だけ組み替える：既存を再利用＋新規を API順に並べて置換し、ソート。
+                this.appState.update.isInserting = true;
+                const frag = document.createDocumentFragment();
+                for (const id of orderedIds) {
+                    const el = existingMap.get(id) || newElements.get(id);
+                    if (el) frag.appendChild(el);
+                }
+                container.replaceChildren(frag);
+                // ソート（詳細が揃っているので programsSort で確定できる）
+                this.sortProgramsInContainer(container);
+                // 列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅(offsetWidth)を
+                // 使うと、開いた直後のリスト再描画がアニメ中に走った時に1列⇔多列がパタついてサムネが一瞬巨大化するため。
+                setProgramContainerWidth(this.elems, this.appState.sidebar.width);
+                this.appState.update.isInserting = false;
+            }
+            // else: その場更新のみ（DOMの組み替え・並べ替えはしない＝差分だけ触る）
 
             // 番組数更新
             this.updateProgramCount(livePrograms.length);
-
-            this.appState.update.isInserting = false;
         } catch (error) {
             console.error('[updateSidebar] エラーが発生しました:', error);
             this.appState.update.isInserting = false;
         }
+    }
+
+    /**
+     * その場更新の後、現在のDOM順が programsSort で並べ替えた順序と食い違う（＝並べ替えが必要）かを、
+     * DOMを触らずに判定する。食い違っていなければ組み替え自体を省ける（差分更新の肝）。
+     * 比較器は sortPrograms（utils/sorting.js）と同一にする。
+     */
+    _sortOrderChanged(container) {
+        const els = Array.from(container.children);
+        if (els.length < 2) return false;
+        const sorted = els.slice();
+        if (this.options.programsSort === 'active') {
+            sorted.sort((a, b) => parseFloat(b.getAttribute('active-point')) - parseFloat(a.getAttribute('active-point')));
+        } else {
+            sorted.sort((a, b) => {
+                const ia = a.dataset.apiIndex !== undefined ? (parseInt(a.dataset.apiIndex, 10) || 0) : Infinity;
+                const ib = b.dataset.apiIndex !== undefined ? (parseInt(b.dataset.apiIndex, 10) || 0) : Infinity;
+                if (ia !== ib) return ia - ib;
+                return (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0);
+            });
+        }
+        for (let i = 0; i < els.length; i++) {
+            if (els[i] !== sorted[i]) return true;
+        }
+        return false;
     }
 
     /**
