@@ -1,5 +1,3 @@
-import { getProgramInfos as getProgramInfosFromStorage } from '../services/storage.js'
-import { resolveLiveThumbnailBaseUrl } from './sidebar.js'
 import { saveFrames, loadFrames, cleanupFrames } from '../services/animFrameStore.js'
 import {
     animatedThumbnailFrameCount as FRAME_COUNT,
@@ -24,9 +22,10 @@ import {
  * - 追加権限・Service Worker は不要（すべて content script 内で完結）。
  *
  * 取得方式（給餌方式・二重取得の解消）:
- *   最新サムネの取得は①(通常サムネ更新 updateThumbnailsFromStorage)へ一本化。②ON時、①はプリロードを
- *   crossOrigin で読み、成功画像を ingestAnimatedThumbnailFrame へ渡す（再取得なし）。②は自前の定期取得をせず、
- *   ホバー即時取得（captureFrame）だけ自前で行う。これで「同一サムネを①②が別々に取る二重通信」をなくす。
+ *   フレームは全て①(通常サムネ更新 updateThumbnailsFromStorage)の給餌から得る（②は自前取得しない）。
+ *   ②ON時、①はプリロードを crossOrigin で読み、成功画像を ingestAnimatedThumbnailFrame へ渡す（再取得なし）。
+ *   これで「二重通信」をなくし、かつ アニメのコマ＝実際に表示してきたコマ に一致させる
+ *   （末尾＝今の静止サムネ）。ホバー時に取り直さないので、表示より新しい絵が末尾に混ざらない。
  *   ①の crossOrigin が失敗した環境では①が平文で表示だけ確保し（表示は無傷）、②へは渡さない（アニメのみ休止）。
  */
 
@@ -201,15 +200,8 @@ function signatureDiffers(a, b) {
     return (sum / a.length) > SIG_MEAN_THRESHOLD || maxCell > SIG_CELL_THRESHOLD
 }
 
-// ---- 番組詳細からライブサムネURLを得る（会員限定は除外し、ベース選定は共通ヘルパーに委譲） ----
-function getScreenshotUrl(info) {
-    if (!info || info.isMemberOnly) return null
-    return resolveLiveThumbnailBaseUrl(info)
-}
-
 // ---- 読み込み済み画像をフレーム化（重複排除して保持） ----
-// 自前取得(captureFrame)と①からの給餌(ingestAnimatedThumbnailFrame)の共通後半。
-// b は呼び出し側が用意したバッファ（給餌時は必ず存在、自前取得時は取得中の解放を考慮済み）。
+// ①からの給餌(ingestAnimatedThumbnailFrame)の後半処理。b は呼び出し側が用意したバッファ。
 function storeFrameFromImage(id, img, b) {
     stats.loaded++
     const sig = computeSignature(img)
@@ -252,31 +244,6 @@ function storeFrameFromImage(id, img, b) {
         // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
         tryStartAnim()
     }, 'image/jpeg', 0.8)
-}
-
-// ---- 1カード分を②が自前取得（ホバー即時用。定期取得は①給餌へ一本化済み） ----
-// source: 'hover'(ホバー即時) / 'periodic'(通常は使わない)。計測の内訳用。
-function captureFrame(id, url, source) {
-    // バッファを用意し、取得開始時刻を記録（ホバー即キャプチャのスロットル用）
-    const buf = getOrCreateBuffer(id)
-    buf.lastCaptureAt = Date.now()
-
-    // 計測: 実際にネットワークへ出す取得を記録
-    stats.fetches++
-    if (source === 'hover') stats.hover++
-    else stats.periodic++
-    stats.recent.push(Date.now())
-
-    const img = new Image()
-    img.crossOrigin = 'anonymous'
-    img.onload = () => {
-        if (!enabled) return
-        const b = buffers.get(id)
-        if (!b) return // 取得中に解放された（リストから消えた）
-        storeFrameFromImage(id, img, b)
-    }
-    img.onerror = () => { stats.errors++ /* CORS/読込失敗時は静かにスキップ（ベースサムネには影響しない） */ }
-    img.src = url + (url.includes('?') ? '&' : '?') + 'cache=' + Date.now()
 }
 
 // ---- ①(通常サムネ更新)が crossOrigin で読み込んだ画像を受け取り、再取得せずフレーム化する ----
@@ -376,10 +343,9 @@ function tryStartAnim() {
     const fader = layers[1]  // 上に重ねて次コマをフェードインする専用レイヤー
 
     animCard = card
-    // 初期コマは「最新コマ」＝いま静止サムネで見えている画像に合わせる。
-    // ホバー直後のガタつき（古い絵への一瞬の巻き戻り）を防ぎ、最新コマが必ずアニメに含まれる。
-    // 以降は既存の巡回（次コマ = (animIndex+1)%len）で古い順→最新へ回る。
-    animIndex = buf.frames.length - 1
+    // 古い順→最新の時系列で再生する（frames[0]=最も古い → 末尾=最新）。
+    // 最新コマは1周の最後に映る（ループの節目で必ず現れる）。
+    animIndex = 0
     const gen = ++animGen
 
     // 初期コマは base に即載せる（ホバー直後の即時表示）。fader は隠しておく。
@@ -445,18 +411,6 @@ function stopAnim() {
     flushPendingRevokes()
 }
 
-// ホバーしたカードのフレームを即キャプチャ（周期20秒を待たず、貯まり＝アニメ開始を早める）
-function captureHoveredCard(card) {
-    if (!enabled || captureUnsupported || isSidebarLoading() || !card || !card.id) return
-    // 直近に取得済みならスキップ（ホバー横断・連打時の fetch/localStorage parse バーストを抑制）
-    const buf = buffers.get(card.id)
-    if (buf && buf.lastCaptureAt && (Date.now() - buf.lastCaptureAt) < HOVER_CAPTURE_THROTTLE_MS) return
-    const infos = getProgramInfosFromStorage()
-    const info = (infos || []).find((i) => i.id === 'lv' + card.id)
-    const url = getScreenshotUrl(info)
-    if (url) captureFrame(card.id, url, 'hover')
-}
-
 function setHoverCard(card) {
     if (card === hoverCard) return
     // 別カードへ移ったらアニメを止めてから
@@ -465,7 +419,8 @@ function setHoverCard(card) {
     if (card && card.id) {
         // 保存フレームを復元して、あれば即アニメ開始（リロード/番組移動後の復帰）
         ensureHydrated(card.id).then(() => { if (enabled && hoverCard === card) tryStartAnim() })
-        captureHoveredCard(card)
+        // ※ホバー時に画像を取り直さない：①（通常のサムネ更新）が記録してきたコマ（末尾＝今の静止サムネ）
+        //   だけを古→新で流す。取り直すと静止サムネより新しい絵が末尾に入り「最新が別物」になるため。
     }
     tryStartAnim()
 }
