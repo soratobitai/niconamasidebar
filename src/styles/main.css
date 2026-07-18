@@ -146,34 +146,6 @@ body.nicosidebar-light {
     filter: var(--sb-icon-filter-hover);
 }
 
-/* テーマ切替トグルスイッチ（設定ボタンの右） */
-#theme_toggle {
-    cursor: pointer;
-}
-#theme_toggle .theme_switch {
-    display: inline-block;
-    width: 34px;
-    height: 18px;
-    border-radius: 9px;
-    background: var(--sb-switch-track);
-    position: relative;
-    transition: background 0.2s;
-}
-#theme_toggle .theme_switch_knob {
-    position: absolute;
-    top: 2px;
-    left: 18px; /* 既定=ダーク=ON=ノブ右 */
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--sb-switch-knob);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-    transition: left 0.2s, background 0.2s;
-}
-body.nicosidebar-light #theme_toggle .theme_switch_knob {
-    left: 2px; /* ライト=OFF=ノブ左 */
-}
-
 /* 更新ボタンのローディング表示 */
 #reload_programs.loading {
     cursor: not-allowed;
@@ -383,12 +355,12 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
     /* コンテナは全幅。ヘッダー（設定/×）を左右いっぱいに広げるため上限は設けない。
        フォーム本体だけ #optionForm で幅を頭打ち＆左右中央に配置する */
     margin: 0;
-    padding: 0 2px 24px;
+    padding: 4px 8px 32px;
     width: 100%;
     box-sizing: border-box;
     color: var(--sb-fg);
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: 13px;
+    line-height: 1.6;
 }
 
 /* 設定フォーム本体は読みやすい幅で頭打ち＆左右中央（サイドバーが広がってもヘッダーだけ全幅） */
@@ -402,12 +374,12 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 14px;
-    padding-bottom: 8px;
+    margin-bottom: 22px;
+    padding-bottom: 10px;
     border-bottom: 1px solid var(--sb-popup-border);
 }
 #optionContainer h1 {
-    font-size: 1.05em;
+    font-size: 1.25em;
     font-weight: bold;
     margin: 0;
     color: var(--sb-header-fg);
@@ -430,22 +402,22 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
 
 /* 各設定セクション */
 #optionContainer .opt-section {
-    margin: 0 0 16px;
+    margin: 0 0 24px;
 }
 #optionContainer .opt-label {
-    font-size: 0.95em;
+    font-size: 1.12em;
     font-weight: bold;
     color: var(--sb-header-fg);
-    margin-bottom: 6px;
+    margin-bottom: 10px;
 }
 
 /* セグメント型の選択UI（ラジオを隠してラベルをボタン化） */
 #optionContainer .opt-segment {
     display: flex;
-    gap: 4px;
-    padding: 3px;
+    gap: 5px;
+    padding: 4px;
     background: var(--sb-segment-bg);
-    border-radius: 8px;
+    border-radius: 9px;
 }
 #optionContainer .opt-segment input[type="radio"] {
     display: none;
@@ -453,9 +425,9 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
 #optionContainer .opt-segment label {
     flex: 1 1 0;
     margin: 0;
-    padding: 6px 4px;
+    padding: 9px 6px;
     text-align: center;
-    font-size: 0.9em;
+    font-size: 0.96em;
     font-weight: 500;
     color: var(--sb-fg);
     border-radius: 6px;
@@ -478,17 +450,6 @@ body.nicosidebar-light #theme_toggle .theme_switch_knob {
     display: flex;
     align-items: center;
     gap: 6px;
-}
-
-/* テーマ切替（設定内）の行 */
-#optionContainer .theme_toggle_row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-#optionContainer .theme_toggle_label {
-    font-size: 0.9em;
-    font-weight: normal;
 }
 
 /* β版バッジ */

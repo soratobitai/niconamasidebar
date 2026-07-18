@@ -481,8 +481,8 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">視聴中の番組終了後、サイドバー先頭の番組へ自動で移動します。</span></span>
                                     </div>
                                     <div class="opt-segment">
-                                        <input type="radio" id="autoNextProgramOn" name="autoNextProgram" value="on"><label for="autoNextProgramOn">ON</label>
                                         <input type="radio" id="autoNextProgramOff" name="autoNextProgram" value="off"><label for="autoNextProgramOff">OFF</label>
+                                        <input type="radio" id="autoNextProgramOn" name="autoNextProgram" value="on"><label for="autoNextProgramOn">ON</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">
@@ -491,16 +491,15 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネを切り替えてアニメ表示します。（ベータ版：不具合や重い場合はOFFに）</span></span>
                                     </div>
                                     <div class="opt-segment">
-                                        <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
+                                        <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">
                                     <div class="opt-label">テーマ</div>
-                                    <div class="theme_toggle_row">
-                                        <span class="theme_toggle_label">ライト</span>
-                                        <div id="theme_toggle" title="ライト/ダーク切替"><span class="theme_switch"><span class="theme_switch_knob"></span></span></div>
-                                        <span class="theme_toggle_label">ダーク</span>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="sidebarThemeLight" name="sidebarTheme" value="light"><label for="sidebarThemeLight">ライト</label>
+                                        <input type="radio" id="sidebarThemeDark" name="sidebarTheme" value="dark"><label for="sidebarThemeDark">ダーク</label>
                                     </div>
                                 </div>
                             </form>

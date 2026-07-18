@@ -26,6 +26,7 @@ export function setupOptionsHandler(options, sortPrograms) {
             const programsSortElement = document.querySelector('input[name="programsSort"]:checked');
             const autoNextProgramElement = document.querySelector('input[name="autoNextProgram"]:checked');
             const animatedThumbnailElement = document.querySelector('input[name="animatedThumbnail"]:checked');
+            const sidebarThemeElement = document.querySelector('input[name="sidebarTheme"]:checked');
 
             if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
                 return;
@@ -37,6 +38,8 @@ export function setupOptionsHandler(options, sortPrograms) {
             options.autoNextProgram = autoNextProgramElement.value;
             // 動くサムネ（β版・後方互換のためガード対象外・存在すれば反映）
             if (animatedThumbnailElement) options.animatedThumbnail = animatedThumbnailElement.value;
+            // テーマ（存在すれば反映。body への適用は main.js の storage.onChanged が担う）
+            if (sidebarThemeElement) options.sidebarTheme = sidebarThemeElement.value;
 
             saveOptionsToStorage(options);
         } catch (error) {
@@ -50,6 +53,7 @@ export function setupOptionsHandler(options, sortPrograms) {
     updateCheckedState('autoOpen', options.autoOpen);
     updateCheckedState('autoNextProgram', options.autoNextProgram);
     updateCheckedState('animatedThumbnail', options.animatedThumbnail);
+    updateCheckedState('sidebarTheme', options.sidebarTheme);
 
     // フォームに変更があったら保存する
     const optionForm = document.getElementById('optionForm');

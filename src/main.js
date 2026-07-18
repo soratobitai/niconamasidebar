@@ -2,7 +2,7 @@
 import './styles/main.css'
 import { sidebarMinWidth, loadingSessionTimeoutMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
-import { getOptions as getOptionsFromStorage, setSidebarTheme } from './services/storage.js'
+import { getOptions as getOptionsFromStorage } from './services/storage.js'
 import { buildSidebarShell, setAnimThumbnailFeed } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
@@ -196,18 +196,8 @@ const setup = async () => {
         appState.setHandler('reloadBtn', reloadBtnHandler);
     }
 
-    // テーマ切替トグル（設定ボタンの右）
-    const themeToggleBtn = document.getElementById('theme_toggle');
-    if (themeToggleBtn) {
-        themeToggleBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const next = (options.sidebarTheme === 'light') ? 'dark' : 'light';
-            options.sidebarTheme = next;
-            applyTheme(next);
-            setSidebarTheme(next); // chrome.storage.local に保存（onChangedで他タブにも反映）
-        });
-    }
+    // テーマは設定フォーム（ライト/ダークのセグメント）で切替。
+    // 保存は optionsHandler、body への適用は下部の storage.onChanged（changes.sidebarTheme）が担う。
 
     // オプションボタン（サイドバー内で番組リストと入れ替え表示）
     const optionsBtn = document.getElementById('setting_options');

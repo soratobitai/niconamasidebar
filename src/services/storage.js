@@ -73,14 +73,6 @@ export function setSidebarWidth(width) {
 }
 
 /**
- * Save sidebar theme ('dark' | 'light').
- * @param {string} theme
- */
-export function setSidebarTheme(theme) {
-    chrome.storage.local.set({ sidebarTheme: theme })
-}
-
-/**
  * Read programInfos from localStorage.
  * @returns {any[]}
  */
