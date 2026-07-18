@@ -283,8 +283,10 @@ function captureFrame(id, url, source) {
 // これにより「最新サムネを①②が別々に取得する二重通信」をなくす（給餌方式）。
 // ①は各カードのプリロード成功時に呼ぶ。ここでは自前取得しない（stats.fetchesは増えない）。
 export function ingestAnimatedThumbnailFrame(id, img) {
-    // 旧・自前キャプチャと同じガード（初回ロード/重い更新中・タブ非表示中は解析を控え、動画プレーヤーとの競合を避ける）
-    if (!enabled || captureUnsupported || document.hidden || isSidebarLoading() || !id || !img) return
+    // タブ非表示中のみ控える。①は表示用に読み込み済みの画像を使い回すだけ（新規ネット取得なし＝
+    // 署名/エンコードのみで軽い）ので、ローディング中(force更新)もガードしない。ここを止めると
+    // 初回ロード/手動更新/タブ復帰で表示した「最新画像」がバッファに入らず、アニメに含まれなくなる。
+    if (!enabled || captureUnsupported || document.hidden || !id || !img) return
     stats.ingested++
     const b = getOrCreateBuffer(id) // ①は現在DOMにある番組のみ渡すのでバッファを用意してよい
     storeFrameFromImage(id, img, b)
@@ -374,11 +376,14 @@ function tryStartAnim() {
     const fader = layers[1]  // 上に重ねて次コマをフェードインする専用レイヤー
 
     animCard = card
-    animIndex = 0
+    // 初期コマは「最新コマ」＝いま静止サムネで見えている画像に合わせる。
+    // ホバー直後のガタつき（古い絵への一瞬の巻き戻り）を防ぎ、最新コマが必ずアニメに含まれる。
+    // 以降は既存の巡回（次コマ = (animIndex+1)%len）で古い順→最新へ回る。
+    animIndex = buf.frames.length - 1
     const gen = ++animGen
 
     // 初期コマは base に即載せる（ホバー直後の即時表示）。fader は隠しておく。
-    base.src = buf.frames[0].url
+    base.src = buf.frames[animIndex].url
     base.classList.add('show')
     fader.classList.remove('show')
 
