@@ -472,9 +472,10 @@ function setHoverCard(card) {
 
 // ---- 委譲ホバーリスナ（カードは再生成されるためコンテナに付ける） ----
 function onMouseOver(e) {
-    const card = e.target.closest ? e.target.closest('.program_container') : null
-    if (card) setHoverCard(card)
-    else setHoverCard(null)
+    // サムネ画像領域(.program_thumbnail)にホバーしたときだけ動かす。
+    // アイコン/配信者名/番組タイトル等の上では反応させない。
+    const thumb = e.target.closest ? e.target.closest('.program_thumbnail') : null
+    setHoverCard(thumb ? thumb.closest('.program_container') : null)
 }
 
 function onMouseOut(e) {
