@@ -38,19 +38,22 @@ DOMContentLoaded で setup()
         ├─ オプションに従い初期状態でサイドバーを開く/閉じる
         │
         ▼
-サイドバーが開いている間、3系統のタイマーが回る
-        ├─ sidebar  : updateProgramsInterval 秒ごとに番組リストを再取得（既定120秒）
-        ├─ thumbnail: updateThumbnailInterval 秒ごとにライブサムネを更新（既定20秒）
-        └─ todo     : 番組詳細取得キュー(ProgramInfoQueue)をレート制限付きで処理
+サイドバーが開いている間、2系統のタイマーが回る（＋自動移動の監視）
+        ├─ sidebar  : updateProgramsInterval 秒ごとに「リスト＋詳細」を再取得（既定120秒。非表示タブ時はスキップ）
+        └─ thumbnail: updateThumbnailInterval 秒ごとに、保存済みライブサムネURLへキャッシュバスターを付けて <img> を更新（既定20秒。非表示タブ時は停止）
         │
         ▼
 番組終了を検知(status.js)したら（自動移動ON時）カウントダウン後に次番組へ location.assign
 ```
 
-- **2種類のAPI**を使う（詳細は [05-external-api.md](./05-external-api.md)）:
-  1. **通知ボックスAPI** … フォロー中の放送中番組の「一覧」（軽量）
-  2. **番組詳細API** … 番組1件ごとの詳細（ライブサムネURL・配信者情報など、重いのでキュー＋レート制限）
-- 一覧APIで得た番組を即描画 → 各番組の詳細をキューで順次取得してサムネ・配信者名等を肉付け、という2段構え。
+- **データソースは2つ**（詳細は [05-external-api.md](./05-external-api.md)）:
+  1. **通知ボックスAPI**（`fetchLivePrograms`）… フォロー中の放送中番組の「一覧＝並び順」のみ（軽量）
+  2. **フォロー中ページのフロントJSON API**（`followPageSource` / `fetchFollowedProgramsViaPage`）… フォロー中ページ（`live.nicovideo.jp/follow?status=onair`）が「もっと見る」で叩く公開フロントAPI `GET https://live.nicovideo.jp/front/api/pages/follow/v1/programs?status=onair&offset=<0始まりページ番号>&limit=100`（`credentials: include`、応答 `{ data: { programs: [...], total: N } }`）を直接呼び、放送中フォロー番組の**全詳細**（タイトル・視聴者数・コメント数・ライブサムネURL・providerType・会員限定・開始時刻）を一括で得る。1番組は `mapApiProgramToInfo` で内部 `programInfo` 形へ変換する。
+- **ページングは実装済み**: `fetchFollowedProgramsViaPage` は `offset=0,1,2,...`（`offset` は0始まりのページ番号。ページNは全体の `N*100 .. N*100+100` 件）とループしながら `programs` を（`id` で重複排除して）蓄積し、`total` に達するまで取り切る。安全上限 `MAX_PAGES=5`。通常は1リクエスト（`limit=100` で同時放送100件未満をカバー）で済み、**100件を超えるフォロー番組でも全詳細**が揃う。
+- `updateSidebar` は上の2つを **`Promise.all` で並列取得** → 取得結果を `localStorage` へ upsert → その `localStorage` を読んで**詳細込みでカードを生成**し、`programsSort` で並べる。詳細がリストと同時に揃うため、**初回描画からソートが確定**する（「詳細が揃うまで新着順で待つ」整列確定機構は不要）。
+- 従来の「1番組=1詳細API×N＋レート制限キュー」は**廃止**し、フロントAPIの一括取得に置換した。取得に失敗した周は詳細が古い/欠けるだけで、旧詳細APIへの**フォールバックはしない**（意図的）。
+
+> **サムネの補完（選択的フォールバック）**: フロントAPIは `listingThumbnail` 1枠しか返さず、配信者が固定画像を設定していると（放送直後で未生成のときも）ライブスクショが取れない。ライブスクショ以外は表示しない方針（`isLiveScreenshotUrl` フィルタ）なので、そうした番組は `thumbnailUrl=''` になる。空になった番組**だけ**、`fillMissingLiveThumbnails` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する。空は通常0〜少数で、1サイクルあたり `MAX_DETAIL_FALLBACK=30` 件を上限とする（旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める）。`updateSidebar` の番組ごと try/catch と `makeProgramElement` の ID 文字列化でクラッシュはしない。
 
 ## 1.4 ディレクトリ構成
 
@@ -68,8 +71,9 @@ app/
 │   ├── config/constants.js    # 定数（APIエンドポイント・各種間隔・TTL）
 │   ├── core/AppState.js       # 全状態を集約するクラス
 │   ├── services/              # 外部I/O層
-│   │   ├── api.js             #   ニコ生API呼び出し（fetch）
-│   │   ├── queue.js           #   番組詳細取得キュー（レート制限）
+│   │   ├── api.js             #   API呼び出し（fetchLivePrograms＝一覧/並び順 ＋ fetchProgramInfo＝サムネ補完用の番組詳細）
+│   │   ├── followPageSource.js #  フォロー中ページのフロントJSON APIをページングして全番組詳細を一括取得
+│   │   ├── animFrameStore.js  #   動くサムネのフレーム永続化（IndexedDB）
 │   │   ├── status.js          #   番組終了検知（MutationObserver）
 │   │   └── storage.js         #   chrome.storage / localStorage ラッパ
 │   ├── managers/              # 副作用の強い処理群
@@ -85,7 +89,6 @@ app/
 │   │   ├── dom.js             #   debounce
 │   │   ├── error.js           #   エラー分類・ログ（handleError）
 │   │   └── sorting.js         #   ソート（新着順/人気順）
-│   ├── debug/apiStats.js      # API呼び出し統計（window.showApiStats）
 │   └── styles/main.css        # 全スタイル
 └── doc/                       # ★このドキュメント
 ```
@@ -101,7 +104,7 @@ app/
 | ライブサムネ | 配信中の実映像から生成されるスクリーンショット画像（時間経過で変化） |
 | 番組ID(lvID) | `lv` + 数字。数字が大きいほど新しい番組（新着順ソートに利用） |
 | providerType | 配信主体の種別。`user`（ユーザー生放送）/ `channel`（チャンネル生放送） |
-| toDolists / キュー | 番組詳細を順次取得するための待ち行列（`ProgramInfoQueue`） |
+| フォロー中ページのフロントAPI | `follow?status=onair` が「もっと見る」で叩く公開フロントAPI（`front/api/pages/follow/v1/programs`）をページングして全番組詳細を一括入手する方式（`followPageSource`） |
 | ローディングセッション | 一連の更新処理をまとめて「読み込み中」表示する単位（`LoadingManager`） |
 
 さらに詳しい用語集は [05-external-api.md](./05-external-api.md) 末尾を参照。

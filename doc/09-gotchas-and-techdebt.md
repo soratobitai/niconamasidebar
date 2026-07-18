@@ -5,6 +5,19 @@
 
 > **2026-07-11 更新**: 下記 A〜E, J, L を修正済み（独立エージェントによる敵対的レビューで回帰なしを確認、`npm run build` 成功）。
 > 詳細な差分は `git log`／各ファイル参照。未対応項目（設計判断・情報）は後半にまとめた。
+>
+> **2026-07-18 更新（データ取得のリファクタ）**: 番組**詳細**の取得を「1番組=詳細API×N＋レート制限キュー」から
+> 「フォロー中ページの公開フロントJSON API(`front/api/pages/follow/v1/programs?status=onair`)を1回叩いて全件一括取得」へ置換。詳細がリストと同時に揃うため、
+> **整列確定機構（settling）・独立詳細TTL・詳細キュー・新番組先行検知(`NewProgramWatcher`)・API監視(`apiStats`)を全廃**。
+> それに伴い旧項目 D/E/N/S(一部)/T と項目K・O・Qの当該記述を削除／書き換えた。
+> 削除ファイル: `src/services/queue.js`・`src/managers/NewProgramWatcher.js`・`src/debug/apiStats.js`。
+>
+> **2026-07-18 追補（フォローAPIのページング実装＋サムネ選択補完）**: 当初は SSR埋め込みデータのスクレイプ（`DOMParser`）で
+> **1ページ目のみ**を読む実装だったが、その後**公開フロントJSON APIのページング**（`offset` を進めて `total` まで取り切る）を実装。
+> 旧・下記 U（ページング未実装・70件超タイトルのみ）を**解決済み**へ書き換え。加えて JSON APIのサムネ枠は1つ（`listingThumbnail`）だけで
+> 固定画像配信者はライブサムネが取れないため、**その番組だけ詳細API(`fetchProgramInfo`)で選択的補完**する仕組みを追加（項目 N・V を更新）。
+> `fetchProgramInfo`／`constants.liveInfoAPI` はこの補完専用として復活・存置。
+> 削除された関数: `extractFollowItemsFromHtml`・`mapFollowItemToProgramInfo`・`pickLiveThumbnail`・`followPageUrl`・`window.__probeFollowPaging`（SSRスクレイプ経路ごと廃止）。
 
 ---
 
@@ -30,11 +43,11 @@
 - **修正**: `stopAllTimers()` から当該行を削除。
 - 対象: `src/main.js`
 
-## ✅ E. `programInfoTtlMs` の未使用 import を削除 → **その後TTLキャッシュとして実装**（🟢→対応済み）
-- **旧問題**: `api.js` が `programInfoTtlMs` を import するが未使用（TTL間引き未実装）。
-- **一次対応(2026-07-11)**: `api.js` の未使用 import を除去。
-- **本実装(仕様変更)**: `programInfoTtlMs`(60秒) を**TTLキャッシュ**として実装。`upsertProgramInfo` が保存時に `_fetchedAt` を付与し、`UpdateManager.updateSidebar` が「直近60秒以内に取得済みの番組詳細はキュー追加をスキップ」するようになった。2回目以降の読み込みが高速化＆API負荷軽減。
-- 対象: `src/services/storage.js`, `src/managers/UpdateManager.js`, `src/config/constants.js`
+## ✅ E. `programInfoTtlMs`（詳細TTLキャッシュ）→ **リファクタで撤去**（🟢→撤去済み・2026-07-18）
+- **経緯**: 2026-07-11 に `programInfoTtlMs`(60秒) を「直近60秒以内に取得済みの詳細はキュー追加をスキップ」するTTLキャッシュとして実装していた。
+- **現状(2026-07-18)**: 詳細取得をフォローAPIの一括取得（通常1リクエスト）に置換したため、詳細キューも独立TTLも不要になり、`programInfoTtlMs` 定数・TTL判定ロジックともに**削除**。詳細は毎周期フォローAPIで全件フル上書きされる。
+- 補足: `upsertProgramInfos` が付与する `_fetchedAt` は残っているが、もはや詳細の再取得スキップ判定には使われていない（保存時刻メタとして残置）。サムネ更新の `thumbnailTtlMs`・動くサムネの永続TTLは別機構で健在。
+- 対象: `src/services/storage.js`, `src/managers/UpdateManager.js`, `src/config/constants.js`, `src/services/followPageSource.js`
 
 ## ✅ J. `calculateActivePoint` の誤った `@deprecated` を修正（🟢→修正済み）
 - **旧問題**: JSDoc に `@deprecated` とあるが、実際はソート・active-point算出で現役使用。
@@ -65,16 +78,19 @@
 - 残置: `observers.thumbnail`（実体は sidebar.js のモジュール変数）は未使用/レガシーだが害はないため残置。
 
 ## 🟢 K. リスナ/タイマーのライフサイクル非対称
-- `#optionForm` change、各ボタン click、`document` 全体 click（resize強制）、`apiStats` の5分 setInterval などは cleanup で明示解除されない。単一ページ寿命では問題になりにくい。SPA的な再setup対応や厳密なリーク対策をするなら要整理。
+- `#optionForm` change、各ボタン click、`document` 全体 click（resize強制）などは cleanup で明示解除されない。単一ページ寿命では問題になりにくい。SPA的な再setup対応や厳密なリーク対策をするなら要整理。
+- ※ 旧記載の `apiStats` の5分 setInterval はAPI監視ごと撤去済み（2026-07-18）。
 
 ## 🟢 M. `getOptions` の副作用（get が set する）
 - 取得ついでにマージ結果を書き戻す（初回に既定値を永続化する意図）。「読むだけ」で呼ぶと storage 書き込みが走る点に注意。
 
-## 🟢 N. `fetchProgramInfo` は Cookie を送らない
-- リストAPIは `credentials:'include'` だが詳細APIは付けていない。現状は足りているが、ログイン依存の詳細が必要になったら見直す（意図的か要確認のため今回は変更せず）。
+## 🟢 N. データ取得の credentials（リスト・フォローAPIとも `include`／詳細APIのみ Cookie なし）
+- 番組リストの notifybox（`fetchLivePrograms`）も、詳細のフォロー中フロントAPI（`fetchFollowedProgramsViaPage`）も `credentials:'include'` で取得する。両方ともログイン Cookie 依存（未ログインだとリスト失敗／フォローAPIは放送中番組ゼロ）。
+- 例外: サムネ補完用の**詳細API `fetchProgramInfo`**（`liveInfoAPI = api.cas.nicovideo.jp/.../lv{id}`）は `credentials` 指定なし＝**Cookie を送らない**。公開情報のライブスクショURLだけを拾う用途で、固定画像配信者などライブサムネ欠落番組の補完に**選択的にのみ**呼ばれる（項目V参照）。
+- `api.js` は `fetchLivePrograms`（notifyboxリスト）と `fetchProgramInfo`（詳細・サムネ補完専用）の**両方**を export する。
 
 ## 🟢 O. 「開いた瞬間の描画」と「定期タイマー初回」は別物
-- `startSidebarUpdate` の初回実行も `updateProgramsInterval`（既定120秒）後。開いた直後の即描画は `performInitialLoad`/`performManualUpdate` が担う。二層構造を混同しないこと。
+- `startSidebarUpdate` の初回実行も `updateProgramsInterval`（既定120秒）後。開いた直後の即描画は `performManualUpdate` が担う（初回ロード・更新ボタン・タブ復帰・再オープン共通）。二層構造を混同しないこと。
 
 ## 🟢 P. `options` オブジェクトの参照整合（現状はOK）
 - 現状は `onChanged` が in-place 更新するため整合が取れている。**以後 `options` を再代入しないこと**（Manager 側の参照とズレる）。
@@ -89,10 +105,9 @@
   - API呼び出し頻度フィルタの窓 `60000` を `constants.apiRateWindowMs` に定数化（`apiStats`×2・`UpdateManager`×1）。
   - `setProgramContainerWidth` の8連ifを、ブレークポイント配列 `columnBreakpoints=[300,500,700,900,1100,1300,1500]` を走査するループに置換（全境界値で挙動等価を確認）。
 - ⏭ **残りの整理候補（未実施。低価値/高リスクのため保留）**:
-  - `apiCallCounter` 初期化の二系統（`apiStats.initApiStats` と `UpdateManager` コンストラクタ）→ 一元化（デバッグ用・低価値）。
   - `layout.js` の `adjustWatchPageChild` のレイアウト定数（`1024`/`1.777778`/`220.44444` 等）ベタ書き（項目G）→ 名前付き定数化（値の意味が不透明でドメイン知識が要るため保留）。
-  - `performInitialLoad` と `performManualUpdate(settle=true)` の類似シーケンス → 共通内部メソッド化（並べ替え等価性の検証必須・**リスク高め**）。
-  - `updateSidebar` 内の `getElementById('liveProgramContainer')` 4回取得 → 1回に集約（低価値・delicateな関数のため保留）。
+  - `updateSidebar` 内の `getElementById('liveProgramContainer')` 複数回取得 → 1回に集約（低価値・delicateな関数のため保留）。
+- ✅ **2026-07-18 のリファクタで同時に解消**: `apiCallCounter` 初期化の二系統（`apiStats`＋`UpdateManager`）は API監視ごと撤去。`performInitialLoad`／`performManualUpdate(settle=true)` の類似シーケンス問題も、settling機構ごと撤去され `performManualUpdate` 一本に統合されたため消滅。
 
 ## 🟢 R. サイドバー開閉時の列数パタつき（✅ 2026-07-11 修正）
 - 症状: 開閉の一瞬、番組サムネが巨大化しレイアウトが崩れて見えた。
@@ -100,9 +115,9 @@
 - 修正: 列数計算の幅ソースを**「意図した幅」**に統一。`main.js` の各所（RO/onResize/トグルrAF/初期open・close）は `state.sidebarWidth.value`、`UpdateManager.updateSidebar` は `this.appState.sidebar.width` を使用。アニメ途中幅では列数を変えず、閉じていても「開き幅基準」で列を確定させておく。ドラッグ時は `onMouseMove` が `sidebarWidth.value` を即時更新するので列数のライブ追従は維持。
 - 既知の残ギャップ（別件・低）: cross-tab の `sidebarWidth` 変更は `state.sidebarWidth.value`・DOM幅ともに未反映（`onChanged` が幅を再適用しない既存仕様）。単一タブ運用では問題なし。
 
-## 🟢 S. `getLivePrograms()` 過剰呼び出し（「1分に10回」警告・✅ 2026-07-11 修正）
-- 症状: コンソールに「🚨 [異常検出] getLivePrograms()が1分以内に10回呼ばれています！」（`UpdateManager.getLivePrograms` の `getLiveProgramsTimestamps` が直近60秒で10件超）。想定は初回＋120秒ごと＝約0.5回/分。
-- 原因は3つの既存バグ（直近改修とは無関係と調査で確定）:
+## 🟢 S. `getLivePrograms()`／`updateSidebar` 過剰呼び出し（✅ 2026-07-11 修正・スロットル/ガードは現役）
+- 症状: `updateSidebar`（=`getLivePrograms`＋フォローAPI取得）が想定（初回＋更新間隔ごと）を超えて何度も走る。※ かつては `apiStats` が「1分に10回」警告を出していたが、API監視は撤去済み（2026-07-18）。以下の**再発防止ガードは現在も有効**なので、更新が過剰に走ると感じたらここを疑う。
+- 原因は3つの既存バグ（当時、直近改修とは無関係と調査で確定）:
   - **① 自動次番組の暴走ループ（最悪）**: `autoNextProgram='on'` かつ番組終了ガイド表示中、`status.js` の MutationObserver がデバウンス無しで毎変異 `onEnded→updateSidebar→getLivePrograms`。`updateSidebar` の `replaceChildren` が body に変異を撒くため自己駆動ループ（次番組リンク未発見の間 `scheduled` が立たず永久）。
   - **② 開閉の二重発火**: 開閉ボタン1クリックで `handleSidebarOpenStateChange` が2回（直接呼び＋`setIsOpenSidebar`→`chrome.storage.onChanged` が自タブでも発火）→ 開くたび getLivePrograms 2回。
   - **③ `performManualUpdate` の多重防止ガード欠如**（①②の増幅器）。
@@ -110,13 +125,26 @@
   - ①→ `observeProgramEnd` に**20秒スロットル＋再武装**（`PROGRAM_END_RECHECK_MIN_INTERVAL_MS`）。終了ガイド出現で即1回発火、以降は20秒間隔でのみ再チェック、ガイド消滅で再武装。次番組ジャンプの本来動作は維持。
   - ②→ `main.js` の `onChanged` `isOpenSidebar` 分岐に `appState.sidebar.isOpen !== newIsOpen` ガード（自タブは反映済みなのでスキップ、他タブ由来のみ処理）。
   - ③→ `UpdateManager.performManualUpdate` に `isPerformingManualUpdate` in-flight ガード。
-- 診断: `window.showApiStats()` で `getLivePrograms` 累計・直近1分の頻度を確認。放置で増える→①、開閉で+2→②、タブ往復で+1→復帰更新。
+- 診断: 現在は専用の頻度カウンタは無い。疑うときは `updateSidebar`/`getLivePrograms` に一時ログを仕込むか Network で notifybox・`front/api/pages/follow/v1/programs?status=onair` の発火回数を数える。放置で増える→①、開閉で+2→②、タブ往復で+1→復帰更新。
 
-## 🟢 T. 新番組先行検知（`NewProgramWatcher`）で踏んではいけない点
-- **partial を保存しない**: サムネURL未生成番組（`fetchAndSave` が保存せず false）を「タイトルだけでも見せたい」等で `upsertProgramInfo` すると `_fetchedAt` が付き、`updateSidebar` の TTL(60秒)判定で**再取得が止まる**（未生成のまま固定化）。watcher は詳細だけ再取得し、未生成判定は **storage 観測**（保存されたか）で行う。カードのタイトル/静的サムネは notifybox の暫定描画に任せる。
-- **監視登録とカード生成は同tick・同条件で**: `_startWatch`（バックオフ開始）だけ先に走らせ、カード生成（`updateSidebar`）を別条件にすると「監視したのにカードが無い→`_check`でcleanup→次スキャンで再検知」の軽い再検知ループになる。`isLoading` 中はこの tick の新番組処理を丸ごと見送る（両方やらない）ことで、**諦め後に placeholder カードが必ず残る＝再検知されない**不変条件を保つ。
-- **キューは再オープン後に止まっていることがある**: 閉じる時 `programInfoQueue.stop()`、再オープン（初回フラグOFF）は `performManualUpdate` のみで連続ループを再開しない。watcher は enqueue 後 `_kickQueue()`（`processNow` 合流1回・`isLoading`中はsettleに委譲）で確実に drain する。ループ稼働中でも `isProcessing`ガード＋dedupe＋4件/秒制限で協調するので無害。
-- **notifybox 回数**: 30秒スキャンで +2回/分。合計約2.5回/分で項目Sのしきい値(10回/分)には余裕があるが、スキャン間隔を縮める場合は項目Sの再燃に注意。→ [06-features §5.5](./06-features.md)
+## ✅ U. フォロー中フロントAPIのページング（✅ 実装済み・70件超同時放送でも全件詳細が揃う）
+- **旧問題（解決済み）**: 当初の SSR埋め込みデータ・スクレイプ実装は**1ページ目（約70件）のみ**を読み、70件超の同時放送では末尾番組の詳細（視聴者数・コメント・ライブサムネ・開始時刻）が欠落してタイトルのみ描画になっていた。
+- **現状**: `followPageSource.fetchFollowedProgramsViaPage` は公開フロントJSON APIを **`offset` を進めながらループ**する。`offset` は**0始まりのページ番号**（ページ N は `total` のうち `[N*limit .. N*limit+limit)`）。`PAGE_LIMIT=100` で `offset=0,1,2,…` と取得し、`id` で重複排除しつつ `total` 件に達するまで累積する（`MAX_PAGES=5` の安全上限＝最大500件）。
+  - 放送中フォローが100件未満なら**通常は1リクエスト**で完結。100件を超えても追加ページで**全件の詳細が揃う**。
+- **クラッシュしない設計は健在**: `updateSidebar` の番組ごと `try/catch`（1件失敗で全体を空にしない）と、`makeProgramElement`/`updateSidebar` の `String(program.id)` 化により、万一 `MAX_PAGES` 上限（500件超）で詳細が付かないカードが出ても例外にはならない（視聴者数0・サムネ無しでソート末尾に沈むだけ）。
+- 対象: `src/services/followPageSource.js`（`fetchOnePage`・`PAGE_LIMIT`・`MAX_PAGES`）。→ [06-features](./06-features.md)
+
+## 🟡 W. 固定画像配信者はJSON APIにライブサムネ枠が無く、詳細APIで選択的補完する
+- **背景**: フォローAPIの1番組はサムネフィールドを **`listingThumbnail` 1枠しか返さない**。配信者が「固定画像」を設定していると `listingThumbnail` がその固定画像になり、放送直後（ライブスクショ未生成）も同様に空扱いになる。本拡張は**ライブスクショだけを表示する方針**（`isLiveScreenshotUrl` フィルタ）なので、これらの番組は `mapApiProgramToInfo` の時点で `thumbnailUrl=''` になる。
+- **選択的フォールバック**: `fillMissingLiveThumbnails` が `thumbnailUrl` 空の番組**だけ**を対象に、番組ごと詳細API `fetchProgramInfo()` を叩いて `liveScreenshotThumbnailUrls`（ライブスクショ）を補完する。空は通常0〜数件で、`MAX_DETAIL_FALLBACK=30` で1サイクルの呼び出し数を上限。**全番組には叩かない**（旧「全番組×詳細API」の重さを意図的に回避）。
+- **注意**: 詳細API側にもライブスクショが無い番組（本当に固定画像運用）はそのまま空のまま＝サムネ非表示になる（正常）。個別の詳細API失敗は握り潰し（`try/catch`）、次サイクルで再挑戦する。ここを重くしたくないので、`MAX_DETAIL_FALLBACK` を安易に上げないこと。
+- 対象: `src/services/followPageSource.js`（`fillMissingLiveThumbnails`・`isLiveScreenshotUrl`・`MAX_DETAIL_FALLBACK`）、`src/services/api.js`（`fetchProgramInfo`）、`src/config/constants.js`（`liveInfoAPI`）。
+
+## 🟢 V. フォローAPI失敗時のフォールバックは無い（その周期は詳細が古い/欠落のまま）
+- `_refreshDetailsViaScrape` は `fetchFollowedProgramsViaPage` が `null`（未ログイン/仕様変更/通信エラー/HTTP非200）を返したら**何もしない**（storage を上書きしない）。フォローAPI全体を別経路に**切り戻すフォールバックは存在しない**（意図的）。
+- ※ 詳細API `fetchProgramInfo` は健在だが、これは**サムネ欠落番組の選択的補完専用**（項目W）であって、フォローAPIそのものの代替経路ではない。フォローAPIが丸ごと失敗した周期を肩代わりする経路は無い。
+- 結果、失敗した周期は**リスト（notifybox）だけ更新され、詳細は前回のstorage値のまま**（初回から失敗し続ければ詳細欠落のまま）。次の周期でフォローAPIが復帰すれば自動で追いつく。
+- 「自動/API/ページ取得」を切り替える `dataSource` 設定や `auto` フォールバックモードも撤去済み（2026-07-18）。取得経路はリスト=notifybox・詳細=フォローAPI の一本のみ。
 
 ---
 

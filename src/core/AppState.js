@@ -6,11 +6,9 @@ export class AppState {
     constructor() {
         // タイマー管理
         this.timers = {
-            thumbnail: null,
-            todo: null,
-            sidebar: null,
-            autoNext: null,
-            newProgramScan: null, // 新番組先行検知スキャン（NewProgramWatcher）
+            thumbnail: null, // サムネ更新ループ（20秒）
+            sidebar: null,   // リスト＋詳細スクレイプ更新ループ（updateProgramsInterval）
+            autoNext: null,  // 自動移動
         };
 
         // オブザーバー管理
@@ -35,24 +33,8 @@ export class AppState {
         this.update = {
             isUpdating: false,
             pending: false,
+            // DOM差し替え中フラグ。サムネ更新がDOM操作に割り込まないためのガード。
             isInserting: false,
-            oneTimeFlag: true,
-            // 初回ロードの整列確定中フラグ。
-            // 人気順のとき、詳細取得が出揃うまでは新着順で安定表示し、
-            // 途中の再ソートを抑制する（確定後に1回だけ人気順へ並べ替える）。
-            settling: false,
-            // 整列確定中に「一時的に新着順で待つ必要があるか」。
-            // 詳細未取得の番組があり、キャッシュだけでは人気順を確定できないときのみ true。
-            // 全番組がキャッシュ済みなら false ＝ 最初から人気順で描画する。
-            settlingNeedsNewest: false,
-            // 整列確定(settling)時に新着順への一時退避を許可するか。
-            // 初回ロードは true（キャッシュ不足なら新着順で待つ）、
-            // 更新ボタンは false（すでに人気順で表示中なので退避せず、取得後に1回だけ整える）。
-            settleAllowNewest: true,
-            // 詳細取得のTTLキャッシュを無視して全番組を再取得するか。
-            // 更新ボタン押下時のみ true（明示的な「今すぐ最新に」）。
-            // ページ開き時・120秒自動更新は false（TTLで新鮮な詳細はスキップ）。
-            forceRefetch: false,
         };
 
         // ローディング状態管理（更新セッション単位で管理）
@@ -84,7 +66,7 @@ export class AppState {
 
     /**
      * タイマーを設定
-     * @param {string} name - タイマー名 ('thumbnail' | 'todo' | 'sidebar' | 'autoNext' | 'newProgramScan')
+     * @param {string} name - タイマー名 ('thumbnail' | 'sidebar' | 'autoNext')
      * @param {number|object} timer - タイマーIDまたはタイマーオブジェクト
      */
     setTimer(name, timer) {

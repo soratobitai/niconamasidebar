@@ -123,8 +123,8 @@ export function upsertProgramInfo(programInfo) {
     if (!programInfo || !programInfo.id) return
     const list = getProgramInfos()
     const idx = list.findIndex((info) => info.id === programInfo.id)
-    // 取得時刻を付与（TTLキャッシュ判定用。programInfoTtlMs 以内は再取得をスキップ）。
-    // 引数オブジェクト（APIレスポンス）を汚さないよう浅いコピーを保存する。
+    // 取得時刻を記録用メタデータとして付与。
+    // 引数オブジェクトを汚さないよう浅いコピーを保存する。
     const record = { ...programInfo, _fetchedAt: Date.now() }
     if (idx !== -1) {
         list[idx] = record
@@ -139,11 +139,10 @@ export function upsertProgramInfo(programInfo) {
 
 /**
  * 複数の番組情報を1回の read/merge/write でまとめて upsert する（bulk）。
- * フォロー中ページ・スクレイプ方式は毎サイクル全番組を書き戻すため、upsertProgramInfo を件数分
+ * フォロー中ページ・スクレイプは毎サイクル全番組を書き戻すため、upsertProgramInfo を件数分
  * 呼ぶと O(N^2) になる。これを1回の読み書きに畳む。id 一致は上書き、無ければ追加、末尾から上限トリム。
- * 各レコードに _fetchedAt を付与する（＝スクレイプ経路は「毎回フルレコードで上書き」なので、
- * サムネ未生成のまま _fetchedAt が固定化する gotcha-T は構造的に起きない。ただしキュー再取得を
- * この経路で復活させないこと＝needsDetailQueue=false を不変条件とする）。
+ * 各レコードに _fetchedAt（取得時刻）を付与する。毎回フルレコードで上書きするので、
+ * サムネURL未生成のまま古い値が固定化することはない。
  * @param {Array<object>} programInfos
  */
 export function upsertProgramInfos(programInfos) {

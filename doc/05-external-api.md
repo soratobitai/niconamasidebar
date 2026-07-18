@@ -4,52 +4,61 @@
 
 ---
 
-## 1. 外部APIエンドポイント
+## 1. 外部データソース（API）
 
-URLは `src/config/constants.js` にリテラル定義。実装は `src/services/api.js`。
+エンドポイント定数は `src/config/constants.js`。**リスト**の実装は `src/services/api.js`、**番組詳細**の実装は `src/services/followPageSource.js`（フォロー中ページの公開フロントJSON API）。
 
-| 定数 | URL | 用途 |
-|------|-----|------|
-| `notifyboxAPI` | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php` | フォロー中の放送中番組リスト |
-| `liveInfoAPI` | `https://api.cas.nicovideo.jp/v1/services/live/programs` | 番組詳細（1番組） |
+| 種別 | URL | 用途 | 定数/箇所 |
+|------|-----|------|----------|
+| リストAPI | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php` | フォロー中の放送中番組リスト（並び順の元） | `notifyboxAPI` |
+| 詳細フロントAPI | `https://live.nicovideo.jp/front/api/pages/follow/v1/programs` | 放送中フォロー番組の**全詳細をJSONで一括取得**（`?status=onair&offset=&limit=`／ページング対応） | `followApiUrl`（`followPageSource.js` 内で定義） |
+| 詳細API（補完専用） | `https://api.cas.nicovideo.jp/v1/services/live/programs` | フロントAPIがライブサムネを返さない番組（**固定画像配信者・放送直後**）のサムネ補完だけに使う | `liveInfoAPI` |
 
-### 1-1. フォロー中番組リスト — `fetchLivePrograms(rows=100)`
-- **リクエスト**: `GET ${notifyboxAPI}?rows=100`、**`credentials:'include'`（Cookie送信）**。2APIのうちCookie送信はこちらのみ（ログイン状態でフォロー番組を取得するため）。
+> リスト＝notifybox、詳細＝フォロー中ページ・フロントAPIの**2ソース構成**。両者を `UpdateManager.updateSidebar` が `Promise.all` で並列取得し、フロントAPI結果を storage へ upsert してからカードを組む（→ [04-data-flow](./04-data-flow.md)）。**従来の1番組=詳細API×Nのキューは廃止**（詳細はフロントAPIのJSONで全件一括入手）。詳細API（`liveInfoAPI`）は撤去せず、**固定画像番組のサムネ補完専用**として残す（§1-2）。
+
+### 1-1. フォロー中番組リスト — `fetchLivePrograms(rows=100)`（`api.js`）
+- **リクエスト**: `GET ${notifyboxAPI}?rows=100`、**`credentials:'include'`（Cookie送信）**。ログイン状態でフォロー番組を取得するためCookieが必要。
 - **重複排除**: `liveProgramsInFlight`(Map, key=`rows`) でin-flight共有、`finally`で削除。
 - **成功判定**: `meta.status===200 && data.notifybox_content`。**戻り値は `data.notifybox_content`（配列）**。失敗時 `false`。
 - **失敗時UI**: `getLivePrograms` が `#api_error` を `block`（ログイン誘導）表示。
 - **リスト要素で参照するフィールド**: `program.id`（**lvなし数値**）、`program.title`。
-  - ⚠️ リスト要素をそのまま `makeProgramElement` に渡すと `data.id.includes('lv')` が偽 → **レガシー分岐**に入る（詳細取得前の暫定描画）。
+  - 詳細はフロントAPI由来（`lv`付きで格納）を `programInfos.find(info.id==='lv'+program.id)` で突合。突合できない番組（フロントAPI取得失敗など）はリスト要素そのまま `makeProgramElement` に渡り、タイトルのみの暫定描画になる。ページングで全件取得するため、放送中フォローが100件を超えても詳細が付く（→ §1-2）。
 
-### 1-2. 番組詳細 — `fetchProgramInfo(liveId)`
-- **リクエスト**: `GET ${liveInfoAPI}/lv${id}`（`liveId`は**lvなし**で渡しURL生成時に `lv` 付与）。**Cookie指定なし**。
-- **重複排除**: `programInfoInFlight`(Map, key=`liveId`)。
-- **成功判定**: `meta.status===200 && data`。**戻り値は `response.data`**。失敗時 `undefined`。
+### 1-2. 番組詳細 — `fetchFollowedProgramsViaPage()`（`followPageSource.js`）
+- **リクエスト**: `GET ${followApiUrl}?status=onair&offset=<0始まりページ番号>&limit=100`、**`credentials:'include'`（Cookie送信）**。フォロー中ページ（`.../follow?status=onair`）が「もっと見る」で叩く公開フロントJSON API を直接呼ぶ。
+- **応答形**: `{ data: { programs: [...], total: N } }`。`programs[]` の1要素 = 1番組（`id:"lv..."`, `title`, `listingThumbnail`, `watchPageUrl`, `providerType`, `liveCycle`, `beginAt`（ミリ秒エポック）, `endAt`, `isFollowerOnly`, `isPayProgram`, `programProvider:{id,name,icon,iconSmall}`, `statistics:{watchCount,commentCount}`, `timeshift`）。
+- **変換**: 各 `programs[]` を `mapApiProgramToInfo` で**従来の詳細API相当の内部 programInfo 形**に写像。`makeProgramElement` / `resolveLiveThumbnailBaseUrl` / `calculateActivePoint` がそのまま読めるshape。
+- **ページング（実装済み）**: `offset` は**0始まりのページ番号**（`offset=0` が先頭 `limit` 件、`offset=1` が次の `limit` 件＝items[N*limit .. N*limit+limit)）。`offset=0,1,2,…` とループし、`id` で重複排除しながら `total` 件を取り切るまで加算取得する。安全上限 `MAX_PAGES=5`（最大500件）。通常は **1リクエスト**（`limit=100` で放送中フォロー<100件を1発カバー）。同時放送フォローが100件超でも**全番組に詳細が付く**（旧「約70件超はタイトルのみ」の制限は解消）。
+- **戻り値**: 内部 programInfo 配列。失敗（未ログイン/構造変化/HTTPエラー/通信エラー）時は **`null`**（フォールバックなし＝その周は詳細が古いまま）。クラッシュはしない（`updateSidebar` の番組ごと try/catch ＋ `makeProgramElement` の `String(id)`）。
+- **定数**（`followPageSource.js` 内）: `followApiUrl` / `PAGE_LIMIT=100` / `MAX_PAGES=5` / `MAX_DETAIL_FALLBACK=30`。
 
-#### `data`（番組詳細）で参照される全フィールド
-| フィールド | 例/型 | 用途・参照箇所 |
+#### `mapApiProgramToInfo` が生成する内部 programInfo の全フィールド
+フロントAPIの1番組（`data.programs[]`）→ 以下へ写像。
+| フィールド | 由来（`p.*`）/型 | 用途・参照箇所 |
 |-----------|-------|--------------|
-| `id` | `"lv123456"`（**lv付き**で格納・照合） | localStorageキー、`makeProgramElement`（`.replace('lv','')`でcontainer id化）、`programInfos.find(info.id==='lv'+program.id)` の突合 |
-| `title` | string | 番組タイトル（既定 `'タイトル不明'`） |
-| `providerType` | `'user'` / `'channel'` | サムネURL・投稿者ページURL・保存可否の分岐 |
-| `contentOwner.id` | string/number | ユーザー/チャンネルページURL生成 |
-| `contentOwner.name` | string | コミュニティ名（既定 `'コミュニティ名不明'`） |
-| `contentOwner.icon` | URL | アイコン画像 |
-| `thumbnailUrl` | URL | サムネのベース/フォールバック |
-| `liveScreenshotThumbnailUrls.middle` | URL | **user配信**のライブサムネ（`?cache=<ms>` 付与） |
-| `large1280x720ThumbnailUrl` | URL | **channel配信**のライブサムネ優先URL |
-| `isMemberOnly` | boolean | `computeNext` で true ならサムネ更新停止（`key:'member'`） |
-| `comments` | number | `calculateActivePoint`（人気度） |
-| `viewers` | number | `calculateActivePoint` |
-| `onAirTime.beginAt` | 日時文字列 | `calculateActivePoint` の経過分算出 |
+| `id` | `id`（`"lv..."`、**lv付き**で格納・照合） | localStorageキー、`makeProgramElement`（`.replace('lv','')`でcontainer id化）、`programInfos.find(info.id==='lv'+program.id)` の突合 |
+| `title` | `title`（既定 `'タイトル不明'`） | 番組タイトル |
+| `providerType` | `providerType` を `'user'`/`'channel'` へ写像（`mapProviderType`：`channel`/`official`→channel、`community`等→user） | サムネURL・投稿者ページURL・保存可否の分岐 |
+| `contentOwner.id` | `programProvider.id`（文字列化） | ユーザー/チャンネルページURL生成 |
+| `contentOwner.name` | `programProvider.name` | コミュニティ名（既定 `''`） |
+| `contentOwner.icon` | `programProvider.icon`／`iconSmall` | アイコン画像 |
+| `thumbnailUrl` | ライブスクショURL（`isLiveScreenshotUrl` 通過時のみ） | サムネのベース/フォールバック（静的サムネ兼用）。空なら §後述の補完対象 |
+| `liveScreenshotThumbnailUrls.middle` | ライブスクショURL（同上、`thumb` があれば） | **user配信**のライブサムネ（`?cache=<ms>` 付与） |
+| `large1280x720ThumbnailUrl` | ライブスクショURL（同上） | **channel配信**のライブサムネ優先URL |
+| `isMemberOnly` | `isFollowerOnly` | `computeNext` で true ならサムネ更新停止（`key:'member'`） |
+| `comments` | `statistics.commentCount` | `calculateActivePoint`（人気度） |
+| `viewers` | `statistics.watchCount` | `calculateActivePoint` |
+| `onAirTime.beginAt` | `beginAt`（**ミリ秒エポック**）→ ISO文字列 | `calculateActivePoint` の経過分算出 |
+| `status` | `liveCycle` | 番組ステータス |
+| `watchPageUrl` | `watchPageUrl` | 視聴ページURL |
 
-- **保存スキップ条件**（`ProgramInfoQueue.fetchAndSave`）: `providerType==='user' && !liveScreenshotThumbnailUrls` は保存せず `false`。
-  - 放送開始直後はライブサムネURLがまだ空でこの条件に当たる。`NewProgramWatcher` はこの「保存されない＝未生成」を storage 観測で判定し、**partial を保存しないまま**バックオフで詳細だけ再取得する（`_fetchedAt` を刻まずTTL抑止を回避）。→ [06-features §5.5](./06-features.md)
+- **サムネURLの選定**: フロントAPIは `listingThumbnail` の**1枠のみ**を返す。`isLiveScreenshotUrl`（`/screenshot/` を含む・`dlive.nicovideo.jp` 由来）で**ライブスクショ形のときだけ採用**。配信者設定の固定画像（`listing-thumbnail...thumbnail_{ts}.png` 形）はライブ形でないため空文字にする（→ **常にライブスクショ**というユーザー要件）。空になった番組は次項の補完対象。
+- **ライブサムネの選択的補完**（`fillMissingLiveThumbnails`）: `thumbnailUrl` が空の番組（**固定画像配信者**／**放送直後で未生成**）だけ、番組ごとの詳細API `fetchProgramInfo()`（`liveInfoAPI`）を叩いて `liveScreenshotThumbnailUrls` を回収する。空の番組は通常0〜数件で、上限 `MAX_DETAIL_FALLBACK=30`／サイクル。**全番組×詳細API**の旧方式の重さは避けたまま穴だけ埋める。個別失敗は空のまま（次サイクルで再挑戦）。
 
 ### 1-3. 呼び出し制御
-- **詳細取得はキュー経由**（`ProgramInfoQueue`）: 1件ずつ、`processInterval=250ms`、**`maxRequestsPerSecond=4`（4件/秒）**、`maxSize=200`。フォアグラウンドは `requestIdleCallback` 併用、バックグラウンドは間隔10倍。
-- **リスト取得**は `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新＋**新番組先行検知の30秒スキャン**（`NewProgramWatcher`、`getLivePrograms` 経由で計測・in-flight dedupe共有）。定常時の notifybox は合計約2.5回/分（しきい値10回/分に余裕）。
-- **監視**: `window.apiCallCounter`（`debug/apiStats.js`）。5分ごとに直近1分200回超で `console.warn`（上限4件/秒=240件/分）。`window.showApiStats()` で手動確認。
+- **リスト＋詳細を毎サイクル同時取得**: `updateSidebar` が `Promise.all([getLivePrograms(), _refreshDetailsViaScrape()])` を実行。前者は notifybox（`data.notifybox_content`）、後者はフォロー中ページ・フロントAPI（`_refreshDetailsViaScrape` 内で `fetchFollowedProgramsViaPage` を呼ぶ）→ `upsertProgramInfos` で storage へ全件一括 upsert。
+- **周期**: `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新（初回ロード・更新ボタン・タブ復帰・サイドバー再オープン）。**非表示タブでは1周期スキップ**（可視復帰時に `visibilitychange` ハンドラが即取り直す）。
+- **キュー廃止**: 詳細はキューを使わずフロントAPIのページングで全件取得するため、レート制限・`processInterval`・`maxRequestsPerSecond`・新番組の30秒先行スキャンは**いずれも撤去済み**。API監視デバッグ（`window.apiCallCounter` / `window.showApiStats`）も撤去。番組ごとの詳細API呼び出しは**固定画像番組のサムネ補完**（`fillMissingLiveThumbnails`、上限30/サイクル）に限定して残る。
 
 ---
 
@@ -60,10 +69,10 @@ URLは `src/config/constants.js` にリテラル定義。実装は `src/services
 | `https://live.nicovideo.jp/watch/${data.id}` | 番組カードのサムネリンク先 | `makeProgramElement` / `updateSidebar`（フォールバック `.../watch/lv${program.id}`） |
 | `https://www.nicovideo.jp/user/${contentOwner.id}` | user配信の投稿者ページ / レガシー分岐（サムネURLの `/(\d+)\.jpg/` から抽出） | `makeProgramElement` |
 | `https://ch.nicovideo.jp/${contentOwner.id}` | channel配信のチャンネルページ | `makeProgramElement` |
-| `https://live.nicovideo.jp/follow` | ヘッダ「フォロー中の番組」リンク | `buildSidebarShell` |
+| `https://live.nicovideo.jp/follow?status=onair` | 詳細フロントAPIの元ページ（実取得は §1-2 の `front/api/pages/follow/v1/programs`）／ヘッダ「フォロー中の番組」リンクは `https://live.nicovideo.jp/follow` | `followPageSource.js` / `buildSidebarShell` |
 | `https://account.nicovideo.jp/login` | API失敗時の `#api_error` 内ログインリンク | `buildSidebarShell` |
 
-- **サムネ画像取得(GET)**: user=`liveScreenshotThumbnailUrls.middle`（`?cache=<ms>`）、channel=`large1280x720ThumbnailUrl`。TTL10秒・失敗バックオフ2〜60秒・最終フォールバック `images/loading.gif`。
+- **サムネ画像取得(GET)**: user=`liveScreenshotThumbnailUrls.middle`（`?cache=<ms>`）、channel=`large1280x720ThumbnailUrl`。いずれも**フロントAPI（or 補完詳細API）で storage に保存済みの安定URL**を、20秒ループ（`updateThumbnailInterval`）がキャッシュバスター付きで再取得するだけ（更新ループ側では番組ごとの詳細ネットワーク取得は行わない）。TTL10秒・失敗バックオフ2〜60秒・最終フォールバック `images/loading.gif`。
 - **現在番組IDの抽出**: `location.pathname.match(/\/watch\/(lv\d+)/)`（AutoNext）。遷移は `location.assign(nextHref)`。
 
 ---
@@ -154,8 +163,10 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 | `LeoPlayer_ScreenSizeStore_kind` | **ニコ生本体**のプレイヤー画面サイズ設定。`auto` を含むかで自動サイズ判定。**読み取りのみ** | ui/layout.js |
 
 ### 4-3. `window` グローバル（デバッグ）
-- `window.apiCallCounter`（`{getLivePrograms, fetchProgramInfo, totalCalls, startTime, recentTimestamps, getLiveProgramsTimestamps}`）
-- `window.showApiStats`（統計表示関数）
+- `window.__testFollowScrape()`（`followPageSource.js`）: フォロー中ページ・フロントAPIの取得結果を件数＋所要ms＋`console.table` で表示（名前は歴史的経緯で `Scrape` のまま。実処理はAPI経路）。
+- `window.showAnimThumbStats()`（`render/animatedThumbnail.js`）: 動くサムネの給餌/自前取得の統計表示。
+- ※いずれも content script の isolated world に定義。DevToolsのコンソールで**本拡張の実行コンテキスト**を選ぶこと。
+- **撤去済み**: 旧 `window.apiCallCounter` / `window.showApiStats`（API監視デバッグ `debug/apiStats.js`）は詳細APIキュー廃止に伴い削除。
 
 ---
 
@@ -163,7 +174,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 
 | 用語 | 意味 | コード対応 |
 |------|------|-----------|
-| **フォロー中の番組** | フォロー済みユーザー/チャンネルの放送中生放送リスト | `notifyboxAPI`（Cookie送信）。ヘッダ→`/follow` |
+| **フォロー中の番組** | フォロー済みユーザー/チャンネルの放送中生放送。**リスト=`notifyboxAPI`／詳細=`front/api/pages/follow/v1/programs` のフロントJSON API**（どちらもCookie送信・ページング対応） | `api.js` / `followPageSource.js`。ヘッダ→`/follow` |
 | **視聴ページ / watch** | 生放送視聴ページ `.../watch/lvXXXX` | `content_scripts.matches`。ID=`lv\d+` |
 | **番組ID / lvID** | `lv`+数値。数値が大きいほど新しい | リスト=数値 / 詳細・格納=lv付き の使い分けに注意 |
 | **providerType** | 配信主体。`user`（ユーザー生）/ `channel`（チャンネル生） | サムネ・投稿者URL・保存可否の分岐 |

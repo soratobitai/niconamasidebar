@@ -36,33 +36,32 @@
                 │ uses          │ uses
         ┌───────┴──────────┬────┘
         ▼                  ▼
-   ┌──────────┐      ┌──────────┐
-   │ services │      │  utils   │
-   │ api /    │      │ dom /    │
-   │ queue /  │      │ error /  │
-   │ status / │      │ sorting  │
-   │ storage  │      └──────────┘
-   └────┬─────┘
+   ┌──────────────────┐   ┌──────────┐
+   │ services         │   │  utils   │
+   │ api /            │   │ dom /    │
+   │ followPageSource │   │ error /  │
+   │ status / storage │   │ sorting  │
+   └────┬─────────────┘   └──────────┘
         ▼
   ┌──────────┐
   │  config  │  constants.js（全モジュールが参照する定数・エンドポイント）
   └──────────┘
 ```
 
-- **debug/apiStats.js** は横断的（`window.apiCallCounter` をグローバルに置き、queue/UpdateManager から書かれる）。
+- **リスト（並び順）は notifybox API（`services/api.js`）、番組詳細はフォロー中ページの公開フロントJSON API（`services/followPageSource.js`）** という2系統でデータを取得する（§2.7）。
 
 ## 2.3 モジュール責務一覧
 
 | モジュール | 責務 | 主なエクスポート |
 |-----------|------|----------------|
 | `main.js` | エントリ。初期化・イベント配線・各層への委譲・UI状態ブリッジ | （エントリのため export なし） |
-| `config/constants.js` | エンドポイントURL・各種間隔/TTL/上限などの定数 | `notifyboxAPI`, `liveInfoAPI`, `sidebarMinWidth`, `maxSaveProgramInfos`, `toDolistsInterval`, `updateThumbnailInterval`, `thumbnail*`, `programInfoTtlMs`, `loadingSessionTimeoutMs` |
+| `config/constants.js` | エンドポイントURL・各種間隔/上限などの定数 | `notifyboxAPI`, `liveInfoAPI`（サムネ補完専用）, `watchPageBaseUrl`, `sidebarMinWidth`, `maxSaveProgramInfos`, `updateThumbnailInterval`, `thumbnail*`, `animatedThumbnail*`, `loadingSessionTimeoutMs` |
 | `core/AppState.js` | 全グローバル状態の集約と一括クリーンアップ | `class AppState` |
-| `services/api.js` | ニコ生2API の fetch（in-flight 重複排除つき） | `fetchLivePrograms`, `fetchProgramInfo` |
-| `services/queue.js` | 番組詳細取得キュー。レート制限・逐次処理・可視状態連動 | `class ProgramInfoQueue` |
+| `services/api.js` | notifybox API の fetch（放送中番組リスト）＋番組詳細API の fetch（サムネ補完専用。ともに in-flight 重複排除つき） | `fetchLivePrograms`, `fetchProgramInfo` |
+| `services/followPageSource.js` | フォロー中ページの公開フロントJSON API（`follow/v1/programs?status=onair`）をページングして全件取得し、放送中フォロー番組の詳細を内部 programInfo 形の配列で返す。ライブサムネが空の番組だけ詳細APIで選択的補完 | `fetchFollowedProgramsViaPage`, `mapApiProgramToInfo`（デバッグ用に `window.__testFollowScrape` を配線） |
 | `services/status.js` | watch ページの「番組終了ガイド」検知 | `observeProgramEnd` |
-| `services/storage.js` | `chrome.storage.local`（設定）と `localStorage`（番組キャッシュ）の読み書き | `getOptions`, `saveOptions`, `setIsOpenSidebar`, `setSidebarWidth`, `setSidebarTheme`, `getProgramInfos`, `upsertProgramInfo`（`setProgramInfos` は内部専用・未export） |
-| `managers/UpdateManager.js` | 更新タイマー3系統＋描画更新の司令塔（サイドバー/サムネ/番組詳細） | `class UpdateManager` |
+| `services/storage.js` | `chrome.storage.local`（設定）と `localStorage`（番組キャッシュ）の読み書き | `getOptions`, `saveOptions`, `setIsOpenSidebar`, `setSidebarWidth`, `setSidebarTheme`, `getProgramInfos`, `upsertProgramInfo`, `upsertProgramInfos`（詳細API取得の全件を一括書き戻し。`setProgramInfos` は内部専用・未export） |
+| `managers/UpdateManager.js` | 更新タイマー2系統（サイドバー/サムネ）＋描画更新の司令塔。リスト＝notifybox・詳細＝フロントJSON APIを並列取得して描画 | `class UpdateManager` |
 | `managers/LoadingManager.js` | 更新セッション単位のローディング表示制御（最低表示時間・タイムアウト） | `class LoadingManager` |
 | `managers/AutoNextManager.js` | 番組終了時の自動移動（モーダル・カウントダウン・遷移） | `class AutoNextManager` |
 | `render/sidebar.js` | 番組カードDOM生成・サムネ更新（コンテナ内全img対象）・サイドバー枠HTML・並べ替えFLIP | `makeProgramElement`, `calculateActivePoint`, `updateThumbnailsFromStorage`, `sortProgramsByActivePoint`, `flipReorder`, `buildSidebarShell`, `resolveLiveThumbnailBaseUrl`（provider別のライブサムネURL選定＝`computeNext`/`animatedThumbnail` 共用の純関数。※`handleThumbnailError` は内部関数、`makeProgramElement` から配線。旧 IntersectionObserver 可視限定は撤去済み） |
@@ -74,7 +73,6 @@
 | `utils/dom.js` | `debounce` | `debounce` |
 | `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`（`ErrorManager`/`ErrorType`/`ErrorLevel` は内部専用・未export） |
 | `utils/sorting.js` | 番組リストのソート（新着順=notifybox APIの並び順(=放送開始が新しい順)を保持 / 人気順=active-point） | `sortPrograms` |
-| `debug/apiStats.js` | API呼び出し統計（異常頻度の警告・手動確認関数） | `initApiStats`（＋ `window.showApiStats`） |
 
 ## 2.4 依存関係グラフ（import 方向）
 
@@ -89,25 +87,25 @@ main.js
  ├─> ui/sidebarControl.js       (createSidebarControl)
  ├─> ui/layout.js               (adjustWatchPageChild, setProgramContainerWidth)
  ├─> core/AppState.js           (AppState)
- ├─> services/queue.js          (ProgramInfoQueue)
  ├─> managers/LoadingManager.js
  ├─> managers/AutoNextManager.js
  ├─> managers/UpdateManager.js
  ├─> utils/sorting.js           (sortPrograms)
- ├─> debug/apiStats.js          (initApiStats)
+ ├─> services/followPageSource.js (副作用importのみ＝window.__testFollowScrape 配線)
  └─> handlers/optionsHandler.js (setupOptionsHandler)
 
 UpdateManager.js
- ├─> services/api.js            (fetchLivePrograms)
- ├─> services/storage.js        (getProgramInfos)
- ├─> render/sidebar.js          (makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder)
- ├─> ui/layout.js               (setProgramContainerWidth)
- ├─> utils/sorting.js           (sortPrograms)
- └─> config/constants.js        (updateThumbnailInterval)
+ ├─> services/api.js              (fetchLivePrograms)
+ ├─> services/followPageSource.js (fetchFollowedProgramsViaPage)
+ ├─> services/storage.js          (getProgramInfos, upsertProgramInfos)
+ ├─> render/sidebar.js            (makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage)
+ ├─> ui/layout.js                 (setProgramContainerWidth)
+ ├─> utils/sorting.js             (sortPrograms)
+ └─> config/constants.js          (updateThumbnailInterval, watchPageBaseUrl)
 
-AutoNextManager.js  ─> services/status.js (observeProgramEnd)
-queue.js            ─> services/api.js (fetchProgramInfo), services/storage.js (upsertProgramInfo), utils/error.js
-api.js              ─> config/constants.js, utils/error.js
+AutoNextManager.js    ─> services/status.js (observeProgramEnd)
+followPageSource.js   ─> utils/error.js (handleError), services/api.js (fetchProgramInfo＝サムネ補完)
+api.js                ─> config/constants.js (notifyboxAPI, liveInfoAPI), utils/error.js
 storage.js          ─> config/constants.js (maxSaveProgramInfos), utils/error.js
 status.js           ─> （import なし。DOM のみ）
 sidebar.js          ─> config/constants.js (thumbnail* TTL)
@@ -129,49 +127,59 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 
 | グループ | フィールド | 用途 |
 |---------|-----------|------|
-| `timers` | `thumbnail` / `todo` / `sidebar` / `autoNext` | 各更新タイマーのID（`todo` は文字列 `'queue-managed'` を入れる番兵運用あり） |
+| `timers` | `thumbnail` / `sidebar` / `autoNext` | 各更新タイマーのID |
 | `observers` | `resizeWatchPage` / `resizeSidebar` / `thumbnail` | ResizeObserver 等（thumbnail は sidebar.js が実体を持ち参照のみ） |
 | `sidebar` | `width` / `isOpen` | サイドバー幅・開閉状態（UIの真実） |
 | `visibility` | `isVisible` | Page Visibility API 由来のタブ可視状態 |
-| `update` | `isUpdating` / `pending` / `isInserting` / `oneTimeFlag` / **`settling`** / **`settlingNeedsNewest`** / **`settleAllowNewest`** / **`forceRefetch`** | 更新中・DOM挿入中・初回フラグ。`settling`=整列確定中。`settlingNeedsNewest`=詳細未取得があり新着順で待つ必要があるか。`settleAllowNewest`=新着順への一時退避を許可するか（初回=true/更新ボタン=false）。`forceRefetch`=TTL無視で全詳細を再取得するか（更新ボタン=true） |
+| `update` | `isUpdating` / `pending` / `isInserting` | 更新中・DOM挿入中フラグ。詳細がリストと同時（フロントJSON APIで一括）に届くため、「詳細が揃うまで新着順で待つ」整列確定機構（旧 `settling`/`forceRefetch` 等）は不要になり削除済み |
 | `loading` | `updateSession` | ローディングセッションID（`isLoading()` は `updateSession !== null`。旧 `operations` カウンタは 2026-07-11 整理で削除） |
 | `autoNext` | `scheduled` / `canceled` / `selectingNext` / `liveStatusStopper` | 自動移動の進行状態と終了監視の停止関数 |
 | `handlers` | `onResize`（＋ 実行時に `reloadBtn` 等が動的追加される） | イベントハンドラ参照 |
 | `config` | `options` / `defaultOptions` | 設定（参照保持） |
 | `elements` | （動的） | DOM要素参照 |
 
-## 2.6 4つのタイマー系統（心臓部）
+## 2.6 2つの更新ループ＋自動移動（心臓部）
 
-サイドバーが開いている間に走る、独立した定期処理。`UpdateManager` と `NewProgramWatcher` が起動・停止する。
+サイドバーが開いている間に走る、独立した定期処理。`UpdateManager` が sidebar/thumbnail の
+2ループを、`AutoNextManager` が自動移動の終了監視を起動・停止する。
 
 | タイマー | 間隔 | 何をするか | 実装 |
 |---------|------|-----------|------|
-| **sidebar** | `updateProgramsInterval` 秒（既定120） | 通知ボックスAPIで放送中番組リストを再取得し、DOMを差分更新＋ソート | `UpdateManager.startSidebarUpdate` → `updateSidebar` |
-| **thumbnail** | `updateThumbnailInterval` 秒（既定20） | localStorageの番組詳細を元にライブサムネを更新（TTL/バックオフ付き） | `UpdateManager.startThumbnailUpdate` → `updateThumbnail` |
-| **todo（キュー）** | `processInterval`（0.25秒）＋レート制限4件/秒 | 一覧に載った番組の「詳細」を1件ずつ取得し localStorage に upsert | `ProgramInfoQueue.start` |
-| **newProgramScan** | `newProgramScanIntervalMs`（既定30秒） | 通知ボックスAPIを軽量ポーリングし、**新しく始まった番組**を120秒サイクルを待たず検知→カード化＋詳細取得。サムネURL未生成の番組は per-番組バックオフで再取得（下記） | `NewProgramWatcher.start` → `_runScan` |
+| **sidebar** | `updateProgramsInterval` 秒（既定120／設定60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager.startSidebarUpdate` → `updateSidebar` |
+| **thumbnail** | `updateThumbnailInterval` 秒（既定20） | 保存済みの安定ライブサムネURL＋キャッシュバスターで各 `<img>` を更新する（**番組ごとのネットワーク詳細取得はしない**）。動くサムネ②もここでプリロードした画像から給餌 | `UpdateManager.startThumbnailUpdate` → `updateThumbnail` |
+| **autoNext**（自動移動） | イベント駆動 | 視聴中番組の終了を DOM 監視し、条件を満たせばモーダル→カウントダウン→次番組へ遷移。変更なし | `AutoNextManager.startWatcher` → `observeProgramEnd` |
 
-- これらは **`handleSidebarOpenStateChange(open)`** で一括起動/停止される（`newProgramScan` も `start/stop`）。
-- **タブがバックグラウンド**になると `thumbnail` と `newProgramScan` は停止、`todo` は間隔10倍で延命（`queue.js`）。
-- **`newProgramScan`** はスキャン本体のほかに、サムネURL未生成番組ごとの再取得タイマー（`pending` の per-id `setTimeout`）を持つ。`stop()` で全て掃除する。詳細は [06-features §5.5](./06-features.md)。
+- sidebar/thumbnail は **`handleSidebarOpenStateChange(open)`** で一括起動され、閉じると `stopAllTimers()` で停止する。
+- **タブがバックグラウンド**になると sidebar ループはその周期をスキップ（`isVisible()` ガード）し、可視復帰時に `visibilitychange` ハンドラが `performManualUpdate` で取り直す。thumbnail もタブ非表示時は動かない。
+- 旧「番組詳細取得キュー（todo）」「新番組の早期検知スキャン（newProgramScan）」は撤去済み。詳細はリストと同時にフロントJSON APIで（通常1リクエストで）揃うため、逐次キューや早期検知ポーリングは不要になった。
 - 詳細な起動〜停止のシーケンスは [04-data-flow.md](./04-data-flow.md)。
 
-## 2.7 データの2段構え
+## 2.7 データの2系統（リスト＝notifybox API／詳細＝フロントJSON API）
 
 ```
-① 通知ボックスAPI (fetchLivePrograms)         ② 番組詳細API (fetchProgramInfo)
-   └ 放送中番組の「一覧」（id, title, 概要）      └ 番組1件の詳細（providerType, contentOwner,
-        │                                              liveScreenshotThumbnailUrls 等）
-        ▼                                                    ▲
-  即座に番組カードを描画（暫定情報）                キューで1件ずつ取得（レート制限）
+① notifybox API (fetchLivePrograms)            ② フォロー中ページの公開フロントJSON API
+   └ 放送中番組の「一覧」＝並び順               (fetchFollowedProgramsViaPage)
+        │  （id, title）                          └ 放送中フォロー番組の詳細をページングして全件
+        │                                            （視聴者数/コメント/ライブサムネURL/
+        │                                              providerType/会員限定/開始時刻）
         │                                                    │
-        └──────────── localStorage(programInfos) にキャッシュ ─┘
-                              │
-                              ▼
-              サムネ更新／active-point再計算／ソートの元データになる
+        │                                     ライブサムネが空の番組だけ詳細APIで選択的補完
+        │                                        (fillMissingLiveThumbnails)
+        │                                                    │
+        │                              upsertProgramInfos で localStorage(programInfos) へ全件書き戻し
+        │                                                    │
+        └──────────────┬─────────────────────────────────────┘
+                        ▼  （updateSidebar 内で Promise.all の並列取得）
+       upsert 後の storage を読み、詳細込みでカードを生成 → programsSort でソート
+                        │  （初回描画から人気度＝active-point が確定。整列確定＝settling 不要）
+                        ▼
+              サムネ更新／active-point計算／ソートの元データになる
 ```
 
-- **一覧API**は軽量なので毎回全件取得。**詳細API**は重いのでキュー＋レート制限＋TTL(`programInfoTtlMs`)＋in-flight重複排除。
+- **リスト**は notifybox（軽量）で毎周期全件取得。**詳細**はフォロー中ページが「もっと見る」で叩く公開フロントJSON API `GET follow/v1/programs?status=onair&offset=<0始まりページ番号>&limit=100`（`credentials: include`／応答 `{ data: { programs: [...], total: N } }`）を呼び、`mapApiProgramToInfo` で内部 programInfo 形へ写像して全番組ぶんを入手。従来「1番組=詳細API×N＋レート制限キュー」だったものを JSON API 呼び出しに置換した。SSR HTML／`embedded-data` の DOMParser パースは廃止済み。
+- **ページング実装済み**: `fetchFollowedProgramsViaPage` は `offset=0,1,2,…`（`offset` は0始まりのページ番号。ページ N は `items[N*limit .. N*limit+limit)`）とページを進め、id で重複排除しつつ `total` まで蓄積する（安全上限 `MAX_PAGES=5`）。通常は `limit=100` で放送中フォロー（<100件）を1リクエストで賄い、**同時放送中が100件を超えても全番組の詳細が揃う**（タイトルのみカードで最下部に落ちる、という旧制限は解消）。
+- **サムネ＋詳細APIによる選択的フォールバック**: フロントJSON APIは `listingThumbnail` 1枠のみを返す。配信者が固定画像を設定していると `listingThumbnail` はその固定画像で、当拡張はライブスクショだけ表示する（`isLiveScreenshotUrl` フィルタ）ため、そうした番組は `thumbnailUrl=''` になる。ライブサムネが空の番組（固定画像配信者、または放送直後で未生成）だけ `fillMissingLiveThumbnails` が番組詳細API `fetchProgramInfo` を叩いて `liveScreenshotThumbnailUrls` を補完する。空の少数（通常0〜数件）にのみ・1サイクル `MAX_DETAIL_FALLBACK=30` 件を上限に走らせ、旧方式の「全番組×詳細API」の重さは意図的に避ける。
+- **フォールバックなし（リスト詳細本体）**: フロントJSON APIの取得が失敗した周期は、その周だけ詳細が古い/欠けるだけで、旧「全番組×詳細API」へは戻さない（意図的）。ただし `updateSidebar` の番組ごと try/catch と `makeProgramElement` 内の `String(id)` 強制で**クラッシュはしない**。
 - localStorage の `programInfos` は最大 `maxSaveProgramInfos`(200) 件で FIFO トリム。
 
 次は各ファイルの詳細 → [03-module-reference.md](./03-module-reference.md)

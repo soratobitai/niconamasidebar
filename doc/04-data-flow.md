@@ -1,9 +1,11 @@
 # 04. データフロー & ライフサイクル
 
-コンテンツスクリプト注入 → 初期化 → 番組リスト取得 → キュー/API → 描画 → 定期更新 → 自動移動 までを
+コンテンツスクリプト注入 → 初期化 → 番組リスト取得（notifybox）＋番組詳細取得（フォロー中ページの公開フロントJSON API）→ 描画 → 定期更新 → 自動移動 までを
 実コードに基づいて番号付きでトレース。行番号は現時点のもの（`src/main.js` 等）。
 
 > このドキュメントは「**いつ・何が・どの順で**動くか」を追うための地図です。関数の中身は [03-module-reference.md](./03-module-reference.md)、外部I/Oは [05-external-api.md](./05-external-api.md) を併読。
+>
+> **データ取得の役割分担（現行）**: **リスト（並び順の元）= notifybox API**（`fetchLivePrograms`）／**番組詳細（視聴者数・コメント・ライブサムネURL・配信者・会員限定・開始時刻）= フォロー中ページの公開フロントJSON API をページングして全件取得**（`fetchFollowedProgramsViaPage`）。詳細は `updateSidebar` 内でリストと**並列取得**して `localStorage` へ一括 upsert され、カード生成時点で人気度（active-point）が確定している。→ 「1番組=詳細API×N＋レート制限キュー」だった旧方式（`ProgramInfoQueue`）と、詳細が揃うまで新着順で待つ**整列確定（settling）機構**は撤去済み。詳細API(`liveInfoAPI`)自体は**空サムネ番組の補完のためだけに残存**（下記フェーズ4）。
 
 ---
 
@@ -16,109 +18,109 @@
 ## フェーズ1: モジュール即時実行（`main.js` load 時）
 
 `main.js` トップレベルで即時に:
-1. `appState = new AppState()`（全状態を初期値生成。`oneTimeFlag=true`, `updateSession=null`, `sidebar.width=360`, `isOpen=false`）
-2. `programInfoQueue = new ProgramInfoQueue({...})`（`batchSize:1`, `processInterval:250ms`, `maxSize:200`, `maxRequestsPerSecond:4`, `getVisibilityState:()=>appState.isVisible()`）。**この時点でキュータイマーは未起動**。
-3. `defaultOptions` 定義、`appState.config`/`elements` に参照接続。
-4. `localStorage.programInfos` が無ければ `'[]'` 初期化。
-5. 画像URLを `chrome.runtime.getURL` で解決。
+1. `appState = new AppState()`（全状態を初期値生成。`updateSession=null`, `sidebar.width=360`, `isOpen=false`）
+2. `defaultOptions` 定義、`appState.config`/`elements` に参照接続。
+3. `localStorage.programInfos` が無ければ `'[]'` 初期化。
+4. 画像URLを `chrome.runtime.getURL` で解決。
+5. `followPageSource.js` を副作用インポート（`window.__testFollowScrape()` を実ページのConsoleから叩けるよう登録。中身はJSON API経路を実行して件数＋表を出す）。
 6. `DOMContentLoaded` リスナ登録／`chrome.storage.onChanged` リスナ登録。
 
-> この段階では**定期処理は一切動かない**（apiStats の5分監視も含め、初期化系はすべて `DOMContentLoaded`→`setup` 経路で起動する）。番組/サムネ/キューのタイマーも未起動。
+> この段階では**定期処理は一切動かない**（初期化系はすべて `DOMContentLoaded`→`setup` 経路で起動する）。番組リスト/サムネのタイマーも未起動。
 
 ## フェーズ2: 初期化（`DOMContentLoaded` → `setup()`）
 
-7. `?popup=on` なら**即 return**（別窓くん対応）。ここで抜けると以降の初期化・タイマー・`initApiStats` は一切走らない（＝別窓では常時コストゼロ）。
+7. `?popup=on` なら**即 return**（別窓くん対応）。ここで抜けると以降の初期化・タイマーは一切走らない（＝別窓では常時コストゼロ）。
 8. `options = await getOptions()` … `chrome.storage.local.get` → defaults とマージ → **書き戻し** → `appState.sidebar.width/isOpen` に反映。
 9. `setElems()` でニコ生既存DOMを収集 → `#root` 不在なら return。
 10. `isSetupCompleted` で二重防止。
-11. **`initApiStats()` 実行**（popup/#root ガード通過時のみ）→ `window.apiCallCounter` 初期化＋**5分ごとの `setInterval` 監視起動**＋`window.showApiStats` 公開。`UpdateManager` が参照するため `setup()` の前に呼ぶ。
-12. **`setup()`**（以降 `isSetupCompleted=true`）。
+11. **`setup()`**（以降 `isSetupCompleted=true`）。
 
 ### setup() の配線（順序が重要）
-12. `await insertSidebar()` … `buildSidebarShell` の結果を `body` 先頭に注入、`#optionContainer` を body直下へ移動、`body{position:relative;display:flex}`・`#root{flex-grow:1}` を破壊的設定。
-13. `reflectOptions()` → `setupOptionsHandler`（ラジオ初期反映＋`#optionForm` change リスナ登録）。
-14. **Manager 3種を生成**（`LoadingManager`, `AutoNextManager`, `UpdateManager`）。← insertSidebar の後でないとDOM参照が取れない。
-15. `adjustWatchPageChild(elems)` でニコ生本体の幅調整。
-16. resize系配線: `window.resize`(debounce30ms) / `ResizeObserver`×2（watchPage幅・sidebar幅）/ theaterボタン click。
-17. `#reload_programs` click → `isLoading()` なら無視、else `performManualUpdate()`。
-18. `#setting_options`（オプションポップアップ）open/close/配置リスナ群。
-19. `#sidebar_button` click → `toggleSidebar()` → `handleSidebarOpenStateChange()` → rAF2段でレイアウト再計算。`enableSidebarLine()` でドラッグ有効化。
+12. `applyTheme(options.sidebarTheme)` … サイドバー挿入前にテーマ（ダーク/ライト）を body クラスへ適用（初回ちらつき回避）。
+13. `await insertSidebar()` … `buildSidebarShell` の結果を `body` 先頭に注入、`#optionContainer`（設定）を `.sidebar_body` 内へ配置、`body{position:relative;display:flex}`・`#root{flex-grow:1}` を破壊的設定。
+14. `reflectOptions()` → `setupOptionsHandler`（ラジオ初期反映＋`#optionForm` change リスナ登録）。
+15. **Manager 3種を生成**（`LoadingManager`, `AutoNextManager`, `UpdateManager`）。← insertSidebar の後でないとDOM参照が取れない。
+16. `adjustWatchPageChild(elems)` でニコ生本体の幅調整。
+17. resize系配線: `window.resize`(debounce30ms) / `ResizeObserver`×2（watchPage幅・sidebar幅）/ theaterボタン click。
+18. `#reload_programs` click → `isLoading()` なら無視、else `performManualUpdate()`。
+19. `#theme_toggle` click → テーマ切替（`applyTheme`＋`setSidebarTheme` で保存）。
+20. `#setting_options`（サイドバー内で番組リスト⇄設定を入れ替え表示）open/close/Escリスナ群。
+21. `#sidebar_button` click → `toggleSidebar()` → `handleSidebarOpenStateChange()` → rAF2段でレイアウト再計算。`enableSidebarLine()` でドラッグ有効化。
 
 ### 初期開閉の分岐（心臓部）
-20. `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`
+22. `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`
     - **開く**: UIを即 `openSidebar()` → rAF2段でレイアウト → **`setTimeout(()=>handleSidebarOpenStateChange(true), 300)`**（データ取得は300ms遅延＝初期ページ描画を妨げない）。← **初回データ取得の実質トリガ**
-    - **閉じる**: `closeSidebar()` → `handleSidebarOpenStateChange(false)` → `stopAllTimers()` ＋監視破棄（**閉じている間はタイマーもデータ取得も走らない**）。
-21. `autoNextProgram==='on'` なら `startLiveStatusWatcher()`（→ フェーズ7）。
-22. `beforeunload`/`pagehide` → `cleanup`、`visibilitychange` → `handleVisibilityChange`（→ フェーズ6）。
+    - **閉じる**: `closeSidebar()` → `handleSidebarOpenStateChange(false)` → `stopAllTimers()`（**閉じている間はタイマーもデータ取得も走らない**）。
+23. `autoNextProgram==='on'` なら `startLiveStatusWatcher()`（→ フェーズ7）。
+24. 動くサムネ②の給餌配線（`setAnimThumbnailFeed`）＋ON/OFF反映（`setAnimatedThumbnailEnabled`）。
+25. `beforeunload`/`pagehide` → `cleanup`、`visibilitychange` → `handleVisibilityChange`（→ フェーズ6）。
 
 ## フェーズ3: 初回データ取得（サイドバーが開いている時のみ）
 
-23. **`handleSidebarOpenStateChange(true)`**:
+26. **`handleSidebarOpenStateChange(true)`**:
     1. なければ `startThumbnailUpdate()`（フェーズ5.1）
-    2. なければ `startSidebarUpdate()`（フェーズ5.3）
-    3. rAF内で分岐: `oneTimeFlag===true`（初回）→ `startToDoListUpdate()` / それ以外 → `performManualUpdate()`
-    4. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバック。
-24. **`startToDoListUpdate()`（初回）** → `oneTimeFlag` が true なら **`performInitialLoad()`** 実行後 false化 → `programInfoQueue.start()` → `timers.todo='queue-managed'`。
-25. **`performInitialLoad()`**（人気順のガチャつき対策を含む）:
-    1. **`appState.update.settling = true`**（整列確定中フラグ）
-    2. `setShouldSort(true)`
-    3. `await updateSidebar()`（フェーズ4）← **キャッシュに詳細が無い番組があれば新着順、全て揃っていれば人気順で描画**（`getEffectiveSortType` / `settlingNeedsNewest`）
-    4. rAF×2でDOM反映待ち
-    5. キューがあれば **`processNow(null)`（全件即時取得）** ← この間、active-point属性は更新されるが**並べ替えはしない**
-    6. **`settling = false` → 人気順(active)なら `flipReorder` で1回だけ最終ソート（FLIPで滑らかにスライド）**
-    7. `updateThumbnail(true)`（強制）
-    8. `finishSessionWithMinDuration(1000)`（最低1秒ローディング表示＝更新ボタンのスピナーが整列完了まで回る）
-    9. 開いていれば `restartSidebarUpdate()`
-    - `finally` で `settling=false` を保証（例外時も詰まらない）
+    2. なければ `startSidebarUpdate()`（フェーズ5.2）
+    3. rAF内で `await performManualUpdate()`（初回・手動・再オープン・可視復帰いずれも同じ経路。専用の初回ロード関数は無い）
+    4. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバックでも `performManualUpdate()`。
+27. **`performManualUpdate()`**（→ フェーズ8と同一実装）:
+    1. 多重防止フラグ `isPerformingManualUpdate` で二重取得を抑止。
+    2. `await updateSidebar()`（フェーズ4）… リスト＝notifybox と 詳細＝フォローAPI（ページング）を**並列取得**し、詳細を storage へ upsert してからカードを組む。**詳細が揃った状態で描画・ソートするので、初回の1回目の描画から `programsSort`（人気順/新着順）で正しく並ぶ**。
+    3. `await updateThumbnail(true)`（サムネ強制反映。保存済みURL＋キャッシュバスター）
+    4. `finishSessionWithMinDuration(1000)`（最低1秒ローディング表示＝更新ボタンのスピナー）
+    5. 開いていれば `restartSidebarUpdate()`
 
-> ✅ **人気順のガチャつき対策（仕様変更）**: 人気順の初回ロードは、**キャッシュで人気順を確定できる場合は最初から人気順で表示（移動なし）**。詳細未取得の番組がある場合のみ「新着順で即表示・操作可 → 確定後に1回だけ人気順へFLIPで並べ替え」。連続再ソートを排除。新着順選択時は挙動不変。
-> （TTLキャッシュにより2回目以降＝キャッシュ完備は、ほぼ常に「最初から人気順・移動なし」になる。）
-> ⚠️ **初回ロードは `oneTimeFlag` で1度きり**。以降の再オープンや可視復帰は `performManualUpdate` 経路になり、`processNow(全件)`・settling処理は走らない（通常のキュータイマーに委ねる）。
+> ✅ **人気順のガチャつき（settling）機構は撤去**: 旧方式は詳細を後追いキューで取るため「詳細が揃うまで新着順で表示 → 確定後に人気順へFLIPで並べ替え」という整列確定処理（`settling`/`performInitialLoad`/`flipReorder`）が必要だった。現行は詳細がリストと**同時に**storage へ載るので、**最初から `programsSort` で確定描画**でき、退避表示も再ソートも不要。
+> ⚠️ 初回ロード専用の分岐（`oneTimeFlag`/`startToDoListUpdate`）は無くなり、開/手動/再オープン/可視復帰はすべて `performManualUpdate` に一本化された。
 
 ## フェーズ4: 番組リスト取得 & 描画（`updateSidebar()`）
 
 初回・手動・定期・自動移動の**全経路から呼ばれる中核**。
-26. `loadingManager.startSession()`（`.loading`表示＋60秒タイムアウト設定）
-27. `getProgramInfos()`（localStorage読み） ＋ `getLivePrograms(100)`（`fetchLivePrograms`／`credentials:'include'`／in-flight重複排除）
-    - 取得成否で `#api_error` を `none`/`block`（ログイン誘導）
-28. **失敗系は既存DOM維持**: `false`（API失敗）も `length===0`（空）も再構築せずカウントだけ更新して return。`#api_error` 表示は `false` の時のみ。
-29. 差分再構築: 既存カードは**軽量更新**（active-point/title/link）、新規は `makeProgramElement`。各番組を `programInfoQueue.add(program.id)`。
-    - ✅ **TTLキャッシュ（仕様変更）**: `data._fetchedAt` が直近 `programInfoTtlMs`(60秒) 以内なら**キュー追加をスキップ**（再取得しない）。2回目以降の読み込みが高速化。120秒周期の定期更新では60秒超のため通常どおり再取得され、詳細は古びない。
-30. `isInserting=true` → `replaceChildren(frag)`
-31. `sortPrograms(container, programsSort)`（active=人気順 / newest=ID降順）
-32. `setProgramContainerWidth` → `updateProgramCount` → `isInserting=false`
+28. `loadingManager.startSession()`（`.loading`表示＋60秒タイムアウト設定）
+29. **`Promise.all` でリストと詳細を並列取得**:
+    - `getLivePrograms(100)` … `fetchLivePrograms`（notifybox／`credentials:'include'`／in-flight重複排除）。返り値は `notifybox_content` 配列（`{id: bare番号, title}` 等）＝**並び順の元**。取得成否で `#api_error` を `none`/`block`（ログイン誘導）。
+    - `_refreshDetailsViaScrape()`（メソッド名は据え置き。実体はスクレイプではなくJSON API取得）… `fetchFollowedProgramsViaPage()` が **フォロー中ページの公開フロントJSON API**（`GET .../front/api/pages/follow/v1/programs?status=onair&offset=<0始まりページ番号>&limit=100`、`credentials:'include'`、応答 `{ data: { programs, total } }`）を **`offset=0,1,2,…` とページングループ**して放送中フォロー番組の**全詳細**を得て `upsertProgramInfos()` で `localStorage.programInfos` へ一括 upsert（`_fetchedAt` 付与）。各番組は `mapApiProgramToInfo()` で内部 programInfo 形へ写像（`beginAt`(ms)→`onAirTime.beginAt` ISO ／ `watchCount`→viewers ／ `commentCount`→comments ／ providerType `community`→`'user'`）。失敗時（未ログイン/仕様変更/通信エラー）は何もしない＝その周は詳細が古いまま（**フォールバックしない**）。
+30. **失敗系は既存DOM維持**: `livePrograms` が `false`（notifybox失敗）も `length===0`（空）も再構築せずカウントだけ更新して return。`#api_error` 表示は `false` の時のみ。
+31. **詳細 upsert 後の storage を読む**（`getProgramInfos()`）→ リスト各番組を `lv{id}` で突き合わせ。
+    - 既存カードは**軽量更新**（active-point/`data-api-index`/title/link）、新規は `makeProgramElement`（詳細が有れば `data`、無ければ notifybox の `program` で生成）。
+    - **1番組ごとに try/catch**: 詳細が取得結果に無い番組（`MAX_PAGES=5`＝最大500件の安全上限超過や、フォローAPI取得失敗）で不正データを踏んでも、その番組だけスキップしてリスト全体は描画する（`makeProgramElement` の `String(id)` 強制と併せ、サイドバー全体が空/クラッシュしない防御）。
+    - キュー投入（旧 `programInfoQueue.add`）やTTLスキップは**無い**（詳細はフォローAPIで毎周まとめて更新される）。
+32. `isInserting=true` → `replaceChildren(frag)`
+33. `sortProgramsInContainer(container)` → `sortPrograms(container, programsSort)`（active=人気順 / newest=API順＝notifyboxの放送開始が新しい順）。**詳細が揃っているので最初から確定ソートできる**。
+34. `setProgramContainerWidth`（幅は「意図した幅」`appState.sidebar.width` で決定）→ `updateProgramCount` → `isInserting=false`
 
-## フェーズ5: 3系統の定期タイマー
+> ✅ **ページングは実装済み**: `fetchFollowedProgramsViaPage()` は `offset=0,1,2,…`（`offset` は0始まりのページ番号。ページNは全体の `[N*limit .. N*limit+limit)`）とループし、`total` に達するまで番組を id で重複排除しつつ蓄積する。安全上限 `MAX_PAGES=5`（＝最大500件）。通常は `limit=100` で1リクエストで足りる（同時放送中フォローが100件未満）が、**100件を超えるユーザーでも全番組の詳細が揃う**（旧「約70件超はタイトルのみ・末尾落ち」の制限は解消）。`MAX_PAGES` 超過分のみ詳細無しになり得るが、その場合も上記の番組ごと try/catch と `String(id)` 強制でクラッシュしない。
+>
+> 🖼️ **空サムネの詳細API補完（選択的フォールバック）**: フォローAPIはサムネを `listingThumbnail` の1枠しか返さない。配信者が固定画像を設定していると `listingThumbnail` はその固定画像であり、当拡張は**ライブスクショのみ表示**する方針（`isLiveScreenshotUrl` フィルタ）なのでそれらは `thumbnailUrl=''` になる。ライブサムネが空の番組（固定画像配信者／放送直後で未生成）だけ、`fillMissingLiveThumbnails()` が**番組ごとの詳細API** `fetchProgramInfo()`（`liveInfoAPI = https://api.cas.nicovideo.jp/v1/services/live/programs/lv{id}`）を叩いて `liveScreenshotThumbnailUrls` を補完する。**空の少数（通常0〜数件）だけ**・1サイクル上限 `MAX_DETAIL_FALLBACK=30`。旧方式の「全番組×詳細API」の重さは意図的に避けたまま、穴だけ埋める。
 
-`handleSidebarOpenStateChange(true)` で起動、`stopAllTimers()`（閉/cleanup）で停止。
+## フェーズ5: 2系統の定期タイマー
+
+`handleSidebarOpenStateChange(true)` で起動、`stopAllTimers()`（閉/cleanup）で停止。詳細取得キュー（旧 `todo`）は撤去され、タイマーは `thumbnail` と `sidebar` の2系統になった。
 
 ### 5.1 thumbnail（既定20秒・自己再帰 setTimeout）
-33. `startThumbnailUpdate()` … `updateThumbnail()` を**即時実行**し、完了後 `setTimeout(20s)` で再帰。
-    - `updateThumbnail` は `isInserting` 中スキップ → `getProgramInfos()` → `updateThumbnailsFromStorage`。
-    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。**対象はコンテナ内の全img**（可視限定は撤去）。
+35. `startThumbnailUpdate()` … `updateThumbnail()` を**即時実行**し、完了後 `setTimeout(20s＝updateThumbnailInterval)` で再帰。
+    - `updateThumbnail` は `isInserting` 中スキップ → `getProgramInfos()` → `updateThumbnailsFromStorage`。**保存済みの安定したライブサムネURL＋キャッシュバスターで `<img>` を差し替えるだけ**で、番組ごとのネットワーク詳細取得はしない（詳細は sidebar 周期のフォローAPI側で更新される）。
+    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。**対象はコンテナ内の全img**（可視限定は撤去）。動くサムネ②もここでプリロードした画像から給餌される。
+    - タブが非表示（hidden）になると停止する（フェーズ6）。
 
-### 5.2 todo（キュー、ProgramInfoQueue 内部タイマー）
-34. `programInfoQueue.start()` … `processLoop` を250ms間隔で回す。可視かつ `requestIdleCallback` 可ならアイドル処理、**バックグラウンドは間隔10倍**、空なら×3。
-35. `processBatch()` … レート制限（直近1秒4件未満）下でFIFO逐次 `fetchAndSave` → `fetchProgramInfo(lv{id})` → `upsertProgramInfo`（localStorage、200超shift）。**成功/失敗問わず remove**（再試行不可のため）。完了で `onProcessComplete` → `updateActivePointsAndSort(shouldSort)`。
-36. `processNow()` … 初回ロード/可視復帰で全件即時処理（進捗0が続けば最大5回リトライ）。
+### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で60/120/180秒）
+36. `startSidebarUpdate()` … **最初の実行も1周期後**（即時ではない）。1周期ごとに `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング → `updateThumbnail()` → 自己再帰。
+    - **タブが非表示の周期は更新をスキップ**（`isVisible()` false なら再スケジュールのみ）。背景でのフォローAPI/リスト取得を避け、可視復帰時に `handleVisibilityChange` が即 `performManualUpdate` で取り直す。
+    - **別更新が進行中(`isLoading()`)の周期もスキップ**して次回へ（手動更新との二重取得・セッション上書き防止）。
+37. `restartSidebarUpdate()` … オプション（`updateProgramsInterval`）変更時／初回・手動ロード末尾で張り直し。
 
-### 5.3 sidebar（既定120秒・自己再帰 setTimeout）
-37. `startSidebarUpdate()` … **最初の実行も120秒後**（即時ではない）。`updateSidebar()` → 最低1秒ローディング → 自己再帰。**別更新が進行中(`isLoading()`)の周期はスキップして次回へ**（手動settleの `processNow` への割り込み・セッション上書き防止）。
-38. `restartSidebarUpdate()` … オプション変更時/初回・手動ロード末尾で張り直し。
-
-> ⚠️ **開いた瞬間の描画は sidebar タイマーではなく**、フェーズ3の `performInitialLoad`/`performManualUpdate` が担う。sidebar タイマーの初回も120秒後である点に注意。
+> ⚠️ **開いた瞬間の描画は sidebar タイマーではなく**、フェーズ3の `performManualUpdate` が担う。sidebar タイマーの初回も1周期（既定120秒）後である点に注意。
 
 ## フェーズ6: タブ可視状態変化（Page Visibility）
 
-39. `handleVisibilityChange`:
-    - **背景移行(hidden)**: `tabHiddenAt=Date.now()` を記録。`appState.sidebar.isOpen` 時は `thumbnail` タイマー停止（sidebar/todo はキュー側で間隔延長）。アクティブセッション残＆キュー空なら500ms後に `finishLoadingSession()`（セッション残留対策）。
-    - **復帰(visible)**: 非表示だった時間 `hiddenMs` を計算し `tabHiddenAt` をリセット。`isOpen` 時は 停止中の thumbnail/todo/sidebar を再起動＋キューあれば `processNow()`＋rAFで **`performManualUpdate(thorough)`**。**`thorough = hiddenMs ≥ visibilityFullRefreshMs`(60秒)** の場合は更新ボタン相当のしっかり更新（`forceRefetch`で全詳細再取得＋整列＋全サムネ最新化）、それ未満は軽量更新。← 長時間非表示後にサムネがアイコン/情報が古い問題への対策。
+38. `handleVisibilityChange`（`appState.setVisibility` で可視状態を記録。`appState.sidebar.isOpen` 時のみ以下）:
+    - **背景移行(hidden)**: `thumbnail` タイマーを停止（サムネ更新ループのリソース消費を抑える）。sidebar タイマーは継続するが、非表示中の周期はフェーズ5.2で更新をスキップするので実質 notifybox/フォローAPIは走らない。アクティブなローディングセッションが残っていれば500ms後に `finishLoadingSession()`（セッション残留対策）。
+    - **復帰(visible)**: 停止中の thumbnail/sidebar タイマーを再起動し、rAF内で `performManualUpdate()`（リスト＋詳細（フォローAPI）＋サムネを即取り直す）。詳細は毎回フォローAPIで全件更新されるため、旧方式の「長時間非表示なら `forceRefetch` でしっかり更新／短ければ軽量更新」という `thorough` 分岐は不要（常に同じ更新）。
 
 ## フェーズ7: 番組自動移動（AutoNext）
 
 `autoNextProgram==='on'` の時のみ。
-40. `startWatcher()` → `observeProgramEnd()` が `document.body` に `MutationObserver`（class監視）を張る。
-41. 終了検知（`program-end-guide` 内に announcement＋next-action-area＋broadcast-request-send-button が揃う）で:
+39. `startWatcher(updateSidebar)` → `observeProgramEnd()` が `document.body` に `MutationObserver`（class監視）を張る。
+40. 終了検知（`program-end-guide` 内に announcement＋next-action-area＋broadcast-request-send-button が揃う）で:
     1. 多重進入抑止（`scheduled`/`selectingNext`）
     2. `updateSidebar()`（✅ 2026-07-11修正: `main.js` から注入された関数で**実際に最新リストを取得**してから選定する。旧実装はIIFEで未解決だった → [09-gotchas A](./09-gotchas-and-techdebt.md)）
     3. `#liveProgramContainer` のリンクから**現在番組と異なる先頭番組**を選定＋プレビュー抽出
@@ -126,22 +128,26 @@
 
 ## フェーズ8: 手動更新
 
-42. `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`（settle）**: `updateSidebar`（`notifybox` を毎回取得＝新着/終了反映、人気順で即描画・新着順退避なし、**`forceRefetch`でTTL無視して全番組をキュー投入**）→ `processNow(null)` で**全詳細を再取得**（間は再ソート抑制）→ **人気順なら1回だけ `flipReorder`** → `updateThumbnail(true)`（サムネ強制）→ 最低1秒 → `restartSidebarUpdate()`。タブ復帰/再オープンは `performManualUpdate()`（settle無し・TTL維持の軽量更新）。
+41. `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate()`**: `updateSidebar()`（notifybox＝新着/終了反映 と フォローAPIの詳細（ページング）を並列取得し、詳細が揃った状態で `programsSort` の確定描画）→ `updateThumbnail(true)`（サムネ強制反映）→ 最低1秒ローディング → 開いていれば `restartSidebarUpdate()`。
+    - `isPerformingManualUpdate` フラグで多重防止（開閉/タブ復帰/自動移動が重なった時の二重取得を防ぐ）。
+    - **初回ロード・タブ復帰・サイドバー再オープンもすべてこの同じ実装**。詳細は毎回フォローAPIで全件更新されるため、旧方式の settle（`processNow`/`flipReorder`）や `forceRefetch`／TTLの「軽量↔しっかり」の区別は無い。
 
 ## フェーズ9: オプション変更の伝播（`chrome.storage.onChanged`）
 
-43. `updateProgramsInterval` 変更 → `restartSidebarUpdate()`
-    `isOpenSidebar` 変更 → `handleSidebarOpenStateChange()`
+42. `updateProgramsInterval` 変更 → `restartSidebarUpdate()`
+    `isOpenSidebar` 変更 → 未反映（他タブ由来）の時だけ `handleSidebarOpenStateChange()`（自タブのトグルは同期反映済みなので二重発火を防ぐ）
     `autoNextProgram` 変更 → watcher start/stop
+    `sidebarTheme` 変更 → `applyTheme`
+    `animatedThumbnail` 変更 → `setAnimatedThumbnailEnabled`
     `programsSort`/`autoOpen`/`sidebarWidth` → `options`/`appState` に反映
 
 ## フェーズ10: ローディングセッション（横断）
 
-44. 1つの `updateSession` ID が更新1サイクルを包括。`updateSidebar` 先頭で `startSession`（`.loading`表示＋60秒タイムアウト）、各経路末尾で `finishSessionWithMinDuration(1000)`。`isLoading()` = `updateSession!==null` が更新ボタン無効化と多重更新防止の判定源。
+43. 1つの `updateSession` ID が更新1サイクルを包括。`updateSidebar` 先頭で `startSession`（`.loading`表示＋60秒タイムアウト）、各経路末尾で `finishSessionWithMinDuration(1000)`。`isLoading()` = `updateSession!==null` が更新ボタン無効化と多重更新防止の判定源。
 
 ## フェーズ11: クリーンアップ
 
-45. `cleanup()`（`beforeunload`/`pagehide`）… `appState.cleanup()`（全タイマー/オブザーバー解放＋autoNext停止）＋キュー stop/clear＋サムネ監視破棄＋onResize解除＋モーダル閉じ。
+44. `cleanup()`（`beforeunload`/`pagehide`）… `teardownAnimatedThumbnails()`（動くサムネ停止＋blob解放）＋ `appState.cleanup()`（全タイマー/オブザーバー解放＋autoNext停止）＋onResize解除＋`hideAutoNextModal()`。
 
 ---
 
@@ -149,10 +155,8 @@
 
 | タイマー | 起動 | 間隔 | 再実行 | 停止 |
 |---------|------|------|--------|------|
-| apiStats監視 | モジュールload | 5分 | `setInterval`（clearされない） | なし |
-| thumbnail | 開/可視復帰 | 20秒（即時＋以降） | 自己再帰 setTimeout | 閉/背景/cleanup |
-| todo（キュー） | `queue.start()` | 250ms（空×3/背景×10） | processLoop連鎖 | `queue.stop()` |
-| sidebar | 開 | 120秒（**初回も120秒後**） | 自己再帰 setTimeout | 閉/cleanup、restartで再設定 |
+| thumbnail | 開/可視復帰 | 20秒（即時＋以降。保存済みURLでサムネ<img>更新のみ） | 自己再帰 setTimeout | 閉/背景/cleanup |
+| sidebar | 開/可視復帰 | `updateProgramsInterval`（既定120秒。**初回も1周期後**）。1周期＝notifybox＋フォローAPI（通常1リクエスト・ページング時は複数）＋空サムネ補完 | 自己再帰 setTimeout | 閉/cleanup、restartで再設定 |
 | loadingタイムアウト | `startSession()` | 60秒 | 単発 | `finishSession()` |
 | autoNextカウントダウン | `scheduleNavigation()` | 1秒×10 | setInterval | キャンセル/完了/stopWatcher |
 
@@ -161,9 +165,8 @@
 | 状態 | 主な書き込み | 主な読み取り |
 |------|------------|------------|
 | `sidebar.isOpen` | 初期化 / 開閉ボタン / onChanged | visibility処理・末尾の `restartSidebarUpdate` 判定 |
-| `visibility.isVisible` | `handleVisibilityChange` / 初期化 | キューの `getVisibilityState`（processLoop） |
-| `update.oneTimeFlag` | 初期true / `startToDoListUpdate` で false | `handleSidebarOpenStateChange` の分岐 |
+| `visibility.isVisible` | `handleVisibilityChange` / 初期化 | sidebar 周期の更新スキップ判定（`isVisible()`） |
 | `update.isInserting` | `updateSidebar` 前後 | `updateThumbnail`（挿入中スキップ） |
-| `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタン・可視処理 |
-| `timers.*` | 各 start/stop | `getTimer` による二重起動防止 |
+| `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタン・可視処理・sidebar周期スキップ |
+| `timers.*`（thumbnail/sidebar/autoNext の3種） | 各 start/stop | `getTimer` による二重起動防止 |
 | `autoNext.*` | AutoNextManager 各所 | 多重進入抑止・カウントダウン・cleanup |

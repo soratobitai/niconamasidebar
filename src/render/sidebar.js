@@ -40,7 +40,9 @@ export function resolveLiveThumbnailBaseUrl(info) {
 export function makeProgramElement(data, loadingImageURL) {
     if (!data || !data.id) return null
 
-    const id = data.id.replace('lv', '')
+    // notifybox のリスト項目は id が数値（lvなし）で来ることがあるため文字列化してから扱う。
+    const idStr = String(data.id)
+    const id = idStr.replace('lv', '')
     let user_page_url = ''
     let community_name = ''
     let thumbnail_link_url = ''
@@ -49,7 +51,7 @@ export function makeProgramElement(data, loadingImageURL) {
     let live_thumbnail_url = ''
     const title = data.title || 'タイトル不明'
 
-    if (data.id.includes('lv')) {
+    if (idStr.includes('lv')) {
         if (data.contentOwner && data.contentOwner.id) {
             user_page_url = `https://www.nicovideo.jp/user/${data.contentOwner.id}`
         }
@@ -491,17 +493,6 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div class="opt-segment">
                                         <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
-                                    </div>
-                                </div>
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        データ取得方式<span class="opt-beta-badge">実験</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組情報の取得元。API=従来のニコ生API。ページ取得=フォロー中ページを1回取得して全詳細を得る実験方式（API激減）。自動=ページ取得を優先し失敗時はAPIへ。</span></span>
-                                    </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="dataSourceApi" name="dataSource" value="api"><label for="dataSourceApi">API</label>
-                                        <input type="radio" id="dataSourceFollow" name="dataSource" value="followPage"><label for="dataSourceFollow">ページ取得</label>
-                                        <input type="radio" id="dataSourceAuto" name="dataSource" value="auto"><label for="dataSourceAuto">自動</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">

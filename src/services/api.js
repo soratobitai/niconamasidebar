@@ -42,6 +42,8 @@ export async function fetchLivePrograms(rows = 100) {
 
 /**
  * Fetch detailed program info by live id (number without "lv").
+ * 用途を限定: フォローAPIがライブサムネを返さない番組（固定画像配信者など）だけ呼び、
+ * liveScreenshotThumbnailUrls を補完する。全番組には使わない。
  * @param {number|string} liveId - Live id without the "lv" prefix.
  * @returns {Promise<any|undefined>} Program data object on success, or undefined on failure.
  */
@@ -51,7 +53,6 @@ const programInfoInFlight = new Map() // liveId -> Promise
 export async function fetchProgramInfo(liveId) {
     const id = String(liveId)
 
-    // In-flight dedupe（同時リクエストの重複防止）
     if (programInfoInFlight.has(id)) {
         return programInfoInFlight.get(id)
     }
@@ -69,8 +70,7 @@ export async function fetchProgramInfo(liveId) {
                 }
                 return undefined
             }
-            const data = response.data
-            return data
+            return response.data
         } catch (error) {
             handleError(error, { api: 'fetchProgramInfo', liveId: id })
             return undefined
@@ -82,5 +82,3 @@ export async function fetchProgramInfo(liveId) {
     programInfoInFlight.set(id, p)
     return p
 }
-
-

@@ -1,47 +1,24 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, maxSaveProgramInfos, toDolistsInterval, loadingSessionTimeoutMs, visibilityFullRefreshMs } from './config/constants.js'
+import { sidebarMinWidth, loadingSessionTimeoutMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, setSidebarTheme } from './services/storage.js'
 import { buildSidebarShell, setAnimThumbnailFeed } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
-import { ProgramInfoQueue } from './services/queue.js'
 import { LoadingManager } from './managers/LoadingManager.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { UpdateManager } from './managers/UpdateManager.js'
-import { NewProgramWatcher } from './managers/NewProgramWatcher.js'
 import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
-import { initApiStats } from './debug/apiStats.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
-// 【実験】フォロー中ページ・スクレイプ方式のデータソース（並走アダプタ）。
+// フォロー中ページ・スクレイプ方式（番組詳細の一括取得）。
 // 副作用インポート: window.__testFollowScrape() を登録し、実ページのConsoleから動作確認できるようにする。
 import './services/followPageSource.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
-
-// 番組詳細情報取得キュー
-// レートリミッティングを実装して、APIへの負荷を配慮
-// 1秒あたり最大4件に制限、1件ずつ処理（0.25秒/件）
-const programInfoQueue = new ProgramInfoQueue({
-    batchSize: 1, // 1件ずつ処理
-    processInterval: toDolistsInterval * 1000, // 0.25秒間隔
-    idleTimeout: 50,
-    maxSize: maxSaveProgramInfos,
-    maxRequestsPerSecond: 4, // 1秒あたり最大4件
-    getVisibilityState: () => appState.isVisible(), // 可視状態を取得する関数
-    onProcessComplete: (processedCount, results, shouldSort) => {
-        // 番組詳細情報取得後、active-pointを更新
-        // shouldSortがtrueの場合のみソートを実行（初回/サイドバーオープン/更新ボタン時）
-        if (typeof updateActivePointsAndSort === 'function') {
-            updateActivePointsAndSort(shouldSort);
-        }
-        // サムネイル更新は別タイマー（startThumbnailUpdate）で定期実行されるため、ここでは呼ばない
-    }
-});
 
 let defaultOptions = {
     programsSort: 'newest',
@@ -52,18 +29,9 @@ let defaultOptions = {
     sidebarTheme: 'light', // 'dark' | 'light'（既定ライト）
     autoNextProgram: 'off',
     animatedThumbnail: 'off', // β版・既定OFF
-    // 【実験】データソース: 'api'（従来のnotifybox+詳細API）/ 'followPage'（フォロー中ページ・スクレイプ）/
-    // 'auto'（followPage優先＋失敗時api自動降格、Stage5予定）。既定は 'api'（挙動不変）。
-    // UIは未提供。テストは window.__setDataSource('followPage') で chrome.storage.local 経由に切替。
-    dataSource: 'api',
 };
 let options = {};
-
-// followPage経路では20秒スクレイプループが新番組検知を兼ねるため NewProgramWatcher は不要（api経路のみ起動）。
-const useApiSource = () => (options.dataSource || 'api') === 'api';
 let elems = {};
-// タブが非表示になった時刻（復帰時に非表示だった時間を測り、しっかり更新するか判定する）
-let tabHiddenAt = null;
 
 // AppStateに設定とDOM要素の参照を保存
 appState.config.defaultOptions = defaultOptions;
@@ -74,7 +42,6 @@ appState.elements = elems;
 let loadingManager = null;
 let autoNextManager = null;
 let updateManager = null;
-let newProgramWatcher = null;
 
 // localStorage初期化
 if (!localStorage.getItem('programInfos')) {
@@ -132,11 +99,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
     }
 
-    // API統計の初期化（開発・デバッグ用）。別窓くんの別窓(?popup=on)や #root 不在ページでは
-    // ここまで到達しないため、5分ごとの監視 setInterval も張られない（＝別窓では常時コストゼロ）。
-    // ※ window.apiCallCounter を UpdateManager コンストラクタが参照するため setup() より前に呼ぶ。
-    initApiStats();
-
     setup();
     isSetupCompleted = true;
 });
@@ -154,8 +116,7 @@ const setup = async () => {
     // Managerの初期化
     loadingManager = new LoadingManager(appState, loadingSessionTimeoutMs);
     autoNextManager = new AutoNextManager(appState);
-    updateManager = new UpdateManager(appState, programInfoQueue, loadingManager, options, elems, loadingImageURL);
-    newProgramWatcher = new NewProgramWatcher(appState, updateManager, programInfoQueue);
+    updateManager = new UpdateManager(appState, loadingManager, options, elems, loadingImageURL);
 
     // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
     // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
@@ -224,8 +185,8 @@ const setup = async () => {
             if (appState.isLoading()) {
                 return;
             }
-            // 手動更新を実行（更新ボタンは詳細取得後に1回だけ人気順へ整える settle=true）
-            await performManualUpdate(true);
+            // 手動更新を実行（リスト＋詳細スクレイプを取り直して再描画）
+            await performManualUpdate();
         };
         // 既存のリスナーを削除（もしあれば）
         if (appState.handlers.reloadBtn) {
@@ -379,60 +340,28 @@ const setup = async () => {
         const isVisible = !document.hidden;
         appState.setVisibility(isVisible);
 
-        // 非表示だった時間を測る。復帰時は（サイドバー開閉に関わらず）必ずリセットし、
-        // 値が次回へ持ち越されないようにする。
-        let hiddenMs = 0;
-        if (isVisible) {
-            hiddenMs = tabHiddenAt ? (Date.now() - tabHiddenAt) : 0;
-            tabHiddenAt = null;
-        } else {
-            tabHiddenAt = Date.now();
-        }
-
         // サイドバーが開いている場合のみ処理
         if (appState.sidebar.isOpen) {
             if (isVisible) {
-                // 長時間非表示からの復帰かを判定（詳細・サムネが古くなっているため）
-                const thorough = hiddenMs >= visibilityFullRefreshMs;
-
-                // フォアグラウンドに戻ったとき：タイマーを再開し、即座に更新
-                // followPage経路は独立サムネタイマーを使わない（スクレイプ末尾で反映）→ api のみ起動。
-                if (!appState.getTimer('thumbnail') && useApiSource()) startThumbnailUpdate();
-                if (!appState.getTimer('todo')) {
-                    startToDoListUpdate();
-                    // キューがあれば即座に処理開始
-                    if (programInfoQueue.size() > 0) {
-                        programInfoQueue.processNow().catch(error => {
-                            console.warn('可視化後のキュー処理でエラーが発生しました:', error);
-                        });
-                    }
-                }
+                // フォアグラウンドに戻ったとき：タイマーを再開し、即座に最新化
+                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
                 if (!appState.getTimer('sidebar')) startSidebarUpdate();
-                if (newProgramWatcher && useApiSource() && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
 
-                // 即座に更新を実行。長時間非表示からの復帰は「しっかり更新」
-                // （更新ボタン相当: TTLを無視して全詳細を再取得し、整列＋サムネも最新化）。
+                // 即座に更新（リスト＋詳細スクレイプ＋サムネ）
                 requestAnimationFrame(async () => {
-                    await performManualUpdate(thorough);
+                    await performManualUpdate();
                 });
             } else {
-                // バックグラウンドに移行したとき：タイマーを停止（リソース消費を抑える）
-                // ただし、完全に停止せず、間隔を延長する方式はqueue.jsで実装済み
-                // ここではサムネイル更新などの重い処理を停止
+                // バックグラウンドに移行したとき：サムネ更新ループを停止（リソース消費を抑える）。
+                // リスト更新ループ(sidebar)は継続（1更新間隔あたり notifybox＋スクレイプ各1回で軽い）。
                 appState.clearTimer('thumbnail');
-                // 新番組先行検知も停止（scanタイマー＋全 per-id リトライタイマー）。非表示中は動かさない。
-                if (newProgramWatcher) newProgramWatcher.stop();
-                // sidebarとtodoはqueue.jsで間隔が延長されるため、停止しない
-                
-                // バックグラウンドに移行した時にセッションが完了していない場合、
-                // キューが空であればセッションを完了
-                // これにより、バックグラウンドに移行した後にセッションが残り続ける問題を防ぐ
+
+                // バックグラウンド移行時にローディングセッションが残っていれば、少し待って完了する
+                // （残り続ける問題の防止）
                 const hasActiveSession = loadingManager && loadingManager.getCurrentSessionId();
-                if (hasActiveSession && programInfoQueue.size() === 0) {
-                    // 少し待ってからチェック（他の処理が完了するのを待つ）
+                if (hasActiveSession) {
                     setTimeout(() => {
-                        const stillHasSession = loadingManager && loadingManager.getCurrentSessionId();
-                        if (stillHasSession && programInfoQueue.size() === 0) {
+                        if (loadingManager && loadingManager.getCurrentSessionId()) {
                             console.warn('[ローディング] バックグラウンド移行時: セッションを完了します');
                             finishLoadingSession();
                         }
@@ -454,71 +383,45 @@ const cleanup = () => {
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 
-    // 新番組先行検知の停止（scanタイマー＋全 per-id リトライタイマー）
-    if (newProgramWatcher) newProgramWatcher.stop();
-
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
-    
-    // キュー処理を停止
-    programInfoQueue.stop();
-    programInfoQueue.clear();
 
     // イベントハンドラーの削除
     const onResizeHandler = appState.getHandler('onResize');
     if (onResizeHandler) {
         window.removeEventListener('resize', onResizeHandler);
     }
-    
+
     hideAutoNextModal();
 }
 
 // すべての更新タイマーを停止
 function stopAllTimers() {
     appState.clearTimer('thumbnail');
-    // todoタイマーはQueueクラスが管理しているため、直接停止
-    programInfoQueue.stop();
-    appState.clearTimer('todo');
     appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');
-    // 新番組先行検知（scanタイマー＋全 per-id リトライタイマー）も停止
-    if (newProgramWatcher) newProgramWatcher.stop();
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
 async function handleSidebarOpenStateChange(open) {
     if (open) {
         // タイマーを先に開始（UIの反応を優先）
-        // followPage経路は独立サムネタイマーを使わず、スクレイプ末尾でサムネ反映するので api のみ起動。
-        if (!appState.getTimer('thumbnail') && useApiSource()) startThumbnailUpdate();
+        if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
         if (!appState.getTimer('sidebar')) startSidebarUpdate();
-        if (newProgramWatcher && useApiSource()) newProgramWatcher.start();
 
-        // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）
-        // requestAnimationFrameで次のフレームに延期して、開閉アニメーションを優先
-        // ただし、タブが非アクティブの場合、requestAnimationFrameが実行されない可能性があるため、
-        // setTimeout のフォールバックも用意する
+        // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）。
+        // requestAnimationFrameで次のフレームに延期し、非アクティブタブ向けに setTimeout フォールバックも用意する。
         let rafExecuted = false;
         requestAnimationFrame(async () => {
             rafExecuted = true;
-            // 初回ロードまたは手動更新を実行
-            // oneTimeFlagが立っている場合は初回ロード、それ以外は手動更新
-            if (appState.update.oneTimeFlag) {
-                if (!appState.getTimer('todo')) await startToDoListUpdate();
-            } else {
-                await performManualUpdate();
-            }
+            await performManualUpdate();
         });
-        
+
         // requestAnimationFrameが実行されない場合のフォールバック（タブが非アクティブなど）
         setTimeout(() => {
             if (!rafExecuted) {
                 console.warn('⚠️ requestAnimationFrameが実行されなかったため、fallbackで更新を呼び出し');
-                if (appState.update.oneTimeFlag) {
-                    startToDoListUpdate();
-                } else {
-                    performManualUpdate();
-                }
+                performManualUpdate();
             }
         }, 100); // 100ms後にチェック
     } else {
@@ -530,13 +433,6 @@ async function handleSidebarOpenStateChange(open) {
 const startThumbnailUpdate = () => {
     if (updateManager) {
         updateManager.startThumbnailUpdate();
-    }
-}
-
-// ToDoリスト更新開始（新しいQueueクラスを使用）
-const startToDoListUpdate = async () => {
-    if (updateManager) {
-        await updateManager.startToDoListUpdate();
     }
 }
 
@@ -609,22 +505,6 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.animatedThumbnail = changes.animatedThumbnail.newValue;
         setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
     }
-    if (changes.dataSource) {
-        options.dataSource = changes.dataSource.newValue;
-        // ソース切替。followPage では20秒スクレイプループが「新番組検知」も「サムネ更新」も兼ねるので、
-        // NewProgramWatcher と独立サムネタイマーを止める。api では両方起動する。
-        if (appState.sidebar.isOpen) {
-            if (useApiSource()) {
-                if (newProgramWatcher && !appState.getTimer('newProgramScan')) newProgramWatcher.start();
-                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
-            } else {
-                if (newProgramWatcher) newProgramWatcher.stop();
-                appState.clearTimer('thumbnail');
-            }
-            // 新ソースで即時に取り直して反映（サイドバータイマーは performManualUpdate 内で新間隔で再起動される）
-            requestAnimationFrame(() => performManualUpdate());
-        }
-    }
 
     // 更新間隔が変更された場合はタイマーを再起動
     if (needsRestart) {
@@ -678,9 +558,9 @@ function finishLoadingSession() {
     }
 }
 
-async function performManualUpdate(settle = false) {
+async function performManualUpdate() {
     if (updateManager) {
-        await updateManager.performManualUpdate(settle);
+        await updateManager.performManualUpdate();
     }
 }
 
@@ -696,20 +576,9 @@ async function updateSidebar() {
 }
 
 /**
- * active-point属性を更新してソートを実行
- * 番組詳細情報が取得された後に呼ばれる
- * @param {boolean} shouldSort - ソートを実行するかどうか（初回/サイドバーオープン/更新ボタン時のみtrue）
- */
-function updateActivePointsAndSort(shouldSort = false) {
-    if (updateManager) {
-        updateManager.updateActivePointsAndSort(shouldSort);
-    }
-}
-
-/**
  * オプション内容を反映
  * handlers/optionsHandler.js に完全委譲
  */
 const reflectOptions = () => {
-    setupOptionsHandler(options, programInfoQueue, sortPrograms);
+    setupOptionsHandler(options, sortPrograms);
 };

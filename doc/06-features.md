@@ -8,7 +8,7 @@
 ## 設定の全体像
 
 - **既定値の定義元**: `src/main.js` の `defaultOptions`。すべて `chrome.storage.local` に永続化。
-- **フォームUIの生成元**: `buildSidebarShell()`（`render/sidebar.js`）内の `optionHtml`。`#optionForm` に4ラジオグループ。
+- **フォームUIの生成元**: `buildSidebarShell()`（`render/sidebar.js`）内の `optionHtml`。`#optionForm` に5ラジオグループ（表示順序/自動更新/オートオープン/自動移動/動くサムネ）＋末尾にテーマトグル。
 - **フォームの初期反映・保存**: `handlers/optionsHandler.js`（`change` で `chrome.storage.local` へ保存。`programsSort` のみ保存＋即DOMソートの特別分岐）。
 - **実行時反映**: `chrome.storage.onChanged`（`main.js`）が各キー変更を各機能へ配線。
 
@@ -24,7 +24,6 @@
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
 | ライト/ダーク | （設定画面**末尾**のトグル。ON=ダーク） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `#theme_toggle`） | onChanged→`applyTheme` |
 | サムネ間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数） | — | — |
-| 新番組先行検知（常時ON・実質固定） | （UI/保存なし） | — | `newProgramScanIntervalMs` 他（既定に無し） | 30秒（定数） | — | — |
 
 ---
 
@@ -47,53 +46,29 @@
 ## 4. ライブサムネイル表示・遅延更新
 - カード初期src: `makeProgramElement`（user=スクショ`?cache=`、channel=大サイズ）。
 - 定期更新: `UpdateManager.startThumbnailUpdate`（**20秒**、`updateThumbnailInterval`）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。
-- ✅ **長時間非表示からの復帰（仕様変更）**: タブを `visibilityFullRefreshMs`(60秒)以上非表示にしてから戻ると、**更新ボタン相当のしっかり更新**（`forceRefetch`で全詳細再取得＋整列＋全サムネ最新化）を実行。長時間放置後に「サムネがアイコンのまま／情報が古い」問題への対策（`main.js` の `handleVisibilityChange` / `tabHiddenAt`）。60秒未満の復帰は軽量更新。
+- **ネットワーク詳細取得はしない**: このループは storage に保存済みの**安定したライブサムネURL＋キャッシュバスター**で `<img>` を更新するだけ（番組ごとの詳細取得は伴わない）。プリロード成功画像は動くサムネ②へも給餌される（§15）。
+- ✅ **可視復帰時の再取得**: タブを非表示にしてから戻ると、`main.js` の `handleVisibilityChange` が `performManualUpdate`（リスト＝notifybox＋詳細＝フロントAPI＋サムネ）を実行して最新化する。非表示中はサムネ更新ループを停止（リスト更新ループは軽いので継続）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
 - 対応設定: **直接のUI項目なし**（フォームのヘルプに「サムネは設定と無関係に20〜60秒で自動更新」と明記）。`updateThumbnailInterval` 保存キーは既定に無く実質固定20秒。
 
-## 5. 定期自動更新（番組リスト）
-- タイマー: `UpdateManager.startSidebarUpdate`（`updateProgramsInterval` 秒ごと、**初回も120秒後**）。
-- 取得→描画: `updateSidebar()`（`fetchLivePrograms` → 差分再構築 → ソート → カウント更新、各番組をキュー add）。失敗時 `#api_error`。
+## 5. 定期自動更新（番組リスト＋詳細）
+- タイマー: `UpdateManager.startSidebarUpdate`（`updateProgramsInterval` 秒ごと。setTimeout方式なので**初回も1周期後**）。タブ非表示中はスキップ（次周期へ）。
+- 取得→描画: `updateSidebar()`。**リスト（notifybox）と 詳細（フォロー中ページのフロントAPI）を `Promise.all` で並列取得**し、
+  詳細を先に storage へ upsert（`fetchFollowedProgramsViaPage` → `upsertProgramInfos`）してから、
+  リストと突き合わせてカードを組み、`programsSort` でソート → カウント更新。詳細がカード生成時点で揃っているので**初回描画から人気度が確定**する。失敗時 `#api_error`。
+- **詳細取得はフロントAPIに一本化**: 従来の「1番組=詳細API×N」＋レート制限キューは廃止（`queue.js` / `ProgramInfoQueue` 削除）。フロントAPIを通常1リクエスト（100件超はページングで数リクエスト）叩いて全放送中フォロー番組の詳細を取得する。→ [04-data-flow](./04-data-flow.md) / [05-external-api](./05-external-api.md)
 - 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢60/120/180）。変更時 `restartSidebarUpdate`。
-
-## 5.5 新番組先行検知（NewProgramWatcher）
-- 目的: 新しく始まった番組を、**通常の120秒リスト更新を待たず**に早く列へ載せ、ライブサムネを速く表示する。
-  検知遅延 最悪120秒→**最悪30秒（平均約15秒）**。
-- タイマー: `NewProgramWatcher.start` → `_runScan`（`newProgramScanIntervalMs`=**30秒**、自己再スケジュール）。
-  稼働は**サイドバーOPEN×タブ可視**時のみ（`handleSidebarOpenStateChange`/`handleVisibilityChange`/`cleanup` で start/stop）。
-- 検知: 各tickで **既存 `updateManager.getLivePrograms(100)`**（計測付き・in-flight dedupe共有）で notifybox を取得し、
-  **DOMに描画中の番組id**（`#liveProgramContainer` の子の `el.id`）と差分して未知idを抽出。`updateSidebar` と同じid規約
-  （`String(program.id)`）なので**重複カードを作らない**。新規idは既存 `updateSidebar({ preloadedList, silent })` に委譲して
-  カード生成＋詳細エンキュー（`silent`=更新ボタンのスピナー無し、`preloadedList`=取得済みリスト再利用で**二重fetch無し**）。
-- **サムネURL未生成対応（肝）**: ニコ生の詳細API(`liveInfoAPI`)は放送開始直後、`liveScreenshotThumbnailUrls` がまだ空のことがある。
-  その番組は `fetchAndSave` が「保存せず false」を返す（`queue.js`）ため localStorage に詳細が載らない。
-  - watcher は **partial を一切保存しない**（保存すると `_fetchedAt` が付き `programInfoTtlMs`(60秒) で `updateSidebar` の
-    再取得が止まる＝既知の落とし穴）まま、番組ごとに**バックオフ**で「詳細だけ」再取得する。
-    間隔 `3s→6s→12s→24s→30s上限`（`newProgramNotReadyBaseMs`/`…MaxDelayMs`）、**6回 または 90秒**で諦め
-    （`…MaxAttempts`/`…MaxTotalMs`）。全て `ProgramInfoQueue` 経由＝4件/秒レート制限・重複排除を通す。
-  - 未生成の判定は **storage 観測**（`getProgramInfos` に `lv{id}` が現れたか）で行う＝**queue.js は無改修**。
-    詳細が保存でき次第 `updateThumbnail(true)` で**次の20秒tickを待たず即描画**（近接解決は150msでまとめる）。
-  - 諦め後は placeholder カードが残るので次スキャンで**再検知ループにならず**、通常120秒サイクルへ委譲（CDNがURLを出した
-    時点で収束＝二重の安全網）。
-- キュー確実処理: サイドバーを閉じて開き直した直後は連続処理ループ(`ProgramInfoQueue.start`)が停止していることがあるため、
-  enqueue後に `_kickQueue()`（`processNow` を合流1回・`isLoading`中はsettleに委譲）で確実に drain する。ループ稼働中でも
-  `isProcessing`ガード＋dedupe＋レート制限で協調するので無害。
-- API負荷: notifybox は定常時 30秒スキャンで **+2回/分**（120秒サイクル0.5回/分と合わせ約2.5回/分＝異常検出しきい値10回/分に余裕）。
-  detail は新番組があるときだけ＋未生成リトライ（1番組最大6回/90秒）で、いずれも4件/秒枠内。閉/非表示時は0。
-- 対応設定: **UI項目なし・常時ON**（`newProgramScanIntervalMs` 等の定数のみ。負荷が有界＝OPEN×可視時のみ稼働のためトグル不要）。
-- 実装: `src/managers/NewProgramWatcher.js`。→ [02-architecture §2.6](./02-architecture.md) / [09-gotchas](./09-gotchas-and-techdebt.md)
 
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`。`active`=`active-point`降順（人気順）、`newest`=**notifybox API の並び順を保持**（新着順）。
 - ✅ 2026-07-11修正: notifybox API は既に**放送開始が新しい順**で番組を返す（実機確認済み）。旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` が各カードに `data-api-index`（API配列の位置）を付与し、`newest` はそれを昇順に並べて**API順をそのまま保つ**（詳細取得に非依存・全番組に付与されるのでフォールバック沈みも無し）。同時刻/欠落時のみ lv番号降順フォールバック。
-- 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。詳細取得後 `updateActivePointsAndSort(shouldSort)` で再計算。
+- 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。カード生成時に `active-point` 属性へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
-- ✅ **初回ロード時のガチャつき対策（仕様変更）**: 人気順は詳細取得(4件/秒)が出揃うまで順位が確定しないため、
-  従来はバッチ毎に再ソートしてカードが飛び跳ねていた。対策として:
-  - **キャッシュで人気順を確定できる場合（全番組がキャッシュ済み）は、最初から人気順で表示（移動なし）**。← 変更前の挙動を維持
-  - **詳細未取得の番組がある場合のみ**、確定するまで新着順で安定表示（オーバーレイ無し・クリック可）→ 出揃ったら1回だけ人気順へ [FLIP](./03-module-reference.md) で滑らかに並べ替え。
-  - 進捗は更新ボタンのスピナー。制御は `AppState.update.settling` / `settlingNeedsNewest` ＋ `UpdateManager.getEffectiveSortType` / `performInitialLoad`。
-  - TTLキャッシュにより2回目以降はほぼ常に「最初から人気順・移動なし」。新着順は notifybox のAPI順を保つため、初回から放送開始順で表示され並べ替え（FLIP）は起きない。詳細は [04-data-flow フェーズ3](./04-data-flow.md)。
+- ✅ **初回描画から順位確定（整列確定機構は不要に）**: 詳細（視聴者数/コメント）が**リストと同時にフロントAPIで storage へ載る**ため、
+  カード生成時点で人気度が確定している。よって**最初のペイントから正しい順序で表示**され、
+  「詳細が揃うまで新着順で待って出揃ったら人気順へ並べ替える」settling／FLIP 機構は撤去した
+  （旧 `AppState.update.settling` / `settlingNeedsNewest` / `getEffectiveSortType` / `performInitialLoad` などは全て廃止）。
+  新着順は notifybox のAPI順（`data-api-index` 昇順）を保つため、こちらも並べ替えは起きない。詳細は [04-data-flow](./04-data-flow.md)。
 
 ## 7. オートオープン（自動でサイドバーを開く）
 - 初期判定: `setup()` の `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`。
@@ -109,10 +84,9 @@
 - ✅ 2026-07-11修正（暴走ループ）: `observeProgramEnd` の MutationObserver がデバウンス無しで毎変異 `onEnded`→`updateSidebar` を叩き、`replaceChildren` の変異で自己駆動ループ化して `getLivePrograms` が暴走していた。終了ガイド表示中は**20秒スロットル**で再発火を制限（`status.js`）。→ [09-gotchas S](./09-gotchas-and-techdebt.md)
 
 ## 9. 手動更新ボタン（リロード）
-- `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate(true)`**:
-  リスト更新（`notifybox` を毎回取得＝新着/終了番組を反映、人気順は再ソートを抑制のうえ即描画）→ **全番組の詳細を再取得（`forceRefetch`＝TTL無視、視聴者数等も最新化）** → **人気順なら1回だけFLIPで最新の人気順へ整える** → **サムネを強制更新**（10秒TTL・エラーバックオフをバイパス、コンテナ内全サムネ対象）→ 最低1秒ローディング→ 定期タイマー再起動。
-  新着順への一時退避はしない（すでに人気順表示中のため）。
-  ※明示操作なので**TTLを無視して全詳細を再取得**する（番組数が多いと詳細取得4件/秒で時間がかかる＝スピナー長め。その間もリスト/サムネは即更新済み・クリック可）。ページ開き時・自動更新はTTLを維持。
+- `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate()`**（初回ロード・タブ復帰・サイドバー再オープンと共通の入口）:
+  `updateSidebar()`（リスト＝notifybox＋詳細＝フロントAPIを並列取得して再描画・ソート）→ **サムネを強制更新**（`updateThumbnail(true)`＝10秒TTL・エラーバックオフをバイパス、コンテナ内全サムネ対象）→ 最低1秒ローディング → 定期タイマー再起動。
+  詳細は毎回フロントAPIで**全件更新**されるため、TTL無視の `forceRefetch` や「新着順への一時退避」「人気順へのFLIP整列」は不要になった（撤去済み）。
 - ローディング表示: `LoadingManager` が `.loading` ＋ `pointer-events:none`（60秒タイムアウト）。
 - 対応設定: なし（機能ボタン）。
 
@@ -121,7 +95,7 @@
 - 設定は `.sidebar_body` 内に配置（body直下へは移動しない＝`insertSidebar` の appendChild 廃止）。
 - UI: 「設定」ヘッダー＋×、各項目は**セグメント型（`.opt-segment`：ラジオを隠しラベルをボタン化、選択は `--sb-accent`）**、テーマはトグルスイッチ。ヘルプ「?」・β版バッジは維持。
 - フォーム同期・保存: `setupOptionsHandler`（ラジオは非表示だが機能は同じ）。
-- 対応設定: フォーム内の5項目（テーマ/表示順序/自動更新/オートオープン/自動移動/動くサムネ）。`sidebarWidth`/`isOpenSidebar` はフォーム外。
+- 対応設定: フォーム内の6項目（表示順序/自動更新/オートオープン/自動移動/動くサムネ/テーマ）。`sidebarWidth`/`isOpenSidebar` はフォーム外。データ取得方式トグル（旧・実験：API/ページ取得/自動）は撤去済み（詳細取得はフロントAPIに一本化＝§14）。
 
 ## 11. API失敗表示（ログイン誘導）
 - `#api_error`（ログインリンク付き）。`getLivePrograms` 成功で `none`、失敗で `block`。
@@ -129,7 +103,7 @@
 
 ## 12. 別窓くん連携 / ポップアップ抑止
 - `?popup=on` の時は `DOMContentLoaded` の先頭で即 `return` し、`setup()` にも入らず**一切起動しない**（姉妹ツール「別窓くん」のポップアップ内で二重起動しないため）。判定は `new URL(location.href).searchParams.get('popup') === 'on'`（`main.js`）。
-- デバッグ用の `initApiStats()`（5分ごとの監視 `setInterval`）も**このガードの内側**に置いてあり、別窓では張られない（常時コストゼロ）。モジュール直下で走るのは無害な一度きりの処理のみ（`ProgramInfoQueue` オブジェクト生成＝タイマー未起動、`localStorage.programInfos` の初期化）。
+- モジュール直下で走るのは無害な一度きりの処理のみ（`localStorage.programInfos` の初期化と、`followPageSource.js` の副作用インポートによる `window.__testFollowScrape` デバッグ関数の登録＝いずれもタイマー未起動。関数名は据え置きだが実体はフロントAPI取得を叩く＝§13）。定期監視の `setInterval` は張られない（旧 `apiStats` は撤去済み・§13）。
 
 ## 15b. ライト/ダークモード（テーマ切替）
 - サイドバーは既定**ライト**。**ダークモード**にも対応。
@@ -140,8 +114,9 @@
 - テーマ対象: サイドバー本体（背景/文字/ヘッダー/アイコン/サムネ枠/スピナー/左端ライン）＋設定パネル（セグメント含む）。自動移動モーダルは元から明色。
 
 ## 13. デバッグ機能
-- `window.showApiStats()` で API 呼び出し統計をコンソール表示。5分ごとに異常頻度を自動警告。
-- `window.showAnimThumbStats()`（モジュール読込時に無条件公開＝`showApiStats`同様。content scriptのisolated worldに定義されるためコンソールは拡張コンテキストを選ぶ）で②の統計を表示: **①給餌数(ingested)**・②自前取得(fetches＝主にホバー)・解析/新規保存/重複破棄・CORS汚染(taintStops)。給餌方式(§15)の効き目確認用で、**ingestedが主・fetchesがホバーのみ・taintStops=0が正常**。`setAnimatedThumbnailEnabled(true)` のたびにリセット。
+- `window.__testFollowScrape()` で、フォロー中ページ・フロントAPI方式の取得結果を件数＋所要ms＋表でコンソール表示（`followPageSource.js` が副作用インポートで登録）。**関数名はスクレイプ時代のまま据え置き**だが、実体は現行のフロントAPI取得（`fetchFollowedProgramsViaPage`＝ページング込み）を叩く。詳細取得（視聴者数/コメント/サムネURL/配信者/会員限定/開始時刻）が正しく拾えているかの確認用。
+  - ※旧 `window.showApiStats()`（API呼び出し統計・5分ごとの異常頻度警告）は**撤去済み**（`src/debug/apiStats.js` 削除）。詳細APIをN回叩くキュー自体が無くなったため。
+- `window.showAnimThumbStats()`（モジュール読込時に無条件公開。content scriptのisolated worldに定義されるためコンソールは拡張コンテキストを選ぶ）で②の統計を表示: **①給餌数(ingested)**・②自前取得(fetches＝主にホバー)・解析/新規保存/重複破棄・CORS汚染(taintStops)。給餌方式(§15)の効き目確認用で、**ingestedが主・fetchesがホバーのみ・taintStops=0が正常**。`setAnimatedThumbnailEnabled(true)` のたびにリセット。
 - 定期の自動ログは**リリース向けに廃止**（計測で一本化を検証済みのため。2026-07-13）。統計は `window.showAnimThumbStats()` の手動呼び出しで確認する。
 - **CORS汚染時のみ警告**: 万一 crossOrigin 画像が canvas を汚染して解析不可になった場合、`computeSignature` で**1回だけ** `console.warn`（`⚠️ 動くサムネ: CORS汚染で…`）を出し、以降①は平文取得へ自動フォールバック。`console.warn` はコンソールのコンテキスト選択に関係なく `top` にも表示されるため、実機テスト中もこの重要シグナルは見逃さない。
 
@@ -167,10 +142,13 @@
   オーバーレイの `z-index` を **1**（ボタンより下）にして覆い隠さないようにしている（main.css）。オーバーレイを作り直す際も、
   必ず「ベースサムネの上・ホバーボタンの下」を維持すること。
 
-## 14. 番組詳細のTTLキャッシュ（内部最適化・仕様変更）
-- 番組詳細は `ProgramInfoQueue` がレート制限（4件/秒）で取得し、`upsertProgramInfo` で localStorage `programInfos` に保存（保存時に `_fetchedAt` を付与）。
-- ✅ **`UpdateManager.updateSidebar` は、直近 `programInfoTtlMs`(60秒) 以内に取得済みの番組はキュー追加をスキップ**し再取得しない。
-  - 効果: 2回目以降の読み込み・サイドバー再オープンが高速化、API負荷も軽減。特に人気順の「整列確定」がほぼ一瞬になる。
-  - 鮮度: 定期更新（120秒）は60秒超のため通常どおり再取得され、詳細が古びない。
-  - **例外**: **更新ボタン（`forceRefetch`）はTTLを無視して全番組の詳細を再取得**する（明示的な「今すぐ最新に」）。TTL最適化はページ開き時・自動更新にのみ適用。
-- 対応設定: なし（内部最適化）。関連: [09-gotchas E](./09-gotchas-and-techdebt.md)、[05-external-api](./05-external-api.md)。
+## 14. 番組詳細の取得（フロントAPI一括・ページング対応）
+- 番組詳細（視聴者数/コメント/ライブサムネURL/配信者/providerType/会員限定/開始時刻）は、**フォロー中ページが「もっと見る」で叩く公開フロントAPI**を直接呼んで全放送中フォロー番組ぶんを一括取得し、`upsertProgramInfos` で localStorage `programInfos` に保存（`_fetchedAt` 付与）。実装は `src/services/followPageSource.js`。SSR埋め込みデータ（`embedded-data`）のスクレイプは廃止した。
+  - エンドポイント: `GET https://live.nicovideo.jp/front/api/pages/follow/v1/programs?status=onair&offset=<0始まりページ番号>&limit=100`（`credentials: include`）。応答は `{ data: { programs: [...], total: N } }`。詳細は [05-external-api](./05-external-api.md)。
+- 各 `programs[]` 要素を `mapApiProgramToInfo()` が内部 programInfo 形へ変換（`beginAt`（msエポック）→`onAirTime.beginAt` ISO、`watchCount`→viewers、`commentCount`→comments、`providerType` `community`→`'user'` など）。従来の詳細APIと同じshapeなので `makeProgramElement` / `resolveLiveThumbnailBaseUrl` / `calculateActivePoint` がそのまま読める。
+- ✅ **ページング対応済み**: `fetchFollowedProgramsViaPage()` が `offset`=0,1,2,… とページ番号を進め（ページNは `items[N*100 .. N*100+100)`）、id重複を除きつつ `total` 件に達するまで取得する（安全上限 `MAX_PAGES=5`＝最大500件）。`limit=100` なので同時放送中フォローが100件未満なら通常**1リクエスト**で完了し、100件超でも全番組の詳細が揃う（旧・約70件で頭打ちの制約は解消）。
+- 常に**ライブスクショ**（時間変化する実サムネ）を優先し、配信者設定の固定画像は使わない。フロントAPIは `listingThumbnail` の1枠しか返さず、固定画像配信者ではそこに固定画像が入るため、`isLiveScreenshotUrl` でライブスクショ形のときだけ採用し、それ以外は `thumbnailUrl=''`（表示しない）。
+- ✅ **固定画像配信者のサムネ補完（選択的フォールバック）**: ライブサムネが空の番組（固定画像配信者／放送直後で未生成）だけ、`fillMissingLiveThumbnails()` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する。**空の番組だけ**が対象（通常0〜数件）で上限 `MAX_DETAIL_FALLBACK=30`／サイクル。旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める。
+- ✅ **旧・詳細APIキュー方式は撤去**: 「1番組=詳細API×N＋4件/秒レート制限キュー（`ProgramInfoQueue`）＋直近60秒スキップの独立TTL（`programInfoTtlMs`）」は全廃。詳細は毎周期フロントAPIで**全件フルレコード**が書き戻されるため、番組ごとの再取得判定（TTL）も `forceRefetch` も不要。詳細API（`fetchProgramInfo` / `liveInfoAPI`）は上記のサムネ補完でのみ限定利用する。
+- **フォールバックなし**: フロントAPI取得が失敗した周期は、その周のみ詳細が古い/欠落する（意図的）。旧・全件を詳細APIで取り直す方式には戻さない。番組ごとの `updateSidebar` try/catch と `makeProgramElement` の `String(id)` 変換でクラッシュは防御。
+- 対応設定: なし（内部の取得方式）。関連: [04-data-flow](./04-data-flow.md)、[05-external-api](./05-external-api.md)。
