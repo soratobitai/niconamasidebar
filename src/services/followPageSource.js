@@ -45,7 +45,7 @@ function mapProviderType(pt) {
  * ライブスクショ: asset*.dlive.nicovideo.jp/.../screenshot/.../screenshot.jpg 形。
  * 固定画像: listing-thumbnail.live.nicovideo.jp?image=...thumbnail_{ts}.png 形。
  */
-function isLiveScreenshotUrl(u) {
+export function isLiveScreenshotUrl(u) {
     if (typeof u !== 'string' || !u) return false
     return u.includes('/screenshot/') || /(^|\/\/|\.)dlive\.nicovideo\.jp\//i.test(u)
 }

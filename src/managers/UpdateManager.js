@@ -1,10 +1,14 @@
-import { fetchLivePrograms } from '../services/api.js';
-import { fetchFollowedProgramsViaPage } from '../services/followPageSource.js';
+import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
+import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { updateThumbnailInterval, watchPageBaseUrl } from '../config/constants.js';
+
+// A1: 新番組など「ライブサムネがまだ空」の番組を、20秒サムネループで詳細APIから再取得する設定。
+const THUMB_RETRY_MAX_ATTEMPTS = 8   // 1番組を20秒ループで再取得する最大回数（超えたら120秒サイクルへ委ねる）
+const THUMB_RETRY_MAX_PER_CYCLE = 10 // 1ティックで叩く詳細APIの上限（暴走防止）
 
 /**
  * 更新処理とタイマーの管理
@@ -29,6 +33,8 @@ export class UpdateManager {
 
         // 重複実行防止フラグ
         this.isPerformingManualUpdate = false;
+        // A1: ライブサムネ空番組の再取得試行回数（id -> attempts）。諦め判定に使う。
+        this._thumbRetryAttempts = new Map();
     }
 
     /**
@@ -37,7 +43,9 @@ export class UpdateManager {
      * ネットワーク詳細取得は行わない。動くサムネ（②）もここでプリロードした画像から給餌される。
      */
     startThumbnailUpdate() {
-        const runUpdateThumbnail = () => {
+        const runUpdateThumbnail = async () => {
+            // 新番組など「ライブサムネがまだ空」の番組を詳細APIで再取得し、用意でき次第すぐ差し替える（A1）
+            await this._retryPendingLiveThumbnails();
             this.updateThumbnail();
             const interval = this.options.updateThumbnailInterval || updateThumbnailInterval;
             const timer = setTimeout(runUpdateThumbnail, interval * 1000);
@@ -45,6 +53,63 @@ export class UpdateManager {
         };
 
         runUpdateThumbnail(); // 即座に実行
+    }
+
+    /**
+     * A1: 描画中の user 番組でライブサムネが空のもの（放送直後で未生成 等）だけ、
+     * 詳細API(fetchProgramInfo)で liveScreenshotThumbnailUrls を再取得し、取れ次第 storage を更新する。
+     * 20秒サムネループから呼ぶので、新番組は最大~20秒でライブサムネへ差し替わる。
+     * 空の少数だけ・番組ごとに諦め回数あり＝旧「全番組×詳細API」の重さには戻らない。
+     * @returns {Promise<boolean>} 1件以上ライブサムネを補完したら true
+     */
+    async _retryPendingLiveThumbnails() {
+        const container = document.getElementById('liveProgramContainer');
+        if (!container) return false;
+        const rendered = new Set();
+        for (const el of container.children) { if (el && el.id) rendered.add(el.id); }
+        if (rendered.size === 0) return false;
+
+        const infos = getProgramInfosFromStorage();
+        if (!Array.isArray(infos)) return false;
+
+        // 対象: 描画中 × user × 非会員限定 × ライブサムネ未取得
+        const pending = infos.filter((info) => {
+            if (!info || info.providerType !== 'user' || info.isMemberOnly) return false;
+            if (!rendered.has(String(info.id).replace(/^lv/, ''))) return false;
+            const hasLive = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle;
+            return !hasLive && !info.thumbnailUrl;
+        });
+
+        // リストから消えた/解決済みの id は試行回数マップから掃除
+        const pendingIds = new Set(pending.map((i) => i.id));
+        for (const id of Array.from(this._thumbRetryAttempts.keys())) {
+            if (!pendingIds.has(id)) this._thumbRetryAttempts.delete(id);
+        }
+
+        // 諦め回数未満のものだけ、1ティックの上限件数まで
+        const targets = pending
+            .filter((info) => (this._thumbRetryAttempts.get(info.id) || 0) < THUMB_RETRY_MAX_ATTEMPTS)
+            .slice(0, THUMB_RETRY_MAX_PER_CYCLE);
+        if (targets.length === 0) return false;
+
+        const updates = [];
+        await Promise.all(targets.map(async (info) => {
+            this._thumbRetryAttempts.set(info.id, (this._thumbRetryAttempts.get(info.id) || 0) + 1);
+            try {
+                const detail = await fetchProgramInfo(String(info.id).replace(/^lv/, ''));
+                if (!detail) return;
+                const ss = detail.liveScreenshotThumbnailUrls;
+                const cand = (ss && (ss.middle || ss.large || ss.small)) || '';
+                if (isLiveScreenshotUrl(cand)) {
+                    updates.push({ ...info, liveScreenshotThumbnailUrls: { middle: cand }, large1280x720ThumbnailUrl: cand, thumbnailUrl: cand });
+                    this._thumbRetryAttempts.delete(info.id);
+                }
+            } catch (_e) { /* 個別失敗は次ティックで再挑戦 */ }
+        }));
+
+        if (updates.length === 0) return false;
+        upsertProgramInfos(updates);
+        return true;
     }
 
     /**
