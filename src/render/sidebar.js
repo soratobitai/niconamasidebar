@@ -207,6 +207,8 @@ export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
     const onComplete = options.onComplete || null
+    // 指定時、その id 集合の番組だけ更新する（ローリング更新＝番組ごと独立更新で使う）。未指定なら全件。
+    const onlyIds = (options && options.onlyIds) || null
     // Convert to Map for O(1) lookup if array
     const infoMap = Array.isArray(programInfos)
         ? new Map(programInfos.map((i) => [i.id, i]))
@@ -261,7 +263,9 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             
             const card = img.closest('.program_container')
             if (!card || !card.id) continue;
-            
+            // ローリング更新: 対象外の番組はスキップ（全体を1周期で番組ごとにずらして更新する）
+            if (onlyIds && !onlyIds.has(card.id)) continue;
+
             const info = infoMap.get(`lv${card.id}`)
 
             const { nextUrl, key } = computeNext(info)

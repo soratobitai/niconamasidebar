@@ -43,16 +43,34 @@ export class UpdateManager {
      * ネットワーク詳細取得は行わない。動くサムネ（②）もここでプリロードした画像から給餌される。
      */
     startThumbnailUpdate() {
-        const runUpdateThumbnail = async () => {
-            // 新番組など「ライブサムネがまだ空」の番組を詳細APIで再取得し、用意でき次第すぐ差し替える（A1）
-            await this._retryPendingLiveThumbnails();
-            this.updateThumbnail();
-            const interval = this.options.updateThumbnailInterval || updateThumbnailInterval;
-            const timer = setTimeout(runUpdateThumbnail, interval * 1000);
+        // 番組ごとに独立（ずらして）更新するローリング方式。
+        // 1本のタイマーで1tick=1番組ずつ更新し、updateThumbnailInterval で全番組を一巡する。
+        // 一斉更新の“チカッ”と瞬間負荷（同時デコード/通信）を避ける。総取得回数は従来と同じ＝重くならない。
+        const intervalMs = (Number(this.options.updateThumbnailInterval) || updateThumbnailInterval) * 1000;
+        let cursor = 0;
+        let lastA1At = 0;
+        const runOne = async () => {
+            // A1（ライブサムネ空番組の詳細API再取得）は約 interval ごとに1回だけ
+            const now = Date.now();
+            if (now - lastA1At >= intervalMs) {
+                lastA1At = now;
+                await this._retryPendingLiveThumbnails();
+            }
+            const container = document.getElementById('liveProgramContainer');
+            const ids = container ? Array.from(container.children).map((el) => el.id).filter(Boolean) : [];
+            let nextDelay = intervalMs; // カードが無ければ interval 後に再チェック
+            if (ids.length > 0) {
+                const id = ids[cursor % ids.length];
+                cursor++;
+                // その1番組だけ更新（TTL/バックオフ/動くサムネ給餌は従来どおり per-img で効く）
+                this.updateThumbnail(false, null, new Set([id]));
+                // N番組を interval で一巡するよう、1番組あたりの間隔（過密/過疎を軽くクランプ）
+                nextDelay = Math.min(intervalMs, Math.max(250, Math.round(intervalMs / ids.length)));
+            }
+            const timer = setTimeout(runOne, nextDelay);
             this.appState.setTimer('thumbnail', timer);
         };
-
-        runUpdateThumbnail(); // 即座に実行
+        runOne(); // 即座に開始
     }
 
     /**
@@ -328,7 +346,7 @@ export class UpdateManager {
     /**
      * サムネイルを更新
      */
-    updateThumbnail(force, onComplete) {
+    updateThumbnail(force, onComplete, onlyIds) {
         // DOM操作中は実行しない
         if (this.appState.update.isInserting) {
             if (onComplete) onComplete();
@@ -341,7 +359,8 @@ export class UpdateManager {
             return;
         }
 
-        updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete });
+        // onlyIds 指定時はその番組だけ更新（ローリング更新）。未指定なら全件。
+        updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete, onlyIds });
     }
 
     /**
