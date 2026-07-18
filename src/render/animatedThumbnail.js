@@ -24,12 +24,14 @@ import {
  * 取得方式（給餌方式・二重取得の解消）:
  *   フレームは全て①(通常サムネ更新 updateThumbnailsFromStorage)の給餌から得る（②は自前取得しない）。
  *   ②ON時、①はプリロードを crossOrigin で読み、成功画像を ingestAnimatedThumbnailFrame へ渡す（再取得なし）。
- *   これで「二重通信」をなくし、かつ アニメのコマ＝実際に表示してきたコマ に一致させる
- *   （末尾＝今の静止サムネ）。ホバー時に取り直さないので、表示より新しい絵が末尾に混ざらない。
- *   ①の crossOrigin が失敗した環境では①が平文で表示だけ確保し（表示は無傷）、②へは渡さない（アニメのみ休止）。
+ *   これで「二重通信」をなくす。アニメのコマ（履歴）はすべて①のcrossOrigin成功画像から作る。
+ *   ①のcrossOriginが失敗する番組・タイミングでは①が平文で表示だけ確保し（表示は無傷）、②へは渡さない
+ *   ＝バッファは更新されない。そこで「アニメの末尾コマは、コマ化(crossOrigin)を待たず“今表示中の静止
+ *   サムネそのもの”を平文のまま直接表示」する（getStaticSrc）。これによりcrossOriginの成否に関係なく、
+ *   アニメの末尾は常に「今の静止サムネ」になり、「最新が含まれない」が構造的に起きなくなる。
  */
 
-// programId(数値文字列) -> { frames: [{ url, sig }], lastSig, lastCaptureAt }
+// programId(数値文字列) -> { frames: [{ url, sig, blob }], lastSig, lastSrcUrl }
 const buffers = new Map()
 // アニメ表示中に eviction された blob URL は、表示中フレームを消さないよう遅延revokeする
 const pendingRevokes = new Set()
@@ -107,7 +109,7 @@ function isSidebarLoading() {
 function getOrCreateBuffer(id) {
     let buf = buffers.get(id)
     if (!buf) {
-        buf = { frames: [], lastSig: null, lastCaptureAt: 0, hydrated: false, hydrating: null }
+        buf = { frames: [], lastSig: null, lastSrcUrl: null, hydrated: false, hydrating: null }
         buffers.set(id, buf)
     }
     return buf
@@ -204,6 +206,9 @@ function signatureDiffers(a, b) {
 // ①からの給餌(ingestAnimatedThumbnailFrame)の後半処理。b は呼び出し側が用意したバッファ。
 function storeFrameFromImage(id, img, b) {
     stats.loaded++
+    // このコマを作った取得元URL（①がapplySuccessで静止imgに入れるURLと同一）。
+    // 再生時「今の静止src === 最新コマのURL」なら両者は同じ画像なので末尾スロットを足さない判定に使う。
+    const srcUrl = (img && (img.currentSrc || img.src)) || null
     const sig = computeSignature(img)
     if (!sig) { if (captureUnsupported) stats.taintStops++; return }
     if (!signatureDiffers(sig, b.lastSig)) { stats.dupDiscarded++; return } // 重複 → 破棄
@@ -228,14 +233,16 @@ function storeFrameFromImage(id, img, b) {
         const objUrl = URL.createObjectURL(blob)
         b2.frames.push({ url: objUrl, sig, blob })
         b2.lastSig = sig
+        b2.lastSrcUrl = srcUrl // 最新コマの取得元URL（末尾スロット重複判定に使う）
         stats.stored++
         while (b2.frames.length > FRAME_COUNT) {
             const old = b2.frames.shift()
             // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延し、
-            // shift で全体が前へ詰まる分 animIndex も1つ戻して再生位置のズレ（コマ飛び）を防ぐ
+            // shift で実blobの位置が1つ前へ詰まる分 animIndex も戻して再生位置のズレ（コマ飛び）を防ぐ。
+            // ただし末尾の静止スロット(index === frames.length)は shift で動かないので、そこに居る時は戻さない。
             if (animCard && animCard.id === id) {
                 pendingRevokes.add(old.url)
-                if (animIndex > 0) animIndex--
+                if (animIndex > 0 && animIndex < b2.frames.length) animIndex--
             } else {
                 URL.revokeObjectURL(old.url)
             }
@@ -281,7 +288,11 @@ function pruneAbsentBuffers() {
 
     // リストから消えた番組のバッファを解放
     for (const id of Array.from(buffers.keys())) {
-        if (!presentIds.has(id)) releaseBuffer(id)
+        if (!presentIds.has(id)) {
+            // 解放対象が再生中カードなら先に停止（遅延revokeをflushしてからバッファ削除）
+            if (animCard && animCard.id === id) stopAnim()
+            releaseBuffer(id)
+        }
     }
 }
 
@@ -320,6 +331,30 @@ function getOverlay(card, create) {
     return ov
 }
 
+// 今カードで表示中の静止サムネ画像のURL（平文でも読める＝crossOrigin不要）。
+function getStaticSrc(card) {
+    const im = card && card.querySelector('.program_thumbnail_img')
+    return (im && (im.currentSrc || im.src)) || null
+}
+// 今の静止サムネが「最新blobコマと同じ画像」か（＝crossOrigin給餌が追随できている通常状態）。
+// 同じなら末尾スロットは不要（足すと同一画像の無変化フェードが1拍入る＝空打ちになる）。
+// crossOriginが失敗して静止だけ先に進むと URL が食い違い、ここが false になって末尾スロットが復活する。
+function staticIsDuplicate(b, card) {
+    if (!b.frames.length || !b.lastSrcUrl) return false
+    return getStaticSrc(card) === b.lastSrcUrl
+}
+// 再生コマ数。通常時＝blob枚数（末尾スロットなし・空打ちを避ける）。
+// 静止がズレている時のみ ＋1（末尾＝今の静止サムネ）して最新を必ず映す。
+function playCount(b, card) {
+    return b.frames.length + (staticIsDuplicate(b, card) ? 0 : 1)
+}
+// 再生位置 idx のURL。idx<blob枚数ならそのblob、末尾スロットは今の静止サムネsrc
+// （都度読み直す＝ローリング更新で静止が進んでも常に最新を映す）。
+function playUrlAt(b, idx, card) {
+    if (idx < b.frames.length) return b.frames[idx].url
+    return getStaticSrc(card)
+}
+
 // ホバー中カードが条件を満たせばアニメ開始（冪等：既に再生中/枚数不足なら何もしない）
 // クロスフェード方式（別カットの一瞬混入を防ぐ）:
 //   - layers[0]=base を「常に不透明で現在のコマ」を表示する下地に固定 → フェード中も合計不透明度が
@@ -343,13 +378,14 @@ function tryStartAnim() {
     const fader = layers[1]  // 上に重ねて次コマをフェードインする専用レイヤー
 
     animCard = card
-    // 古い順→最新の時系列で再生する（frames[0]=最も古い → 末尾=最新）。
-    // 最新コマは1周の最後に映る（ループの節目で必ず現れる）。
+    // 古い順→最新の時系列で再生する（frames[0]=最も古い → 末尾）。
+    // 通常時は末尾＝最新blob。crossOriginが失敗して静止だけ先に進んだ時のみ、
+    // playCount が +1 して末尾に「今の静止サムネ」を足す＝最新が必ず映る（staticIsDuplicate 参照）。
     animIndex = 0
     const gen = ++animGen
 
     // 初期コマは base に即載せる（ホバー直後の即時表示）。fader は隠しておく。
-    base.src = buf.frames[animIndex].url
+    base.src = playUrlAt(buf, animIndex, card)
     base.classList.add('show')
     fader.classList.remove('show')
 
@@ -360,8 +396,12 @@ function tryStartAnim() {
             stopAnim()
             return
         }
-        animIndex = (animIndex + 1) % b.frames.length
-        const nextUrl = b.frames[animIndex].url
+        animIndex = (animIndex + 1) % playCount(b, card)
+        let nextUrl = playUrlAt(b, animIndex, card)
+        if (!nextUrl) { // 末尾スロット(静止サムネ)が取れない稀ケース → 先頭へ戻す
+            animIndex = 0
+            nextUrl = b.frames[0].url
+        }
 
         const reveal = () => {
             if (animGen !== gen) return
@@ -419,8 +459,8 @@ function setHoverCard(card) {
     if (card && card.id) {
         // 保存フレームを復元して、あれば即アニメ開始（リロード/番組移動後の復帰）
         ensureHydrated(card.id).then(() => { if (enabled && hoverCard === card) tryStartAnim() })
-        // ※ホバー時に画像を取り直さない：①（通常のサムネ更新）が記録してきたコマ（末尾＝今の静止サムネ）
-        //   だけを古→新で流す。取り直すと静止サムネより新しい絵が末尾に入り「最新が別物」になるため。
+        // ※ホバー時に画像を取り直さない：①（通常のサムネ更新）が記録してきた履歴コマを古→新で流し、
+        //   末尾は playUrlAt が「今表示中の静止サムネ」を直接映す（crossOrigin失敗時でも最新が入る）。
     }
     tryStartAnim()
 }
