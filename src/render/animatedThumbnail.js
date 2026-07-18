@@ -86,6 +86,10 @@ const HOLD_MS = Math.max(0, PLAY_INTERVAL_MS - FADE_MS)
 
 // 署名（重複排除）用の使い回しcanvas
 const SIG_SIZE = 16
+// 別画像とみなす閾値（0-255/マス）。平均差か、1マス(=フレームの1/256領域)の最大差の
+// どちらかが超えたら「別画像」。局所的な動き（顔だけ・一部だけ変化）も拾える。
+const SIG_MEAN_THRESHOLD = 2  // 全体の平均差がこれ以下は「ほぼ同一」（真の重複=全マス0を破棄）
+const SIG_CELL_THRESHOLD = 24 // どこか1マスがこれを超えたら局所変化ありとみなす
 let sigCanvas = null
 let sigCtx = null
 
@@ -181,12 +185,20 @@ function computeSignature(img) {
     }
 }
 
-function signatureDiffers(a, b, threshold = 8) {
+// 別画像とみなすか（重複排除）。真の重複（サーバ未更新＝全マス同一）は破棄しつつ、
+// 局所的な変化（顔だけ・画面の一部だけ動く配信）も拾えるよう、フレーム全体の平均差だけでなく
+// 「1マスの最大差」も見る。平均で薄まって落ちていた小さな/局所的な変化を保存できる。
+function signatureDiffers(a, b) {
     if (!a || !b) return true
     if (a.length !== b.length) return true
     let sum = 0
-    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
-    return sum / a.length > threshold
+    let maxCell = 0
+    for (let i = 0; i < a.length; i++) {
+        const d = Math.abs(a[i] - b[i])
+        sum += d
+        if (d > maxCell) maxCell = d
+    }
+    return (sum / a.length) > SIG_MEAN_THRESHOLD || maxCell > SIG_CELL_THRESHOLD
 }
 
 // ---- 番組詳細からライブサムネURLを得る（会員限定は除外し、ベース選定は共通ヘルパーに委譲） ----
