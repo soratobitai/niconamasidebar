@@ -323,49 +323,9 @@ const setup = async () => {
     window.addEventListener('beforeunload', cleanup);
     window.addEventListener('pagehide', cleanup);
 
-    // Page Visibility APIを使用してタブの可視状態を監視
-    // Chromeの最近の更新により、バックグラウンドタブでのリソース管理が厳しくなったため
-    // バックグラウンドタブではタイマーを停止または間隔を延長して、動画プレーヤーのリソースを確保
-    const handleVisibilityChange = () => {
-        const isVisible = !document.hidden;
-        appState.setVisibility(isVisible);
-
-        // サイドバーが開いている場合のみ処理
-        if (appState.sidebar.isOpen) {
-            if (isVisible) {
-                // フォアグラウンドに戻ったとき：タイマーを再開し、即座に最新化
-                if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
-                if (!appState.getTimer('sidebar')) startSidebarUpdate();
-
-                // 即座に更新（リスト＋詳細スクレイプ＋サムネ）
-                requestAnimationFrame(async () => {
-                    await performManualUpdate();
-                });
-            } else {
-                // バックグラウンドに移行したとき：サムネ更新ループを停止（リソース消費を抑える）。
-                // リスト更新ループ(sidebar)は継続（1更新間隔あたり notifybox＋スクレイプ各1回で軽い）。
-                appState.clearTimer('thumbnail');
-
-                // バックグラウンド移行時にローディングセッションが残っていれば、少し待って完了する
-                // （残り続ける問題の防止）
-                const hasActiveSession = loadingManager && loadingManager.getCurrentSessionId();
-                if (hasActiveSession) {
-                    setTimeout(() => {
-                        if (loadingManager && loadingManager.getCurrentSessionId()) {
-                            console.warn('[ローディング] バックグラウンド移行時: セッションを完了します');
-                            finishLoadingSession();
-                        }
-                    }, 500);
-                }
-            }
-        }
-    };
-    
-    // 初期状態を設定
-    appState.setVisibility(!document.hidden);
-    
-    // visibilitychangeイベントを監視
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // タブの可視/非表示による一時停止・復帰処理は行わない。
+    // サイドバーが開いている間は各更新ループを常時走らせ続ける（非表示中も止めず、復帰時も何もしない）。
+    // ※背景でのサムネ描画は requestAnimationFrame により自然停止する（取得ループは継続）。
 }
 
 // クリーンアップ関数

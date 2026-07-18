@@ -283,10 +283,10 @@ function captureFrame(id, url, source) {
 // これにより「最新サムネを①②が別々に取得する二重通信」をなくす（給餌方式）。
 // ①は各カードのプリロード成功時に呼ぶ。ここでは自前取得しない（stats.fetchesは増えない）。
 export function ingestAnimatedThumbnailFrame(id, img) {
-    // タブ非表示中のみ控える。①は表示用に読み込み済みの画像を使い回すだけ（新規ネット取得なし＝
-    // 署名/エンコードのみで軽い）ので、ローディング中(force更新)もガードしない。ここを止めると
-    // 初回ロード/手動更新/タブ復帰で表示した「最新画像」がバッファに入らず、アニメに含まれなくなる。
-    if (!enabled || captureUnsupported || document.hidden || !id || !img) return
+    // 可視状態でのガードはしない。給餌は表示用に読み込み済みの画像を使い回すだけ（新規ネット取得なし＝
+    // 署名/エンコードのみで軽い）。①の描画は requestAnimationFrame 経由なので非表示中はブラウザ側で
+    // 自然停止し、非表示中はそもそもここへほぼ到達しない。
+    if (!enabled || captureUnsupported || !id || !img) return
     stats.ingested++
     const b = getOrCreateBuffer(id) // ①は現在DOMにある番組のみ渡すのでバッファを用意してよい
     storeFrameFromImage(id, img, b)
@@ -447,7 +447,7 @@ function stopAnim() {
 
 // ホバーしたカードのフレームを即キャプチャ（周期20秒を待たず、貯まり＝アニメ開始を早める）
 function captureHoveredCard(card) {
-    if (!enabled || captureUnsupported || document.hidden || isSidebarLoading() || !card || !card.id) return
+    if (!enabled || captureUnsupported || isSidebarLoading() || !card || !card.id) return
     // 直近に取得済みならスキップ（ホバー横断・連打時の fetch/localStorage parse バーストを抑制）
     const buf = buffers.get(card.id)
     if (buf && buf.lastCaptureAt && (Date.now() - buf.lastCaptureAt) < HOVER_CAPTURE_THROTTLE_MS) return

@@ -124,13 +124,6 @@ export class UpdateManager {
         }
 
         const updateSidebarInterval = async () => {
-            // 非表示タブでは更新しない（背景でのスクレイプ/リスト取得を避ける）。
-            // 可視復帰時に visibilitychange ハンドラが即座に performManualUpdate で取り直す。
-            if (!this.appState.isVisible()) {
-                const idleTimer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
-                this.appState.setTimer('sidebar', idleTimer);
-                return;
-            }
             // 別の更新（手動更新）が進行中なら、今回の定期更新はスキップして次回に回す。
             if (this.appState.isLoading()) {
                 const retryTimer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());

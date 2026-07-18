@@ -24,11 +24,6 @@ export class AppState {
             isOpen: false,
         };
 
-        // ページの可視状態（Page Visibility API）
-        this.visibility = {
-            isVisible: typeof document !== 'undefined' ? !document.hidden : true,
-        };
-
         // 更新状態
         this.update = {
             isUpdating: false,
@@ -166,22 +161,6 @@ export class AppState {
      */
     getHandler(name) {
         return this.handlers[name] || null;
-    }
-
-    /**
-     * ページの可視状態を設定
-     * @param {boolean} isVisible - 可視状態
-     */
-    setVisibility(isVisible) {
-        this.visibility.isVisible = isVisible;
-    }
-
-    /**
-     * ページが可視状態かどうかを取得
-     * @returns {boolean} 可視状態
-     */
-    isVisible() {
-        return this.visibility.isVisible;
     }
 
     /**
