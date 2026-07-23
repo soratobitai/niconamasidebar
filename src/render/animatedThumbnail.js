@@ -482,19 +482,11 @@ function setHoverCard(card) {
 
 // ---- 委譲ホバーリスナ（カードは再生成されるためコンテナに付ける） ----
 function onMouseOver(e) {
-    // サムネ画像領域(.program_thumbnail)へ入ったら、そのカードをホバー対象にする。
+    // サムネ画像領域(.program_thumbnail)にホバーしている間だけ動かす。
+    // サムネ枠の外（同一カード内のタイトル/配信者名/アイコン/余白）やカード外へポインタが出たら止める
+    // ＝再生対象を「サムネ画像へのホバー」に厳密に一致させる（ユーザー要望）。
     const thumb = e.target.closest ? e.target.closest('.program_thumbnail') : null
-    if (thumb) {
-        setHoverCard(thumb.closest('.program_container'))
-        return
-    }
-    // サムネ枠の外（同一カード内のタイトル/配信者名/アイコン/余白）へポインタが移っても、
-    // 現在ホバー中カードの内側に留まっている限り再生を止めない。
-    // ※旧実装はサムネ枠を厳格判定し、枠外に少し外れただけで setHoverCard(null)→stopAnim() と
-    //   なり、連鎖(animTimer 一本)が切れてサムネ枠へ戻すまで再開しなかった（＝「途中で止まる」）。
-    //   カード離脱・コンテナ離脱による停止は onMouseOut が担うので、ここは維持のみ行う。
-    if (hoverCard && hoverCard.contains(e.target)) return
-    setHoverCard(null)
+    setHoverCard(thumb ? thumb.closest('.program_container') : null)
 }
 
 function onMouseOut(e) {

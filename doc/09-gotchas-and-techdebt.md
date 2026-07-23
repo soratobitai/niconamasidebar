@@ -161,6 +161,7 @@
 - **原因**: `animatedThumbnail.onMouseOver` がサムネ枠 `.program_thumbnail` を**厳格判定**し、同一カード内でもサムネ枠の外（`.program_title`/`.community`/アイコン/カード余白5px）へポインタが少しでも入ると `setHoverCard(null)→stopAnim()` で連鎖(`animTimer` 一本)が切れていた。停止を「コンテナ離脱時のみ」に限る `onMouseOut` と**粒度が非対称**で、サムネ枠へ入り直すまで再開しない（＝ユーザーはサムネを見ているつもりなのに止まる＝「極稀」に感じる）。
 - **修正**: `onMouseOver` を「サムネ枠へ入ったらそのカードをホバー対象／サムネ枠外でも現 `hoverCard` の内側なら維持／それ以外のみ `setHoverCard(null)`」に変更。停止はカード離脱・コンテナ離脱（`onMouseOut`）へ一本化。**同一カードのタイトル等の上でも再生継続する仕様変更**を含む（`onMouseOut` が既にコンテナ全体をホバー領域とみなす設計と粒度を揃えた）。`animTimer`/`animGen`/eviction 経路には非介入。
 - 対象: `src/render/animatedThumbnail.js`（`onMouseOver`）。
+- **2026-07-23 追記（挙動をユーザー要望で変更）**: 上記「同一カード内なら再生継続」は、サムネ画像から外れてもカード内で動き続けるため不評。`onMouseOver` を再び `.program_thumbnail` 厳格判定へ戻し、**サムネ画像にホバー中だけ再生／外れたら停止**とした（枠外への微小ドリフトで止まる件は許容）。
 - **棄却した仮説**（敵対的検証で不成立）: 並び替え`replaceChildren`時のmouseout誤発火・fragment離脱中の`showNext`・`decode()`ハング・eviction例外。いずれも単一スレッド同期実行＋ノード再利用＋`animGen`無効化＋`playUrlAt`の`getLiveStaticSrc`フォールバックで防がれている。
 
 ## ✅ Y. 動くサムネに稀に最新が含まれない（🟡→修正済み・2026-07-23）
