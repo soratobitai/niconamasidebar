@@ -211,8 +211,13 @@ export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
     const onComplete = options.onComplete || null
-    // 指定時、その id 集合の番組だけ更新する（ローリング更新＝番組ごと独立更新で使う）。未指定なら全件。
+    // 指定時、その id 集合の番組だけ更新する（番組ごと独立更新で使う）。未指定なら全件。
     const onlyIds = (options && options.onlyIds) || null
+    // 画像の読み込み(全プリロードが settle)が実際に終わったら1回だけ呼ぶ。番組ごと自己連鎖サイクルが
+    // 「作業完了後に次の20秒を張る」ために使う（作業時間ぶん自然にドリフトさせる）。
+    const onSettled = (options && options.onSettled) || null
+    let settledFired = false
+    const fireSettled = () => { if (!settledFired) { settledFired = true; if (onSettled) onSettled() } }
     // Convert to Map for O(1) lookup if array
     const infoMap = Array.isArray(programInfos)
         ? new Map(programInfos.map((i) => [i.id, i]))
@@ -221,6 +226,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const container = document.getElementById('liveProgramContainer')
     if (!container) {
         if (onComplete) onComplete()
+        fireSettled()
         return
     }
     // コンテナ内の全サムネを対象にする（可視限定の最適化は撤去。
@@ -231,6 +237,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     // 画像が存在しない場合、即座に完了コールバックを呼ぶ
     if (sourceImgs.length === 0) {
         if (onComplete) onComplete()
+        fireSettled()
         return
     }
 
@@ -251,12 +258,16 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     }
 
     function checkComplete() {
-        // 全ての画像処理が完了した場合（画像読み込みは待たない）
-        // ローディング表示は「処理開始」までで完了とし、画像読み込みはバックグラウンドで継続
+        // 全ての画像処理が完了した場合（onComplete はローディング表示用＝画像読み込みは待たない）
         if (!isCompleted && index >= sourceImgs.length) {
             isCompleted = true
             if (onComplete) onComplete()
         }
+        maybeSettled()
+    }
+    // 「処理も画像読み込みも全て終わった(settle)」ら onSettled を発火する（onComplete と違い読み込み完了を待つ）。
+    function maybeSettled() {
+        if (isCompleted && pendingImages <= 0) fireSettled()
     }
 
     function tick() {
@@ -320,18 +331,20 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 pendingImages--
                 applySuccess()
                 if (feeding) animThumbFeed.ingest(card.id, pre) // 再取得なしでフレーム化（②側でON/汚染を再判定）
+                maybeSettled()
             }
             pre.onerror = () => {
                 if (feeding) {
                     // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
                     const plain = new Image()
-                    plain.onload = () => { pendingImages--; applySuccess() }
-                    plain.onerror = () => { pendingImages--; applyBackoff() }
+                    plain.onload = () => { pendingImages--; applySuccess(); maybeSettled() }
+                    plain.onerror = () => { pendingImages--; applyBackoff(); maybeSettled() }
                     plain.src = urlForAttempt
                     return
                 }
                 pendingImages--
                 applyBackoff()
+                maybeSettled()
             }
             pre.src = urlForAttempt
         }

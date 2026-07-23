@@ -23,6 +23,11 @@
 > 46エージェントのワークフロー（多角トレース→敵対的検証）で根本原因特定し修正（`npm run build` 成功）。下記 X・Y を追加。
 > 多くの候補（replaceChildren時のmouseout誤発火・decodeハング・eviction例外・USER重複排除誤破棄・hydrate競合等）は
 > 「replaceChildrenは同期＋ノード再利用」「animGen無効化」「playUrlAtのフォールバック」等で**不成立と確認**して除外済み。
+>
+> **2026-07-23 更新（サムネ更新を番組ごと自己連鎖タイマー＋自然ドリフトへ）**: 「全番組一斉更新」＋別建てA1バッチを、
+> 番組ごとの独立・自己連鎖タイマー（更新完了→20秒→また更新／作業時間ぶん自然にドリフト）へ置換。A1は各サイクルへ統合し
+> beginAt が若い番組だけ追撃、全件同時更新は撤去。敵対的レビュー（28→3エージェント）でゴースト連鎖・lost update 等の
+> 並行バグを検出・修正（`npm run build` 成功）。下記 **Z** を追加。削除: `_retryPendingLiveThumbnails`・`THUMB_RETRY_MAX_ATTEMPTS`・`THUMB_RETRY_MAX_PER_CYCLE`。
 
 ---
 
@@ -167,6 +172,24 @@
 - 対象: `src/render/animatedThumbnail.js`（`getLiveStaticSrc`・`shouldAppendStaticTail`・`playCount`・`playUrlAt`）、`src/render/sidebar.js`（`applySuccess` で `thumbLive='1'`・`handleThumbnailError` で `thumbLive='0'`）。
 - **残ギャップ（別件・低）**: CHANNEL はキャッシュバスター無しで静止img自体が初回内容に凍結され得る（URL不変で `applySuccess` の `img.src!==urlForAttempt` が偽＝再取得されない）。給餌`pre`のHTTPキャッシュ次第でバッファも停滞し得る。完全対称化には CHANNEL feed のキャッシュバスターが要るが、`large1280x720ThumbnailUrl` にクエリ付与が安全か（署名URL等で403にならないか）を実機で裏取りしてから判断（安易に付けない）。上記修正は「非ライブ混入」を全 provider で塞ぐところまで。
 - **棄却した仮説**（敵対的検証で不成立）: USER重複排除の閾値誤破棄・`toBlob`/hydrate競合・`currentSrc`遅延窓。捨てられるのは「中間コマ or ほぼ同一コマ」で、真の最新は blob か末尾スロットで必ず映るため最新欠落にならない。
+
+## ✅ Z. サムネ更新を「番組ごとの独立・自己連鎖タイマー＋自然ドリフト」へ（2026-07-23）
+- **背景/要望**: 旧「全番組を同時一斉更新」＋別建てA1バッチは、リストがいっぺんに切り替わる“一斉感”が気持ち悪い。各番組がバラバラのタイミングで更新され、読み込み時は一斉→以後少しずつズレてほしい（機能/軽さでなくUXの要望）。
+- **新方式（`UpdateManager`）**:
+  - 各番組が自前の自己連鎖タイマー（`_thumbTimers` Map: id→timeoutId）。`_runThumbCycle` が「その番組の `<img>` を1件更新 → 画像の読み込み完了を待つ → `updateThumbnailInterval`(20秒)後に次サイクル」。周期＝20秒＋作業時間（取得/デコード）で毎回わずかに違うため**自然にドリフト**。
+  - ドリフトを効かせるため `updateThumbnailsFromStorage`（sidebar.js）に **`onSettled`**（全プリロード settle シグナル）を追加。`_updateOneThumbnailAndWait` が読み込み完了を待って次サイクルを張る。画像ハング対策に**2×間隔の安全ガード**（`_pendingGuards` で追跡）。
+  - **読み込み時の一斉更新**は `performManualUpdate`（全件 `updateThumbnail`）が担当。**定期 `updateSidebarInterval` の全件 `updateThumbnail()` は撤去**（一斉感の除去）。新規/削除カードは `_syncThumbTimers`（`updateSidebar` 末尾で呼ぶ）が拾う。
+  - **A1（空サムネ番組のライブスクショ追撃）を各サイクルへ統合**（`_fetchLiveThumbIfPendingYoung`）。`beginAt` が若い（<`newProgramFastPollMs`=3分）user・非会員・空番組だけ詳細API追撃。古い空番組＝固定画像運用とみなし追わない（スクレイプ `fillMissingDetails` 60〜180秒に委譲）。**旧「8回打ち切り」「10件/回上限」「別建てA1バッチ」は撤去**。同時実行上限は付けない（ブラウザの同一ホスト~6接続で自然に律速）。
+- **ライフサイクル**: `appState.timers.thumbnail` はセンチネル(`true`)のみ。実タイマーは `_thumbTimers`。停止は `stopThumbnailUpdate`（`stopAllTimers`＝閉 と `cleanup`＝離脱 の両方から呼ぶ＝対称）。
+- **敵対的レビューで検出・修正した罠（改修時に再発させない）**:
+  - 🔴 **ゴースト連鎖**: stop→即再開の境界で in-flight サイクルが自分を新runへ再採用し二重タイマー化（`_scheduleThumbCycle` の Map 上書きで孤児化）。→ **世代トークン `_thumbGen`**（start/stopで++、サイクル開始時に捕捉、`gen一致かつrunning時のみ`再スケジュール・**不一致時はMap非操作**）＋ **clear-before-set**（set前に既存timerをclearTimeout）で解消。
+  - 🔴 **lost update**: A1書き戻しを `upsertProgramInfos`（stale全置換）で行うと、await中にスクレイプが入れた最新の視聴者数等を巻き戻す。→ **`storage.patchProgramThumbnail`**（await後に再read→サムネ欄のみマージ）へ。
+  - 中断サイクルのガードは `_pendingGuards` で追跡し、stop時は `finish()`（clear＋resolve）で**待機Promiseごと解放**（未resolveリーク防止）。
+  - **背景タブ**は rAF 停止で `onSettled` が来ないため、`_runThumbCycle` は `document.hidden` 時は更新せず軽く再スケジュールのみ（ガード空回し回避、可視復帰で通常へ）。
+- **既知の据え置き（低・別件）**:
+  - A1が入れたライブスクショURLが、フォローAPIの listingThumbnail 非反映番組では各スクレイプ周期で一旦空へ戻り得る（`fillMissingDetails` が同周期で再補完するので実質一過性）。恒久化したければ upsertProgramInfos で「既存が有効ライブスクショ かつ 新規が空」なら保持マージする。
+  - per-program 更新は毎サイクル localStorage 全体を `JSON.parse` する（旧一斉のN倍）。絶対コストは小（~数ms/秒）で据え置き。必要なら単一番組の高速updateパスで最適化可。
+- 対象: `src/managers/UpdateManager.js`・`src/render/sidebar.js`（`updateThumbnailsFromStorage` の `onSettled`）・`src/services/storage.js`（`patchProgramThumbnail`）・`src/main.js`（`cleanup`/`stopAllTimers`）・`src/config/constants.js`（`newProgramFastPollMs`）。→ [03-module-reference](./03-module-reference.md)・[04-data-flow](./04-data-flow.md)
 
 ---
 

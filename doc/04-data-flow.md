@@ -58,7 +58,7 @@
 ## フェーズ3: 初回データ取得（サイドバーが開いている時のみ）
 
 26. **`handleSidebarOpenStateChange(true)`**:
-    1. なければ `startThumbnailUpdate()`（フェーズ5.1）
+    1. なければ `startThumbnailUpdate()`（フェーズ5.1／番組ごとの自己連鎖タイマーを起動）
     2. なければ `startSidebarUpdate()`（フェーズ5.2）
     3. rAF内で `await performManualUpdate()`（初回・手動・再オープン・可視復帰いずれも同じ経路。専用の初回ロード関数は無い）
     4. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバックでも `performManualUpdate()`。
@@ -96,14 +96,17 @@
 
 `handleSidebarOpenStateChange(true)` で起動、`stopAllTimers()`（閉/cleanup）で停止。詳細取得キュー（旧 `todo`）は撤去され、タイマーは `thumbnail` と `sidebar` の2系統になった。
 
-### 5.1 thumbnail（既定20秒・自己再帰 setTimeout）
-35. `startThumbnailUpdate()` … `updateThumbnail()` を**即時実行**し、完了後 `setTimeout(20s＝updateThumbnailInterval)` で再帰。
-    - `updateThumbnail` は `isInserting` 中スキップ → `getProgramInfos()` → `updateThumbnailsFromStorage`。**保存済みの安定したライブサムネURL＋キャッシュバスターで `<img>` を差し替えるだけ**で、番組ごとのネットワーク詳細取得はしない（詳細は sidebar 周期のフォローAPI側で更新される）。
-    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。**対象はコンテナ内の全img**（可視限定は撤去）。動くサムネ②もここでプリロードした画像から給餌される。
-    - タブが非表示（hidden）になると停止する（フェーズ6）。
+### 5.1 thumbnail（番組ごとの独立・自己連鎖タイマー。基準20秒＋作業時間）
+35. `startThumbnailUpdate()` … 番組ごとの独立・自己連鎖タイマー方式を起動する。`appState.timers.thumbnail` にはセンチネル `true` だけを立て（二重開始ガード/停止フック用。実タイマーは `_thumbTimers` Map: id→timeoutId）、`_syncThumbTimers()` が各カードにサイクルを配る。
+    - **1サイクル `_runThumbCycle(id)`**: 空＆若い番組なら詳細API追撃（`_fetchLiveThumbIfPendingYoung`。A1統合）→ その番組の `<img>` を1件更新し画像の読み込み完了を待つ（`_updateOneThumbnailAndWait`。`updateThumbnailsFromStorage` の **`onSettled`** シグナルで検知）→ `updateThumbnailInterval`(20秒)後に次サイクルを張る自己連鎖。**周期＝20秒＋その回の作業時間**なので、読み込み時に一斉に始まっても少しずつ自然にズレる（ドリフト＝一斉切替を避けるUX要望）。
+    - `updateThumbnail` は `isInserting` 中スキップ → `getProgramInfos()` → `updateThumbnailsFromStorage`。**保存済みの安定したライブサムネURL＋キャッシュバスターで `<img>` を差し替えるだけ**（`onlyIds` でその番組だけ）。定期の全件 `updateThumbnail()` 呼び出しは撤去（一斉感を無くすため。読み込み時の一斉更新は `performManualUpdate` が担う）。
+    - TTL10秒・失敗時指数バックオフ（2s〜60s）、`new Image()` プリロード成功時のみ差し替え（フリッカ防止）。動くサムネ②もここでプリロードした画像から給餌される。画像がハングしても基準間隔の2倍で安全にタイムアウトして前進。
+    - **A1（空サムネのライブサムネ追撃）は各サイクルに統合**（`_fetchLiveThumbIfPendingYoung`）。user・非会員・ライブサムネ空かつ `onAirTime.beginAt` が `newProgramFastPollMs`=3分以内の若い番組だけ、そのサイクル内で詳細API(`fetchProgramInfo`)を1回追撃し、取れたら `patchProgramThumbnail` でサムネ欄だけをマージ更新。3分超の空番組は追撃せずスクレイプ `fillMissingDetails`（60〜180秒）に委譲。旧「別建てA1バッチ `_retryPendingLiveThumbnails`／8回打ち切り／10件/回上限（`THUMB_RETRY_MAX_ATTEMPTS`/`THUMB_RETRY_MAX_PER_CYCLE`）」は撤去済み。同時実行の自前上限は無し（ブラウザの同一ホスト同時接続~6本で自然に律速）。
+    - 新規/削除カードは `_syncThumbTimers`（`updateSidebar` 末尾で呼ぶ）が各番組タイマーを生成/破棄して追従。停止は `stopThumbnailUpdate()`（`stopAllTimers`＝サイドバー閉／`cleanup`＝ページ離脱の両方から）。
+    - タブが非表示（`document.hidden`）の間は**画像更新を行わずタイマーだけ軽く回す**（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う（フェーズ6）。
 
 ### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で60/120/180秒）
-36. `startSidebarUpdate()` … **最初の実行も1周期後**（即時ではない）。1周期ごとに `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング → `updateThumbnail()` → 自己再帰。
+36. `startSidebarUpdate()` … **最初の実行も1周期後**（即時ではない）。1周期ごとに `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング → 自己再帰。**サムネ<img>の全件同時更新は撤去**（一斉感を無くすため）。サムネ反映は各番組の自己連鎖サイクルに任せ、新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う。
     - **タブが非表示の周期は更新をスキップ**（`isVisible()` false なら再スケジュールのみ）。背景でのフォローAPI/リスト取得を避け、可視復帰時に `handleVisibilityChange` が即 `performManualUpdate` で取り直す。
     - **別更新が進行中(`isLoading()`)の周期もスキップ**して次回へ（手動更新との二重取得・セッション上書き防止）。
 37. `restartSidebarUpdate()` … オプション（`updateProgramsInterval`）変更時／初回・手動ロード末尾で張り直し。
@@ -113,8 +116,8 @@
 ## フェーズ6: タブ可視状態変化（Page Visibility）
 
 38. `handleVisibilityChange`（`appState.setVisibility` で可視状態を記録。`appState.sidebar.isOpen` 時のみ以下）:
-    - **背景移行(hidden)**: `thumbnail` タイマーを停止（サムネ更新ループのリソース消費を抑える）。sidebar タイマーは継続するが、非表示中の周期はフェーズ5.2で更新をスキップするので実質 notifybox/フォローAPIは走らない。アクティブなローディングセッションが残っていれば500ms後に `finishLoadingSession()`（セッション残留対策）。
-    - **復帰(visible)**: 停止中の thumbnail/sidebar タイマーを再起動し、rAF内で `performManualUpdate()`（リスト＋詳細（フォローAPI）＋サムネを即取り直す）。詳細は毎回フォローAPIで全件更新されるため、旧方式の「長時間非表示なら `forceRefetch` でしっかり更新／短ければ軽量更新」という `thorough` 分岐は不要（常に同じ更新）。
+    - **背景移行(hidden)**: `thumbnail` の各番組サイクルは `document.hidden` の間、**画像更新を行わずタイマーだけ軽く回す**（rAF が止まり `onSettled` が来ないため。タイマー自体は破棄しない）。sidebar タイマーは継続するが、非表示中の周期はフェーズ5.2で更新をスキップするので実質 notifybox/フォローAPIは走らない。アクティブなローディングセッションが残っていれば500ms後に `finishLoadingSession()`（セッション残留対策）。
+    - **復帰(visible)**: thumbnail は次サイクルから通常更新へ戻り、sidebar タイマーを再起動し、rAF内で `performManualUpdate()`（リスト＋詳細（フォローAPI）＋サムネ全件を即取り直す＝復帰時の一斉更新はここが担う）。詳細は毎回フォローAPIで全件更新されるため、旧方式の「長時間非表示なら `forceRefetch` でしっかり更新／短ければ軽量更新」という `thorough` 分岐は不要（常に同じ更新）。
 
 ## フェーズ7: 番組自動移動（AutoNext）
 
@@ -155,7 +158,7 @@
 
 | タイマー | 起動 | 間隔 | 再実行 | 停止 |
 |---------|------|------|--------|------|
-| thumbnail | 開/可視復帰 | 20秒（即時＋以降。保存済みURLでサムネ<img>更新のみ） | 自己再帰 setTimeout | 閉/背景/cleanup |
+| thumbnail | 開/可視復帰 | 番組ごとに独立（基準20秒＋その回の作業時間＝自然ドリフト。保存済みURLでその番組のサムネ<img>を1件更新） | 番組ごとの自己連鎖 setTimeout（`_thumbTimers` Map。`onSettled` 待ち→次サイクル） | 閉/cleanup（`stopThumbnailUpdate`）。背景中はタイマー継続＝画像更新のみスキップ |
 | sidebar | 開/可視復帰 | `updateProgramsInterval`（既定120秒。**初回も1周期後**）。1周期＝notifybox＋フォローAPI（通常1リクエスト・ページング時は複数）＋空サムネ補完 | 自己再帰 setTimeout | 閉/cleanup、restartで再設定 |
 | loadingタイムアウト | `startSession()` | 60秒 | 単発 | `finishSession()` |
 | autoNextカウントダウン | `scheduleNavigation()` | 1秒×10 | setInterval | キャンセル/完了/stopWatcher |
@@ -168,5 +171,5 @@
 | `visibility.isVisible` | `handleVisibilityChange` / 初期化 | sidebar 周期の更新スキップ判定（`isVisible()`） |
 | `update.isInserting` | `updateSidebar` 前後 | `updateThumbnail`（挿入中スキップ） |
 | `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタン・可視処理・sidebar周期スキップ |
-| `timers.*`（thumbnail/sidebar/autoNext の3種） | 各 start/stop | `getTimer` による二重起動防止 |
+| `timers.*`（thumbnail/sidebar/autoNext の3種） | 各 start/stop | `getTimer` による二重起動防止（`timers.thumbnail` はセンチネル `true`＝実タイマーは `UpdateManager._thumbTimers` Map） |
 | `autoNext.*` | AutoNextManager 各所 | 多重進入抑止・カウントダウン・cleanup |

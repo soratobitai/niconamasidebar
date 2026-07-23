@@ -97,11 +97,11 @@ main.js
 UpdateManager.js
  ├─> services/api.js              (fetchLivePrograms)
  ├─> services/followPageSource.js (fetchFollowedProgramsViaPage)
- ├─> services/storage.js          (getProgramInfos, upsertProgramInfos)
+ ├─> services/storage.js          (getProgramInfos, upsertProgramInfos, patchProgramThumbnail)
  ├─> render/sidebar.js            (makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage)
  ├─> ui/layout.js                 (setProgramContainerWidth)
  ├─> utils/sorting.js             (sortPrograms)
- └─> config/constants.js          (updateThumbnailInterval, watchPageBaseUrl)
+ └─> config/constants.js          (updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs)
 
 AutoNextManager.js    ─> services/status.js (observeProgramEnd)
 followPageSource.js   ─> utils/error.js (handleError), services/api.js (fetchProgramInfo＝サムネ補完)
@@ -146,11 +146,11 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 | タイマー | 間隔 | 何をするか | 実装 |
 |---------|------|-----------|------|
 | **sidebar** | `updateProgramsInterval` 秒（既定120／設定60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager.startSidebarUpdate` → `updateSidebar` |
-| **thumbnail** | `updateThumbnailInterval` 秒（既定20） | 保存済みの安定ライブサムネURL＋キャッシュバスターで各 `<img>` を更新する（**番組ごとのネットワーク詳細取得はしない**）。動くサムネ②もここでプリロードした画像から給餌 | `UpdateManager.startThumbnailUpdate` → `updateThumbnail` |
+| **thumbnail** | 番組ごとに独立（基準 `updateThumbnailInterval` 秒＝既定20＋その回の作業時間） | **番組ごとの独立・自己連鎖タイマー**（`_thumbTimers` Map: id→timeoutId）。各カードが「自分の `<img>` を1件更新→画像読み込み完了(`onSettled`)を待って→20秒後に次サイクル」を回す（`_runThumbCycle`）。周期が毎回わずかに違うため一斉切替せず自然にドリフトする。空＆若い（放送開始から `newProgramFastPollMs`=3分以内）user番組だけ各サイクルで詳細APIを1回追撃（`_fetchLiveThumbIfPendingYoung`）。動くサムネ②もここでプリロードした画像から給餌 | `UpdateManager.startThumbnailUpdate` → `_syncThumbTimers` → `_runThumbCycle` |
 | **autoNext**（自動移動） | イベント駆動 | 視聴中番組の終了を DOM 監視し、条件を満たせばモーダル→カウントダウン→次番組へ遷移。変更なし | `AutoNextManager.startWatcher` → `observeProgramEnd` |
 
-- sidebar/thumbnail は **`handleSidebarOpenStateChange(open)`** で一括起動され、閉じると `stopAllTimers()` で停止する。
-- **タブがバックグラウンド**になると sidebar ループはその周期をスキップ（`isVisible()` ガード）し、可視復帰時に `visibilitychange` ハンドラが `performManualUpdate` で取り直す。thumbnail もタブ非表示時は動かない。
+- sidebar/thumbnail は **`handleSidebarOpenStateChange(open)`** で一括起動され、閉じると `stopAllTimers()` で停止する。thumbnail の実タイマー群は `stopThumbnailUpdate()` が全 `_thumbTimers` を片付ける（サイドバー閉の `stopAllTimers` とページ離脱の `cleanup` の両方から呼ぶ）。`appState.timers.thumbnail` には二重開始ガード/停止フック用の**センチネル `true`** だけが入る。
+- **タブがバックグラウンド**になると sidebar ループはその周期をスキップ（`isVisible()` ガード）し、可視復帰時に `visibilitychange` ハンドラが `performManualUpdate` で取り直す。thumbnail は非表示中は画像更新を行わずタイマーだけ軽く回す（`document.hidden` 中は rAF が止まり `onSettled` が来ないため。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う）。
 - 旧「番組詳細取得キュー（todo）」「新番組の早期検知スキャン（newProgramScan）」は撤去済み。詳細はリストと同時にフロントJSON APIで（通常1リクエストで）揃うため、逐次キューや早期検知ポーリングは不要になった。
 - 詳細な起動〜停止のシーケンスは [04-data-flow.md](./04-data-flow.md)。
 

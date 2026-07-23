@@ -1,14 +1,10 @@
 import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
-import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos } from '../services/storage.js';
+import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, watchPageBaseUrl } from '../config/constants.js';
-
-// A1: 新番組など「ライブサムネがまだ空」の番組を、20秒サムネループで詳細APIから再取得する設定。
-const THUMB_RETRY_MAX_ATTEMPTS = 8   // 1番組を20秒ループで再取得する最大回数（超えたら120秒サイクルへ委ねる）
-const THUMB_RETRY_MAX_PER_CYCLE = 10 // 1ティックで叩く詳細APIの上限（暴走防止）
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -33,101 +29,175 @@ export class UpdateManager {
 
         // 重複実行防止フラグ
         this.isPerformingManualUpdate = false;
-        // A1: ライブサムネ空番組の再取得試行回数（id -> attempts）。諦め判定に使う。
-        this._thumbRetryAttempts = new Map();
+        // 番組ごとの自己連鎖サムネタイマー（id -> timeoutId）と稼働フラグ。
+        this._thumbTimers = new Map();
+        this._thumbRunning = false;
+        // 実行世代。start/stop のたび ++ し、停止/再開を跨いだ古いサイクルの張り直しを無効化する。
+        this._thumbGen = 0;
+        // _updateOneThumbnailAndWait の安全ガードタイマー（stop時に一括clearするため追跡）。
+        this._pendingGuards = new Set();
     }
 
     /**
-     * サムネイル更新タイマーを開始（20秒周期）。
-     * 保存済みのライブサムネURL（安定）にキャッシュバスターを付けて <img> を更新するだけで、
-     * ネットワーク詳細取得は行わない。動くサムネ（②）もここでプリロードした画像から給餌される。
+     * サムネイル更新を開始する（番組ごとの独立・自己連鎖タイマー方式）。
+     *
+     * 昔は「全番組を同時に一斉更新」→ リストがいっぺんに切り替わって気持ち悪かった。
+     * いまは各番組が自分のタイマーを持ち、「更新が完了してから次の20秒を張り直す」自己連鎖にする。
+     * 周期＝20秒＋その回の作業時間（ライブサムネの取得・デコード）になり、作業時間が毎回わずかに違うため、
+     * 読み込み時に一斉に始まっても時間とともに少しずつズレていく（自然ドリフト）。
+     * ※読み込み時の一斉更新は performManualUpdate（updateThumbnail 全件）が担う。ここは以後の更新を受け持つ。
      */
     startThumbnailUpdate() {
-        // 番組ごとに独立（ずらして）更新するローリング方式。
-        // 1本のタイマーで1tick=1番組ずつ更新し、updateThumbnailInterval で全番組を一巡する。
-        // 一斉更新の“チカッ”と瞬間負荷（同時デコード/通信）を避ける。総取得回数は従来と同じ＝重くならない。
-        const intervalMs = (Number(this.options.updateThumbnailInterval) || updateThumbnailInterval) * 1000;
-        let cursor = 0;
-        let lastA1At = 0;
-        const runOne = async () => {
-            // A1（ライブサムネ空番組の詳細API再取得）は約 interval ごとに1回だけ
-            const now = Date.now();
-            if (now - lastA1At >= intervalMs) {
-                lastA1At = now;
-                await this._retryPendingLiveThumbnails();
-            }
-            const container = document.getElementById('liveProgramContainer');
-            const ids = container ? Array.from(container.children).map((el) => el.id).filter(Boolean) : [];
-            let nextDelay = intervalMs; // カードが無ければ interval 後に再チェック
-            if (ids.length > 0) {
-                const id = ids[cursor % ids.length];
-                cursor++;
-                // その1番組だけ更新（TTL/バックオフ/動くサムネ給餌は従来どおり per-img で効く）
-                this.updateThumbnail(false, null, new Set([id]));
-                // N番組を interval で一巡するよう、1番組あたりの間隔（過密/過疎を軽くクランプ）
-                nextDelay = Math.min(intervalMs, Math.max(250, Math.round(intervalMs / ids.length)));
-            }
-            const timer = setTimeout(runOne, nextDelay);
-            this.appState.setTimer('thumbnail', timer);
-        };
-        runOne(); // 即座に開始
+        if (!this._thumbTimers) this._thumbTimers = new Map(); // id -> timeoutId
+        if (this._thumbRunning) { this._syncThumbTimers(); return; } // 二重開始防止（冪等）
+        this._thumbRunning = true;
+        this._thumbGen = (this._thumbGen || 0) + 1; // 世代を進める（停止跨ぎの旧サイクルを無効化）
+        // main.js の二重開始ガード(!getTimer('thumbnail'))と停止処理(stopAllTimers)に乗せるためのセンチネル。
+        this.appState.setTimer('thumbnail', true);
+        this._syncThumbTimers();
+    }
+
+    /** サムネ更新を停止し、全番組の自己連鎖タイマー・ガードを片付ける（サイドバー閉/クリーンアップ時）。 */
+    stopThumbnailUpdate() {
+        this._thumbRunning = false;
+        this._thumbGen = (this._thumbGen || 0) + 1; // 世代を進める（in-flightサイクルの張り直しを無効化）
+        if (this._thumbTimers) {
+            for (const t of this._thumbTimers.values()) clearTimeout(t);
+            this._thumbTimers.clear();
+        }
+        if (this._pendingGuards) {
+            // 各待機を finish() で解決（ガードclear＋Promise resolve）＝await で宙吊りの中断サイクルの
+            // フレーム（detachedカード参照ごと）を解放する。単に clearTimeout だけだと未resolveでリークする。
+            for (const e of Array.from(this._pendingGuards)) { try { e.finish(); } catch (_e) { /* noop */ } }
+            this._pendingGuards.clear();
+        }
+    }
+
+    /** サムネ1周期の基準間隔(ms)。作業完了後にこの時間だけ待って次サイクルを張る。 */
+    _currentThumbCycleMs() {
+        return (Number(this.options.updateThumbnailInterval) || updateThumbnailInterval) * 1000;
     }
 
     /**
-     * A1: 描画中の user 番組でライブサムネが空のもの（放送直後で未生成 等）だけ、
-     * 詳細API(fetchProgramInfo)で liveScreenshotThumbnailUrls を再取得し、取れ次第 storage を更新する。
-     * 20秒サムネループから呼ぶので、新番組は最大~20秒でライブサムネへ差し替わる。
-     * 空の少数だけ・番組ごとに諦め回数あり＝旧「全番組×詳細API」の重さには戻らない。
-     * @returns {Promise<boolean>} 1件以上ライブサムネを補完したら true
+     * 現在のカードと自己連鎖タイマーを突き合わせる。
+     * 新しく現れたカードにはサイクルを開始し、消えたカードのタイマーは片付ける。
+     * 初回サイクルは基準間隔後に張る（読み込み直後の一斉更新は performManualUpdate 側が担うため）。
+     * 開始時と updateSidebar の後（新規/削除カードの後）に呼ぶ。
      */
-    async _retryPendingLiveThumbnails() {
+    _syncThumbTimers() {
+        if (!this._thumbRunning) return;
+        if (!this._thumbTimers) this._thumbTimers = new Map();
         const container = document.getElementById('liveProgramContainer');
-        if (!container) return false;
-        const rendered = new Set();
-        for (const el of container.children) { if (el && el.id) rendered.add(el.id); }
-        if (rendered.size === 0) return false;
-
-        const infos = getProgramInfosFromStorage();
-        if (!Array.isArray(infos)) return false;
-
-        // 対象: 描画中 × user × 非会員限定 × ライブサムネ未取得
-        const pending = infos.filter((info) => {
-            if (!info || info.providerType !== 'user' || info.isMemberOnly) return false;
-            if (!rendered.has(String(info.id).replace(/^lv/, ''))) return false;
-            const hasLive = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle;
-            return !hasLive && !info.thumbnailUrl;
-        });
-
-        // リストから消えた/解決済みの id は試行回数マップから掃除
-        const pendingIds = new Set(pending.map((i) => i.id));
-        for (const id of Array.from(this._thumbRetryAttempts.keys())) {
-            if (!pendingIds.has(id)) this._thumbRetryAttempts.delete(id);
+        if (!container) return;
+        const present = new Set();
+        for (const el of container.children) {
+            const id = el && el.id;
+            if (!id) continue;
+            present.add(id);
+            if (!this._thumbTimers.has(id)) {
+                this._scheduleThumbCycle(id, this._currentThumbCycleMs());
+            }
         }
+        // 消えた番組のタイマーを解放（各サイクルでも自然停止するが、ここで即掃除する）
+        for (const id of Array.from(this._thumbTimers.keys())) {
+            if (!present.has(id)) {
+                clearTimeout(this._thumbTimers.get(id));
+                this._thumbTimers.delete(id);
+            }
+        }
+    }
 
-        // 諦め回数未満のものだけ、1ティックの上限件数まで
-        const targets = pending
-            .filter((info) => (this._thumbRetryAttempts.get(info.id) || 0) < THUMB_RETRY_MAX_ATTEMPTS)
-            .slice(0, THUMB_RETRY_MAX_PER_CYCLE);
-        if (targets.length === 0) return false;
+    /** 指定番組の次サイクルを delayMs 後に予約する（既存タイマーは必ず clear してから張り＝孤児化防止）。 */
+    _scheduleThumbCycle(id, delayMs) {
+        const prev = this._thumbTimers.get(id);
+        if (prev) clearTimeout(prev); // set による上書きで旧タイマーが孤児化するのを防ぐ
+        const timer = setTimeout(() => this._runThumbCycle(id), delayMs);
+        this._thumbTimers.set(id, timer);
+    }
 
-        const updates = [];
-        await Promise.all(targets.map(async (info) => {
-            this._thumbRetryAttempts.set(info.id, (this._thumbRetryAttempts.get(info.id) || 0) + 1);
-            try {
-                const detail = await fetchProgramInfo(String(info.id).replace(/^lv/, ''));
-                if (!detail) return;
-                const ss = detail.liveScreenshotThumbnailUrls;
-                const cand = (ss && (ss.middle || ss.large || ss.small)) || '';
-                if (isLiveScreenshotUrl(cand)) {
-                    updates.push({ ...info, liveScreenshotThumbnailUrls: { middle: cand }, large1280x720ThumbnailUrl: cand, thumbnailUrl: cand });
-                    this._thumbRetryAttempts.delete(info.id);
-                }
-            } catch (_e) { /* 個別失敗は次ティックで再挑戦 */ }
-        }));
+    /**
+     * 1番組の1サイクル: （空サムネの若い番組なら詳細APIで追撃 →）その番組のサムネ<img>を更新し、
+     * 画像の読み込み完了を待ってから次の20秒を張り直す（自己連鎖＝作業時間ぶん自然にドリフトする）。
+     * stop/再開を跨いだ古いサイクルは世代(gen)不一致で張り直さない（二重タイマー＝ゴースト連鎖の防止）。
+     */
+    async _runThumbCycle(id) {
+        if (!this._thumbRunning) return; // 停止中（Mapはstopで掃除済み）→何もしない
+        const gen = this._thumbGen; // このサイクルの世代を捕捉
+        const container = document.getElementById('liveProgramContainer');
+        const card = container ? document.getElementById(id) : null;
+        // カードが消えた/コンテナ外ならこのサイクルを終了（再スケジュールしない）
+        if (!card || !container.contains(card)) { this._thumbTimers.delete(id); return; }
+        // 背景タブは rAF が止まり onSettled が来ない（更新も走らない）。ガード40秒の空回しを避けるため、
+        // 更新は行わず軽く次サイクルだけ張る。前景復帰後の一斉更新は performManualUpdate が担う。
+        if (typeof document !== 'undefined' && document.hidden) {
+            if (this._thumbRunning && gen === this._thumbGen) this._scheduleThumbCycle(id, this._currentThumbCycleMs());
+            return;
+        }
+        try {
+            await this._fetchLiveThumbIfPendingYoung(id); // A1統合（空＆若い番組だけ詳細API追撃）
+            await this._updateOneThumbnailAndWait(id);    // <img>更新（読み込み完了まで待つ＝ドリフト源）
+        } catch (_e) { /* 個別失敗は無視して次サイクルへ */ }
+        // 世代一致かつ稼働中のときだけ張り直す。不一致（stop/再開を跨いだ古いサイクル）は Map を触らず終了
+        // ＝新世代が張ったタイマーを消さない。
+        if (this._thumbRunning && gen === this._thumbGen) {
+            this._scheduleThumbCycle(id, this._currentThumbCycleMs());
+        }
+    }
 
-        if (updates.length === 0) return false;
-        upsertProgramInfos(updates);
-        return true;
+    /**
+     * その番組のサムネ<img>を1件だけ更新し、画像の読み込み(全プリロード)が settle するまで待つ Promise。
+     * 万一画像が固まっても、基準間隔の2倍で安全にタイムアウトして次サイクルへ進む。
+     */
+    _updateOneThumbnailAndWait(id) {
+        return new Promise((resolve) => {
+            let done = false;
+            let guard;
+            const entry = {};
+            // finish は「ガードclear＋Set除去＋resolve」を1回だけ行う。stop時にもこれを呼ぶことで
+            // 待機Promiseを確実に解決し、await で宙吊りの _runThumbCycle フレームを解放する。
+            const finish = () => {
+                if (done) return;
+                done = true;
+                clearTimeout(guard);
+                if (this._pendingGuards) this._pendingGuards.delete(entry);
+                resolve();
+            };
+            entry.finish = finish;
+            guard = setTimeout(finish, this._currentThumbCycleMs() * 2); // 画像がハングしても2×間隔で必ず前進
+            if (this._pendingGuards) this._pendingGuards.add(entry);      // stop時に一括 finish するため追跡
+            this.updateThumbnail(false, null, new Set([id]), finish);     // 全プリロード settle でも finish
+        });
+    }
+
+    /**
+     * A1統合: 描画中で「user・非会員・ライブサムネ空」かつ beginAt が「若い」番組だけ、
+     * 詳細API(fetchProgramInfo)でライブスクショを1回追撃し、取れたら storage を更新する。
+     * 若さ(newProgramFastPollMs)を過ぎた空番組＝ほぼ固定画像運用とみなし追撃しない
+     * （以降はリスト更新スクレイプ fillMissingDetails の60〜180秒に委譲）。旧「8回打ち切り」の代替。
+     * @param {string} id 番組ID（数値文字列・lvなし）
+     */
+    async _fetchLiveThumbIfPendingYoung(id) {
+        const infos = getProgramInfosFromStorage();
+        if (!Array.isArray(infos)) return;
+        const info = infos.find((i) => i && i.id === `lv${id}`);
+        if (!info || info.providerType !== 'user' || info.isMemberOnly) return;
+        const hasLive = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle;
+        if (hasLive || info.thumbnailUrl) return; // 既にライブサムネあり＝追撃不要
+        // beginAt ゲート：開始から newProgramFastPollMs 以内の若い番組だけ追撃（古い/不明は追わない）
+        const beginAt = info.onAirTime && info.onAirTime.beginAt;
+        const startMs = beginAt ? Date.parse(beginAt) : NaN;
+        if (!Number.isFinite(startMs) || (Date.now() - startMs) >= newProgramFastPollMs) return;
+        try {
+            const detail = await fetchProgramInfo(id);
+            if (!detail) return;
+            const ss = detail.liveScreenshotThumbnailUrls;
+            const cand = (ss && (ss.middle || ss.large || ss.small)) || '';
+            if (isLiveScreenshotUrl(cand)) {
+                // await を跨いだ stale スナップショットの全置換だと、その間にスクレイプが入れた最新の
+                // 視聴者数等を巻き戻す(lost update)。サムネ欄だけを最新レコードに再read→マージする。
+                patchProgramThumbnail(id, { liveScreenshotThumbnailUrls: { middle: cand }, large1280x720ThumbnailUrl: cand, thumbnailUrl: cand });
+            }
+        } catch (_e) { /* 個別失敗は次サイクルで再挑戦（若いうちは） */ }
     }
 
     /**
@@ -153,8 +223,8 @@ export class UpdateManager {
                 if (this.loadingManager.getCurrentSessionId()) {
                     await this.loadingManager.finishSessionWithMinDuration(1000);
                 }
-                // 詳細はスクレイプで更新済み。保存済みURLからサムネ<img>も反映しておく。
-                this.updateThumbnail();
+                // サムネ<img>の反映は各番組の自己連鎖サイクルに任せる（全件同時更新はしない＝
+                // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbTimers が拾う。
             } catch (error) {
                 console.error('[updateSidebarInterval] エラー:', error);
             }
@@ -357,6 +427,9 @@ export class UpdateManager {
 
             // 番組数更新
             this.updateProgramCount(livePrograms.length);
+
+            // 新規/削除カードに合わせて番組ごとの自己連鎖サムネタイマーを同期する。
+            this._syncThumbTimers();
         } catch (error) {
             console.error('[updateSidebar] エラーが発生しました:', error);
             this.appState.update.isInserting = false;
@@ -391,21 +464,24 @@ export class UpdateManager {
     /**
      * サムネイルを更新
      */
-    updateThumbnail(force, onComplete, onlyIds) {
+    updateThumbnail(force, onComplete, onlyIds, onSettled) {
         // DOM操作中は実行しない
         if (this.appState.update.isInserting) {
             if (onComplete) onComplete();
+            if (onSettled) onSettled();
             return;
         }
 
         const programInfos = getProgramInfosFromStorage();
         if (!programInfos || programInfos.length === 0) {
             if (onComplete) onComplete();
+            if (onSettled) onSettled();
             return;
         }
 
-        // onlyIds 指定時はその番組だけ更新（ローリング更新）。未指定なら全件。
-        updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete, onlyIds });
+        // onlyIds 指定時はその番組だけ更新（番組ごと自己連鎖サイクル）。未指定なら全件（読み込み時の一斉更新）。
+        // onSettled は画像の読み込み完了(settle)で発火＝各番組サイクルが「作業完了後に次の20秒を張る」ために使う。
+        updateThumbnailsFromStorage(programInfos, { force: !!force, onComplete, onlyIds, onSettled });
     }
 
     /**

@@ -130,6 +130,25 @@ export function upsertProgramInfo(programInfo) {
 }
 
 /**
+ * 1番組の「ライブサムネ関連フィールドだけ」を、最新の storage レコードにマージして書き込む。
+ * A1追撃(_fetchLiveThumbIfPendingYoung)の書き戻し用。upsertProgramInfos のフルレコード置換だと、
+ * 詳細API await を跨いで captured した古いスナップショットを書き、その間にスクレイプが入れた
+ * 最新の視聴者数/コメント数等を巻き戻す(lost update)。ここでは await 後に再read→サムネ欄だけ上書きする。
+ * @param {string} id 番組ID（'lv'あり/なしどちらでも可）
+ * @param {{liveScreenshotThumbnailUrls?: any, large1280x720ThumbnailUrl?: string, thumbnailUrl?: string}} fields
+ * @returns {boolean} 対象idが存在し書き込めたら true
+ */
+export function patchProgramThumbnail(id, fields) {
+    const key = String(id).startsWith('lv') ? String(id) : `lv${id}`;
+    const list = getProgramInfos();
+    const idx = list.findIndex((info) => info && info.id === key);
+    if (idx === -1) return false;
+    list[idx] = { ...list[idx], ...fields, _fetchedAt: Date.now() };
+    setProgramInfos(list);
+    return true;
+}
+
+/**
  * 複数の番組情報を1回の read/merge/write でまとめて upsert する（bulk）。
  * フォロー中ページ・スクレイプは毎サイクル全番組を書き戻すため、upsertProgramInfo を件数分
  * 呼ぶと O(N^2) になる。これを1回の読み書きに畳む。id 一致は上書き、無ければ追加、末尾から上限トリム。

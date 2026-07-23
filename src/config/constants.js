@@ -6,7 +6,11 @@ export const watchPageBaseUrl = 'https://live.nicovideo.jp/watch/'; // ニコ生
 
 export const sidebarMinWidth = 180;
 export const maxSaveProgramInfos = 200;
-export const updateThumbnailInterval = 20; // 秒（サムネ<img>更新ループ。保存済みURL＋キャッシュバスターで再取得）
+export const updateThumbnailInterval = 20; // 秒（サムネ<img>更新の基準間隔。番組ごと自己連鎖タイマーで更新完了後にこの時間を張る）
+// 新番組のライブサムネ追撃(詳細API)を「放送開始からこの時間内の若い番組」だけに限定するゲート。
+// これを過ぎても空＝ほぼ固定画像運用とみなし、各番組サイクルからの追撃は止める
+// （以降はリスト更新スクレイプ fillMissingDetails の60〜180秒に委譲）。旧A1「8回打ち切り」の代替。
+export const newProgramFastPollMs = 180000; // 3分
 
 // サムネイル更新の安定化用
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）

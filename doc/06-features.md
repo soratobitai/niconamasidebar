@@ -23,7 +23,7 @@
 | サイドバー幅 | （フォーム外・ドラッグ） | — | `sidebarWidth` | `360` | — | onChanged |
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
 | ライト/ダーク | （設定画面**末尾**のトグル。ON=ダーク） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `#theme_toggle`） | onChanged→`applyTheme` |
-| サムネ間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数） | — | — |
+| サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。番組ごと自己連鎖の基準間隔） | — | — |
 
 ---
 
@@ -45,9 +45,9 @@
 
 ## 4. ライブサムネイル表示・遅延更新
 - カード初期src: `makeProgramElement`（user=スクショ`?cache=`、channel=大サイズ）。
-- 定期更新: `UpdateManager.startThumbnailUpdate`（**20秒**、`updateThumbnailInterval`）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。
-- **ネットワーク詳細取得はしない**: このループは storage に保存済みの**安定したライブサムネURL＋キャッシュバスター**で `<img>` を更新するだけ（番組ごとの詳細取得は伴わない）。プリロード成功画像は動くサムネ②へも給餌される（§15）。
-- ✅ **可視復帰時の再取得**: タブを非表示にしてから戻ると、`main.js` の `handleVisibilityChange` が `performManualUpdate`（リスト＝notifybox＋詳細＝フロントAPI＋サムネ）を実行して最新化する。非表示中はサムネ更新ループを停止（リスト更新ループは軽いので継続）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
+- 定期更新: `UpdateManager.startThumbnailUpdate`（**番組ごとの独立・自己連鎖タイマー方式**）。各カードが自前のタイマー（`_thumbTimers` Map: id→timeoutId）を持ち、`_runThumbCycle` が「その番組の `<img>` を1件更新→画像の読み込み完了(`updateThumbnailsFromStorage` の **`onSettled`**)を待って→`updateThumbnailInterval`(**20秒**)後に次サイクル」を回す。周期＝20秒＋その回の作業時間なので、読み込み時に一斉に始まっても少しずつ自然にズレる（**ドリフト**＝「リストが一斉に切り替わるのが気持ち悪い」というUX要望に沿ったもの）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。新規/削除カードは `_syncThumbTimers`（`updateSidebar` 末尾）が各番組タイマーを生成/破棄して追従。読み込み時の一斉更新は `performManualUpdate` が担う（定期 `updateSidebarInterval` の全件 `updateThumbnail()` 呼び出しは撤去）。
+- **ネットワーク詳細取得は最小限**: このループは storage に保存済みの**安定したライブサムネURL＋キャッシュバスター**で `<img>` を更新するだけ。例外として、ライブサムネ空かつ放送開始から `newProgramFastPollMs`=3分以内の若い user 番組だけ各サイクルで詳細API(`fetchProgramInfo`)を1回追撃する（`_fetchLiveThumbIfPendingYoung`。旧A1の別建てバッチ `_retryPendingLiveThumbnails`／`THUMB_RETRY_MAX_ATTEMPTS`/`PER_CYCLE` は撤去し各サイクルに統合）。3分超の空番組はスクレイプ `fillMissingDetails`（60〜180秒）に委譲。プリロード成功画像は動くサムネ②へも給餌される（§15）。
+- **背景（非表示）タブ**: `_runThumbCycle` は `document.hidden` の間は画像更新を行わず軽く次サイクルだけ張る（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う。停止は `stopThumbnailUpdate`（`stopAllTimers`＝サイドバー閉／`cleanup`＝ページ離脱の両方から）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
 - 対応設定: **直接のUI項目なし**（フォームのヘルプに「サムネは設定と無関係に20〜60秒で自動更新」と明記）。`updateThumbnailInterval` 保存キーは既定に無く実質固定20秒。
 
 ## 5. 定期自動更新（番組リスト＋詳細）

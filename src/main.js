@@ -333,6 +333,10 @@ const cleanup = () => {
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 
+    // 番組ごとの自己連鎖サムネタイマーを停止（appState.timers はセンチネルのみ保持するため、
+    // appState.cleanup だけでは実タイマーが止まらない。閉パス stopAllTimers と対称にする）。
+    if (updateManager) updateManager.stopThumbnailUpdate();
+
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
 
@@ -347,6 +351,7 @@ const cleanup = () => {
 
 // すべての更新タイマーを停止
 function stopAllTimers() {
+    if (updateManager) updateManager.stopThumbnailUpdate(); // 番組ごとの自己連鎖サムネタイマーを全停止
     appState.clearTimer('thumbnail');
     appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');

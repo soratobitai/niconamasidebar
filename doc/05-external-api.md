@@ -72,7 +72,7 @@
 | `https://live.nicovideo.jp/follow?status=onair` | 詳細フロントAPIの元ページ（実取得は §1-2 の `front/api/pages/follow/v1/programs`）／ヘッダ「フォロー中の番組」リンクは `https://live.nicovideo.jp/follow` | `followPageSource.js` / `buildSidebarShell` |
 | `https://account.nicovideo.jp/login` | API失敗時の `#api_error` 内ログインリンク | `buildSidebarShell` |
 
-- **サムネ画像取得(GET)**: user=`liveScreenshotThumbnailUrls.middle`（`?cache=<ms>`）、channel=`large1280x720ThumbnailUrl`。いずれも**フロントAPI（or 補完詳細API）で storage に保存済みの安定URL**を、20秒ループ（`updateThumbnailInterval`）がキャッシュバスター付きで再取得するだけ（更新ループ側では番組ごとの詳細ネットワーク取得は行わない）。TTL10秒・失敗バックオフ2〜60秒・最終フォールバック `images/loading.gif`。
+- **サムネ画像取得(GET)**: user=`liveScreenshotThumbnailUrls.middle`（`?cache=<ms>`）、channel=`large1280x720ThumbnailUrl`。いずれも**フロントAPI（or 補完詳細API）で storage に保存済みの安定URL**を、番組ごとの自己連鎖タイマー（基準 `updateThumbnailInterval`=20秒）がキャッシュバスター付きで再取得するだけ。例外として、ライブサムネ空かつ放送開始から `newProgramFastPollMs`=3分以内の若い user 番組だけ、各サイクルで詳細API(`fetchProgramInfo`)を1回追撃してライブスクショを補完する（`_fetchLiveThumbIfPendingYoung`）。TTL10秒・失敗バックオフ2〜60秒・最終フォールバック `images/loading.gif`。
 - **現在番組IDの抽出**: `location.pathname.match(/\/watch\/(lv\d+)/)`（AutoNext）。遷移は `location.assign(nextHref)`。
 
 ---

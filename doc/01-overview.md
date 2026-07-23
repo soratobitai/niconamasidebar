@@ -40,7 +40,7 @@ DOMContentLoaded で setup()
         ▼
 サイドバーが開いている間、2系統のタイマーが回る（＋自動移動の監視）
         ├─ sidebar  : updateProgramsInterval 秒ごとに「リスト＋詳細」を再取得（既定120秒。非表示タブ時はスキップ）
-        └─ thumbnail: updateThumbnailInterval 秒ごとに、保存済みライブサムネURLへキャッシュバスターを付けて <img> を更新（既定20秒。非表示タブ時は停止）
+        └─ thumbnail: 番組ごとの独立・自己連鎖タイマー。各カードが「自分の <img> を1件更新→画像読み込み完了を待って→updateThumbnailInterval(既定20秒)後に次サイクル」を回す。周期＝20秒＋その回の作業時間なので少しずつ自然にズレる（一斉切替を避けるドリフト）。非表示タブ中は画像更新を行わずタイマーだけ回す（可視で再開）
         │
         ▼
 番組終了を検知(status.js)したら（自動移動ON時）カウントダウン後に次番組へ location.assign
