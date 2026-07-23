@@ -18,6 +18,11 @@
 > 固定画像配信者はライブサムネが取れないため、**その番組だけ詳細API(`fetchProgramInfo`)で選択的補完**する仕組みを追加（項目 N・V を更新）。
 > `fetchProgramInfo`／`constants.liveInfoAPI` はこの補完専用として復活・存置。
 > 削除された関数: `extractFollowItemsFromHtml`・`mapFollowItemToProgramInfo`・`pickLiveThumbnail`・`followPageUrl`・`window.__probeFollowPaging`（SSRスクレイプ経路ごと廃止）。
+>
+> **2026-07-23 更新（動くサムネ 稀バグの根本原因を修正）**: 実機報告の「稀に途中停止」「稀に最新が含まれない」を
+> 46エージェントのワークフロー（多角トレース→敵対的検証）で根本原因特定し修正（`npm run build` 成功）。下記 X・Y を追加。
+> 多くの候補（replaceChildren時のmouseout誤発火・decodeハング・eviction例外・USER重複排除誤破棄・hydrate競合等）は
+> 「replaceChildrenは同期＋ノード再利用」「animGen無効化」「playUrlAtのフォールバック」等で**不成立と確認**して除外済み。
 
 ---
 
@@ -145,6 +150,23 @@
 - ※ 詳細API `fetchProgramInfo` は健在だが、これは**サムネ欠落番組の選択的補完専用**（項目W）であって、フォローAPIそのものの代替経路ではない。フォローAPIが丸ごと失敗した周期を肩代わりする経路は無い。
 - 結果、失敗した周期は**リスト（notifybox）だけ更新され、詳細は前回のstorage値のまま**（初回から失敗し続ければ詳細欠落のまま）。次の周期でフォローAPIが復帰すれば自動で追いつく。
 - 「自動/API/ページ取得」を切り替える `dataSource` 設定や `auto` フォールバックモードも撤去済み（2026-07-18）。取得経路はリスト=notifybox・詳細=フォローAPI の一本のみ。
+
+## ✅ X. 動くサムネが稀に途中停止（🟡→修正済み・2026-07-23）
+- **症状**: ホバー中の動くサムネのアニメが極稀に途中で止まり、マウスを動かすまで再開しない。
+- **原因**: `animatedThumbnail.onMouseOver` がサムネ枠 `.program_thumbnail` を**厳格判定**し、同一カード内でもサムネ枠の外（`.program_title`/`.community`/アイコン/カード余白5px）へポインタが少しでも入ると `setHoverCard(null)→stopAnim()` で連鎖(`animTimer` 一本)が切れていた。停止を「コンテナ離脱時のみ」に限る `onMouseOut` と**粒度が非対称**で、サムネ枠へ入り直すまで再開しない（＝ユーザーはサムネを見ているつもりなのに止まる＝「極稀」に感じる）。
+- **修正**: `onMouseOver` を「サムネ枠へ入ったらそのカードをホバー対象／サムネ枠外でも現 `hoverCard` の内側なら維持／それ以外のみ `setHoverCard(null)`」に変更。停止はカード離脱・コンテナ離脱（`onMouseOut`）へ一本化。**同一カードのタイトル等の上でも再生継続する仕様変更**を含む（`onMouseOut` が既にコンテナ全体をホバー領域とみなす設計と粒度を揃えた）。`animTimer`/`animGen`/eviction 経路には非介入。
+- 対象: `src/render/animatedThumbnail.js`（`onMouseOver`）。
+- **棄却した仮説**（敵対的検証で不成立）: 並び替え`replaceChildren`時のmouseout誤発火・fragment離脱中の`showNext`・`decode()`ハング・eviction例外。いずれも単一スレッド同期実行＋ノード再利用＋`animGen`無効化＋`playUrlAt`の`getLiveStaticSrc`フォールバックで防がれている。
+
+## ✅ Y. 動くサムネに稀に最新が含まれない（🟡→修正済み・2026-07-23）
+- **症状**: 最新の（いま静止表示中の）ライブサムネが動くサムネ再生に含まれない／末尾に古い固定画像や `loading.gif` が「最新のフリ」で混ざることが極稀。
+- **原因（共通根）**: 末尾スロット（最新静止サムネを必ず映す安全網）の要否を **URL文字列一致** `getStaticSrc()===b.lastSrcUrl` で決めていたのが脆い。
+  - **(a) error フォールバック**: 給餌用 `pre` は成功したのに静止img自身の読込だけが失敗すると `handleThumbnailError` が `img.src` を `data-src`(固定コミュ画像) か `loading.gif` へ差替え。URLが `lastSrcUrl` と食い違い末尾スロットが**その非ライブ画像を最新として1コマ(~700ms)表示**していた。
+  - **(b) CHANNEL 番組**: `computeNext` が `key='c|'` でキャッシュバスターを付けずURL不変 → `staticIsDuplicate` が**恒常true → 末尾スロットが一度も発火しない**（USERは毎回一意URLで救済されるが CHANNEL だけ構造的にすり抜ける）。
+- **修正**: 末尾スロット判定を**状態ベース**へ置換。`getStaticSrc`→`getLiveStaticSrc`（静止imgが error フォールバック中なら `null` を返す。判定は ①側が `img.dataset.thumbLive` を成功時`'1'`/エラー時`'0'`で通知）、`staticIsDuplicate`→`shouldAppendStaticTail`（**静止がライブ**かつ**最新blobより先へ進んだ**時だけ末尾を足す＝URL文字列でなく「ライブか」「先へ進んだか」で判定＝providerType非依存）。挙動はライブ通常時は従来と等価、fallback中のみ末尾を抑止して最新blobを最新扱いにする。
+- 対象: `src/render/animatedThumbnail.js`（`getLiveStaticSrc`・`shouldAppendStaticTail`・`playCount`・`playUrlAt`）、`src/render/sidebar.js`（`applySuccess` で `thumbLive='1'`・`handleThumbnailError` で `thumbLive='0'`）。
+- **残ギャップ（別件・低）**: CHANNEL はキャッシュバスター無しで静止img自体が初回内容に凍結され得る（URL不変で `applySuccess` の `img.src!==urlForAttempt` が偽＝再取得されない）。給餌`pre`のHTTPキャッシュ次第でバッファも停滞し得る。完全対称化には CHANNEL feed のキャッシュバスターが要るが、`large1280x720ThumbnailUrl` にクエリ付与が安全か（署名URL等で403にならないか）を実機で裏取りしてから判断（安易に付けない）。上記修正は「非ライブ混入」を全 provider で塞ぐところまで。
+- **棄却した仮説**（敵対的検証で不成立）: USER重複排除の閾値誤破棄・`toBlob`/hydrate競合・`currentSrc`遅延窓。捨てられるのは「中間コマ or ほぼ同一コマ」で、真の最新は blob か末尾スロットで必ず映るため最新欠落にならない。
 
 ---
 

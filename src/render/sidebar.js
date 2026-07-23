@@ -188,6 +188,10 @@ export function calculateActivePoint(data) {
 // サムネイル画像の読み込み失敗時のフォールバック処理。
 // makeProgramElement 生成時に各 img へ addEventListener('error', ...) で配線される。
 function handleThumbnailError() {
+    // 静止imgがライブサムネの読込に失敗し、固定画像(data-src)や loading.gif へ差し替わる＝
+    // 「今の静止サムネはライブではない」印。動くサムネの末尾スロットがこの非ライブ画像を
+    // 最新のフリで映さないよう thumbLive=0 を立てる（applySuccess で '1' に戻る）。
+    this.dataset.thumbLive = '0'
     const dataSrc = this.getAttribute('data-src')
     if (dataSrc && this.src !== dataSrc) {
         this.src = dataSrc
@@ -296,6 +300,9 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
+                // 静止imgは「ライブサムネURL」を表示中。動くサムネの末尾スロット判定に使う
+                // （error フォールバックで固定画像/loading.gif になっていない印）。
+                img.dataset.thumbLive = '1'
             }
             // 失敗時のバックオフ記録（表示は handleThumbnailError／現状維持に任せ、次周期まで維持）。
             const applyBackoff = () => {

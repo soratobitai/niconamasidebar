@@ -27,8 +27,11 @@ import {
  *   これで「二重通信」をなくす。アニメのコマ（履歴）はすべて①のcrossOrigin成功画像から作る。
  *   ①のcrossOriginが失敗する番組・タイミングでは①が平文で表示だけ確保し（表示は無傷）、②へは渡さない
  *   ＝バッファは更新されない。そこで「アニメの末尾コマは、コマ化(crossOrigin)を待たず“今表示中の静止
- *   サムネそのもの”を平文のまま直接表示」する（getStaticSrc）。これによりcrossOriginの成否に関係なく、
- *   アニメの末尾は常に「今の静止サムネ」になり、「最新が含まれない」が構造的に起きなくなる。
+ *   サムネそのもの”を平文のまま直接表示」する（getLiveStaticSrc／shouldAppendStaticTail）。これにより
+ *   crossOriginの成否に関係なく、静止だけ先に進んだ時は末尾に「今の静止サムネ」が入り最新を必ず映す。
+ *   末尾スロットの要否は URL文字列一致ではなく「静止がライブサムネを表示中か（error fallback中でないか）」
+ *   「最新blobより先へ進んだか」の状態で決めるため providerType(user/channel) 非依存（固定画像/loading.gif
+ *   の混入・channelでの恒常無効化を防ぐ）。
  */
 
 // programId(数値文字列) -> { frames: [{ url, sig, blob }], lastSig, lastSrcUrl }
@@ -332,27 +335,39 @@ function getOverlay(card, create) {
 }
 
 // 今カードで表示中の静止サムネ画像のURL（平文でも読める＝crossOrigin不要）。
-function getStaticSrc(card) {
+// ただし error フォールバック中（handleThumbnailError が data-src の固定画像や loading.gif へ
+// 差し替えた状態）は「ライブサムネではない」ので null を返す。これで末尾スロットに
+// 非ライブ画像（固定コミュ画像/ローディングgif）を最新のフリで混ぜる不具合を防ぐ。
+// ライブか否かは ①(sidebar.js) が dataset.thumbLive で通知（成功時'1'/error時'0'）。
+function getLiveStaticSrc(card) {
     const im = card && card.querySelector('.program_thumbnail_img')
-    return (im && (im.currentSrc || im.src)) || null
+    if (!im) return null
+    if (im.dataset && im.dataset.thumbLive === '0') return null
+    return im.currentSrc || im.src || null
 }
-// 今の静止サムネが「最新blobコマと同じ画像」か（＝crossOrigin給餌が追随できている通常状態）。
-// 同じなら末尾スロットは不要（足すと同一画像の無変化フェードが1拍入る＝空打ちになる）。
-// crossOriginが失敗して静止だけ先に進むと URL が食い違い、ここが false になって末尾スロットが復活する。
-function staticIsDuplicate(b, card) {
-    if (!b.frames.length || !b.lastSrcUrl) return false
-    return getStaticSrc(card) === b.lastSrcUrl
+// 末尾スロット（＝今の静止サムネを最新コマとして1枚足す安全網）を付けるべきか。
+// 付けるのは「静止がライブサムネを表示していて、かつ最新blobの出所URLと違う」＝crossOrigin給餌が
+// 失敗/遅延して静止だけ先に進んだ時だけ。これで最新を必ず映す。判定は URL文字列一致ではなく
+// 「ライブか」「先へ進んだか」の状態で行うため providerType(user/channel) 非依存。
+// - 非ライブ(fallback)中は付けない（固定画像/loading.gif の混入を防ぐ＝最新blobを最新扱い）。
+// - 静止＝最新blobと同一URL（追随できている通常時）も付けない（同一画像の無変化フェード＝空打ちを避ける）。
+function shouldAppendStaticTail(b, card) {
+    if (!b.frames.length) return false
+    const live = getLiveStaticSrc(card)
+    if (!live) return false           // fallback中 → 最新blobを最新扱い
+    if (!b.lastSrcUrl) return true    // hydrate直後等でblob出所不明 → 現在の静止(ライブ)を最新として足す
+    return live !== b.lastSrcUrl       // 静止がblobより先へ進んだ時だけ末尾に足す
 }
-// 再生コマ数。通常時＝blob枚数（末尾スロットなし・空打ちを避ける）。
-// 静止がズレている時のみ ＋1（末尾＝今の静止サムネ）して最新を必ず映す。
+// 再生コマ数。通常時＝blob枚数（末尾スロットなし）。静止だけ先へ進んだ時のみ ＋1（末尾＝今の静止サムネ）。
 function playCount(b, card) {
-    return b.frames.length + (staticIsDuplicate(b, card) ? 0 : 1)
+    return b.frames.length + (shouldAppendStaticTail(b, card) ? 1 : 0)
 }
-// 再生位置 idx のURL。idx<blob枚数ならそのblob、末尾スロットは今の静止サムネsrc
-// （都度読み直す＝ローリング更新で静止が進んでも常に最新を映す）。
+// 再生位置 idx のURL。idx<blob枚数ならそのblob、末尾スロットは今の静止サムネ(ライブ)src
+// （都度読み直す＝ローリング更新で静止が進んでも常に最新を映す）。fallback中は null で
+// showNext 側が先頭へ戻す。
 function playUrlAt(b, idx, card) {
     if (idx < b.frames.length) return b.frames[idx].url
-    return getStaticSrc(card)
+    return getLiveStaticSrc(card)
 }
 
 // ホバー中カードが条件を満たせばアニメ開始（冪等：既に再生中/枚数不足なら何もしない）
@@ -380,7 +395,7 @@ function tryStartAnim() {
     animCard = card
     // 古い順→最新の時系列で再生する（frames[0]=最も古い → 末尾）。
     // 通常時は末尾＝最新blob。crossOriginが失敗して静止だけ先に進んだ時のみ、
-    // playCount が +1 して末尾に「今の静止サムネ」を足す＝最新が必ず映る（staticIsDuplicate 参照）。
+    // playCount が +1 して末尾に「今の静止サムネ」を足す＝最新が必ず映る（shouldAppendStaticTail 参照）。
     animIndex = 0
     const gen = ++animGen
 
@@ -467,10 +482,19 @@ function setHoverCard(card) {
 
 // ---- 委譲ホバーリスナ（カードは再生成されるためコンテナに付ける） ----
 function onMouseOver(e) {
-    // サムネ画像領域(.program_thumbnail)にホバーしたときだけ動かす。
-    // アイコン/配信者名/番組タイトル等の上では反応させない。
+    // サムネ画像領域(.program_thumbnail)へ入ったら、そのカードをホバー対象にする。
     const thumb = e.target.closest ? e.target.closest('.program_thumbnail') : null
-    setHoverCard(thumb ? thumb.closest('.program_container') : null)
+    if (thumb) {
+        setHoverCard(thumb.closest('.program_container'))
+        return
+    }
+    // サムネ枠の外（同一カード内のタイトル/配信者名/アイコン/余白）へポインタが移っても、
+    // 現在ホバー中カードの内側に留まっている限り再生を止めない。
+    // ※旧実装はサムネ枠を厳格判定し、枠外に少し外れただけで setHoverCard(null)→stopAnim() と
+    //   なり、連鎖(animTimer 一本)が切れてサムネ枠へ戻すまで再開しなかった（＝「途中で止まる」）。
+    //   カード離脱・コンテナ離脱による停止は onMouseOut が担うので、ここは維持のみ行う。
+    if (hoverCard && hoverCard.contains(e.target)) return
+    setHoverCard(null)
 }
 
 function onMouseOut(e) {
