@@ -81,7 +81,8 @@ export class UpdateManager {
     /**
      * 現在のカードと自己連鎖タイマーを突き合わせる。
      * 新しく現れたカードにはサイクルを開始し、消えたカードのタイマーは片付ける。
-     * 初回サイクルは基準間隔後に張る（読み込み直後の一斉更新は performManualUpdate 側が担うため）。
+     * 初回サイクルは「基準間隔を番組数で割った位置」へ均等配置する（理由は下のコメント）。
+     * 読み込み直後の一斉更新は performManualUpdate 側が担うため、ここでは間隔を空けてよい。
      * 開始時と updateSidebar の後（新規/削除カードの後）に呼ぶ。
      */
     _syncThumbTimers() {
@@ -89,15 +90,31 @@ export class UpdateManager {
         if (!this._thumbTimers) this._thumbTimers = new Map();
         const container = document.getElementById('liveProgramContainer');
         if (!container) return;
+        const cycleMs = this._currentThumbCycleMs();
+        const cards = Array.from(container.children);
         const present = new Set();
-        for (const el of container.children) {
+        cards.forEach((el, i) => {
             const id = el && el.id;
-            if (!id) continue;
+            if (!id) return;
             present.add(id);
             if (!this._thumbTimers.has(id)) {
-                this._scheduleThumbCycle(id, this._currentThumbCycleMs());
+                // 初回サイクルを周期内へ均等配置する（＝位相をずらす）。
+                // 全カードに同じ delay を張ると初回が完全同時になり、全画像が HTTP/2 の同一接続で
+                // 多重化されて帯域を分け合う＝どの番組も「同じ時間」で完了してしまう。作業時間が
+                // 共通化すると全番組が同じ瞬間に次を張り直すため、「作業時間ぶん自然にドリフトする」
+                // という自己連鎖の前提が原理的に成立せず、一斉状態がそのまま自己維持される。
+                // さらに周期が「基準間隔＋一斉取得にかかる時間」まで伸びる
+                // （実測: 16番組で作業15.1秒→周期35.1秒。20秒間隔が守れずコマを取りこぼす）。
+                // 位相を分散させれば同時取得が減って作業時間が短くなり、周期も基準へ戻る。
+                //
+                // ただし基準間隔ぶん「後ろへ」倒してから分散させること。前倒しすると
+                // performManualUpdate の force 一斉更新（実測15秒級）の最中に発火する。その時点では
+                // 新規カードの dataset.lastSuccessAt/key が未設定（makeProgramElement は src を入れる
+                // だけで、これらを書くのは applySuccess＝プリロード完了後）なので TTL ガードが素通りし、
+                // 同じ <img> に2本目の取得が走る＝減らしたい同時接続を起動直後に増やしてしまう。
+                this._scheduleThumbCycle(id, cycleMs + Math.round((cycleMs * (i + 1)) / cards.length));
             }
-        }
+        });
         // 消えた番組のタイマーを解放（各サイクルでも自然停止するが、ここで即掃除する）
         for (const id of Array.from(this._thumbTimers.keys())) {
             if (!present.has(id)) {
