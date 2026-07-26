@@ -358,6 +358,7 @@ function stopAllTimers() {
     // （戻ってきて自力で張り直す＝閉じても回り続ける）。世代を進める stopSidebarUpdate で止める。
     if (updateManager) updateManager.stopSidebarUpdate();
     appState.clearTimer('thumbnail');
+    appState.clearTimer('sidebar'); // updateManager 未生成（初期化前）でも最低限タイマーは止める
     appState.clearTimer('autoNext');
 }
 
