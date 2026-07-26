@@ -190,7 +190,7 @@
 - **🔴 初回位相の均等配置（2026-07-26 追加・これが無いとドリフトが原理的に成立しない）**: `_syncThumbTimers` が全カードに**同じ** delay を張ると初回が完全同時になる。全画像が HTTP/2 の同一接続で多重化されて帯域を分け合うため、**どの番組も「同じ時間」で完了**してしまい、作業時間が共通化＝全番組が同じ瞬間に次を張り直す。「作業時間ぶん自然にドリフトする」という前提が崩れ、一斉状態がそのまま自己維持される（実測: 16番組で作業15.1秒→周期35.1秒。20秒間隔が守れずコマを取りこぼす）。→ 初回を `cycleMs + cycleMs*(i+1)/cards.length` で周期内へ均等配置。**必ず基準間隔ぶん「後ろへ」倒してから分散させること**（前倒しすると `performManualUpdate` の force 一斉更新の最中に発火し、新規カードは `dataset.lastSuccessAt/key` 未設定で TTL ガードが素通り＝同じ `<img>` に2本目の取得が走る）。
 - **実測による確認（2026-07-26 / 14番組・4分連続観測）**: 自己周期 **20.0秒**（20.0〜20.1）、位相の散らばり **18.1〜18.5秒**、1サイクルの作業時間 **0.0秒**、2×間隔ガード到達 **0/153回**、**同時に走ったサイクルは常に1本**。同一画像を fetch / crossOrigin付き`<img>` / 素の`<img>` / `fetchPriority=high` で同時取得する比較も4ラウンドとも全て 0.0秒で同着＝**`<img>` の優先度スターベーションは原因ではない**。キャッシュバスター有無の比較も 0.1秒/0.0秒（7KB・HTTP 200）で、**`?cache=` もサーバも回線も無罪**。→ 詳細は [10-verification-playbook](./10-verification-playbook.md)
 - **既知の据え置き（低・別件）**:
-  - **起動1秒の間に `startSidebarUpdate` が2回呼ばれる**（実測 0.6秒・1.6秒）。1本目は未発火のうちに `clearTimeout`（`UpdateManager.js` の `existingTimer` クリア）で破棄されるため現状は無害だが、**更新中に2回目が来ればチェーン二重化の入り口**になる。誘発手順（スロットリング）は未実施＝未検証。
+  - 起動1秒の間に `startSidebarUpdate` が2回呼ばれる（実測 0.6秒・1.6秒）のは**仕様どおり**。開いた瞬間にタイマー開始 → `performManualUpdate` 完了後に `restartSidebarUpdate` で周期を数え直す（`UpdateManager.js` の「定期タイマーをリセット」）。1本目は未発火のうちに clearTimeout されるので無害。ただし**この再起動が「チェーンが await 中」に重なると項目 AB の二重化を踏む**。
   - A1が入れたライブスクショURLが、フォローAPIの listingThumbnail 非反映番組では各スクレイプ周期で一旦空へ戻り得る（`fillMissingDetails` が同周期で再補完するので実質一過性）。恒久化したければ upsertProgramInfos で「既存が有効ライブスクショ かつ 新規が空」なら保持マージする。
   - per-program 更新は毎サイクル localStorage 全体を `JSON.parse` する（旧一斉のN倍）。絶対コストは小（~数ms/秒）で据え置き。必要なら単一番組の高速updateパスで最適化可。
 - 対象: `src/managers/UpdateManager.js`・`src/render/sidebar.js`（`updateThumbnailsFromStorage` の `onSettled`）・`src/services/storage.js`（`patchProgramThumbnail`）・`src/main.js`（`cleanup`/`stopAllTimers`）・`src/config/constants.js`（`newProgramFastPollMs`）。→ [03-module-reference](./03-module-reference.md)・[04-data-flow](./04-data-flow.md)
@@ -205,6 +205,22 @@
   2. `sidebar.js` — `resolveLiveThumbnailBaseUrl` の channel 分岐から `|| info.thumbnailUrl` を削除（1をすり抜けた場合の防御）。user 側の同フォールバックは放送直後の未生成窓を `_fetchLiveThumbIfPendingYoung` が埋める設計のため**残す**。
 - **調査時の教訓（同種のバグで再発しやすい）**: 最初に 2 だけを直したがエラーは止まらなかった。**アイコンURLはその手前で「正規のライブサムネ」として登録済み**だったため。「どこで表示に使うか」ではなく「**どこでライブサムネとして登録されるか**」を先に見ること。
 - 対象: `src/services/followPageSource.js`・`src/render/sidebar.js`。検証記録は [10-verification-playbook](./10-verification-playbook.md)
+
+## ✅ AB. サイドバー更新チェーンの孤児化・二重化（既知欠陥#1）（🔴→修正済み・2026-07-26）
+- **旧構造の問題**: チェーンを止める手段が `clearTimeout` **しか無かった**。`updateSidebarInterval` は `await this.updateSidebar()` の中に居る間タイマーが存在しないため、その瞬間は**構造的に停止不可能**。しかも await 明けに**無条件で**自分の次を張り `appState.timers.sidebar` を上書きしていた。
+- **孤児化の手順**:
+  1. チェーン#1 が `await this.updateSidebar()` 実行中（`timers.sidebar` は消化済み＝止める手段なし）
+  2. そこへ `restartSidebarUpdate()`（更新間隔の変更・`performManualUpdate` 完了時）が来る → `clearTimeout` は空振り → **チェーン#2 誕生**、`timers.sidebar` = #2
+  3. #1 の await が解決 → 無条件に次を張り `timers.sidebar` を#1のもので**上書き**
+  4. → #2 のタイマーIDはどこからも参照されない＝**孤児。だが生きていて発火し続ける**
+- **症状**: (A) サイドバーを閉じても更新が回り続ける（`stopAllTimers` の `clearTimer('sidebar')` は#1しか止められない）／(B) 2本並走＝リスト取得が二重化し、**ページ再読込まで戻らない**。
+- **修正**: サムネ側 `_thumbGen` と**同じ世代トークン方式**を移植。
+  - `_sidebarGen` を `startSidebarUpdate`／`stopSidebarUpdate` で ++。チェーン生成時に `gen` を捕捉。
+  - 再スケジュールは `scheduleNext()` に集約し、**`gen !== this._sidebarGen` なら張らない＝旧チェーンはそこで自然消滅**。不一致時は `appState` のタイマーも触らない（新世代が張ったものを消さないため）。
+  - コールバック先頭でも世代チェック（clearTimeout が間に合わずキュー済みだった場合の保険）。
+  - **`stopSidebarUpdate()` を新設**し、`stopAllTimers`（閉）と `cleanup`（離脱）の両方から呼ぶ＝サムネ側と対称に（項目K のライフサイクル非対称の解消でもある）。`restartSidebarUpdate` は `startSidebarUpdate` へ委譲するだけでよくなった。
+- **注意**: 「タイマーを clearTimeout すれば止まる」は **await を挟むチェーンでは成立しない**。停止フラグか世代トークンを必ず併用すること。
+- 対象: `src/managers/UpdateManager.js`（`startSidebarUpdate`・`stopSidebarUpdate`・`restartSidebarUpdate`）、`src/main.js`（`stopAllTimers`・`cleanup`）。再現/回帰手順は [10-verification-playbook](./10-verification-playbook.md) ブロックC
 
 ---
 

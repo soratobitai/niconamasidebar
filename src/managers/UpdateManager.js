@@ -222,17 +222,28 @@ export class UpdateManager {
      * 1周期ごとに notifybox（リスト）＋スクレイプ（詳細）を取り込んで再描画する。
      */
     startSidebarUpdate() {
-        // 既存のタイマーがある場合は確実にクリア
+        // 既存タイマーを消し、世代を進めて in-flight の旧チェーンと縁を切る。
         const existingTimer = this.appState.getTimer('sidebar');
         if (existingTimer) {
             clearTimeout(existingTimer);
         }
+        this._sidebarGen = (this._sidebarGen || 0) + 1;
+        const gen = this._sidebarGen; // このチェーンの世代を捕捉
+
+        // 次サイクルの予約。世代が進んでいたら張らない＝旧チェーンはここで自然消滅する。
+        // 不一致時は appState のタイマーも触らない（新世代が張ったものを消さないため）。
+        const scheduleNext = () => {
+            if (gen !== this._sidebarGen) return;
+            const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
+            this.appState.setTimer('sidebar', timer);
+        };
 
         const updateSidebarInterval = async () => {
+            // 発火時点で旧世代なら何もしない（clearTimeout が間に合わずキュー済みだった場合の保険）。
+            if (gen !== this._sidebarGen) return;
             // 別の更新（手動更新）が進行中なら、今回の定期更新はスキップして次回に回す。
             if (this.appState.isLoading()) {
-                const retryTimer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
-                this.appState.setTimer('sidebar', retryTimer);
+                scheduleNext();
                 return;
             }
             try {
@@ -245,23 +256,32 @@ export class UpdateManager {
             } catch (error) {
                 console.error('[updateSidebarInterval] エラー:', error);
             }
-            const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
-            this.appState.setTimer('sidebar', timer);
+            scheduleNext();
         };
 
-        const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
-        this.appState.setTimer('sidebar', timer);
+        scheduleNext();
+    }
+
+    /**
+     * サイドバー更新を停止する（閉／クリーンアップ）。
+     * clearTimeout だけでは await 中のチェーンを止められないため、世代を進めて張り直しを無効化する。
+     * サムネ側 stopThumbnailUpdate と対称に、閉パス・離脱パスの両方から呼ぶこと。
+     */
+    stopSidebarUpdate() {
+        this._sidebarGen = (this._sidebarGen || 0) + 1; // in-flight チェーンの張り直しを無効化
+        const existingTimer = this.appState.getTimer('sidebar');
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+        this.appState.clearTimer('sidebar');
     }
 
     /**
      * サイドバー更新タイマーを再開
      */
     restartSidebarUpdate() {
-        const existingTimer = this.appState.getTimer('sidebar');
-        if (existingTimer) {
-            clearTimeout(existingTimer);
-            this.appState.clearTimer('sidebar');
-        }
+        // startSidebarUpdate が世代を進めるので、await 中の旧チェーンも張り直せなくなる
+        // ＝ここで手前に clearTimeout を重ねる必要はない（旧実装は世代が無く、それだけが頼りだった）。
         this.startSidebarUpdate();
     }
 

@@ -336,6 +336,8 @@ const cleanup = () => {
     // 番組ごとの自己連鎖サムネタイマーを停止（appState.timers はセンチネルのみ保持するため、
     // appState.cleanup だけでは実タイマーが止まらない。閉パス stopAllTimers と対称にする）。
     if (updateManager) updateManager.stopThumbnailUpdate();
+    // サイドバー更新チェーンも同様に、appState.cleanup だけでは await 中のものが止まらない。
+    if (updateManager) updateManager.stopSidebarUpdate();
 
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
@@ -352,8 +354,10 @@ const cleanup = () => {
 // すべての更新タイマーを停止
 function stopAllTimers() {
     if (updateManager) updateManager.stopThumbnailUpdate(); // 番組ごとの自己連鎖サムネタイマーを全停止
+    // サイドバー更新チェーンは await 中だとタイマーが存在せず clearTimer では止まらない
+    // （戻ってきて自力で張り直す＝閉じても回り続ける）。世代を進める stopSidebarUpdate で止める。
+    if (updateManager) updateManager.stopSidebarUpdate();
     appState.clearTimer('thumbnail');
-    appState.clearTimer('sidebar');
     appState.clearTimer('autoNext');
 }
 
