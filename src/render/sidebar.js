@@ -268,6 +268,31 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         return { nextUrl: base, key: `${prefix}|${base}` }
     }
 
+    /**
+     * 定期更新の対象外になった img が、error フォールバックで loading.gif に落ちたままなら
+     * 静的サムネ(data-src)へ戻す。
+     *
+     * ライブサムネを持たない番組（channel など）は computeNext が null を返して更新対象から
+     * 外れるため、この img に触れる経路が他に無い。channel は src と data-src が同一URLなので
+     * handleThumbnailError の `this.src !== dataSrc` が偽になり必ず loading.gif へ落ちる。
+     * 復帰させないと、一過性の読み込み失敗（回線瞬断・プロキシの一時エラー）だけで
+     * loading.gif がページ再読込まで固定表示されてしまう。
+     * 壊れたURLを毎周期叩かないよう、プリロード経路と同じ dataset バックオフに乗せる。
+     */
+    function restoreStaticThumbIfLoading(img) {
+        const dataSrc = img.getAttribute('data-src')
+        if (!dataSrc) return
+        const loadingUrl = chrome.runtime.getURL('images/loading.gif')
+        if (dataSrc === loadingUrl) return   // 戻す先が無い（元から静的サムネ不明）
+        if (img.src !== loadingUrl) return   // 落ちていない＝何もしない
+        const nextTryAt = Number(img.dataset.nextTryAt || 0)
+        if (nextTryAt && Date.now() < nextTryAt) return
+        const errors = Number(img.dataset.errors || 0) + 1
+        img.dataset.errors = String(errors)
+        img.dataset.nextTryAt = String(Date.now() + Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1)))
+        img.src = dataSrc
+    }
+
     function checkComplete() {
         // 全ての画像処理が完了した場合（onComplete はローディング表示用＝画像読み込みは待たない）
         if (!isCompleted && index >= sourceImgs.length) {
@@ -295,7 +320,10 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             const info = infoMap.get(`lv${card.id}`)
 
             const { nextUrl, key } = computeNext(info)
-            if (!nextUrl) continue;
+            if (!nextUrl) {
+                restoreStaticThumbIfLoading(img) // 更新対象外でも loading.gif の固定だけは解く
+                continue
+            }
 
             // TTL: 直近成功から一定時間は更新しない（キー変化時は除く）
             if (!force) {

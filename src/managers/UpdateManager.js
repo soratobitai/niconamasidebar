@@ -248,6 +248,11 @@ export class UpdateManager {
             }
             try {
                 await this.updateSidebar();
+                // await を跨いだ後にも世代を見る。停止/再開を跨いだ旧チェーンがここへ戻ってくると、
+                // getCurrentSessionId() は「今動いている別の更新」のセッションを返すため、
+                // 他人のローディングセッションを finish してしまう（＝手動更新がまだ走っているのに
+                // 更新ボタンの pointer-events が戻り、押せるのに無反応な状態になる）。
+                if (gen !== this._sidebarGen) return;
                 if (this.loadingManager.getCurrentSessionId()) {
                     await this.loadingManager.finishSessionWithMinDuration(1000);
                 }

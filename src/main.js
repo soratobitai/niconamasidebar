@@ -466,8 +466,12 @@ chrome.storage.onChanged.addListener(function (changes) {
         setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
     }
 
-    // 更新間隔が変更された場合はタイマーを再起動
-    if (needsRestart) {
+    // 更新間隔が変更された場合はタイマーを再起動。
+    // 設定は全タブ共有なので、この listener は「サイドバーを閉じている別タブ」でも発火する。
+    // 開閉を見ずに再起動すると、閉じたままリスト取得（notifybox＋フォローページ走査）が
+    // 回り続ける＝stopSidebarUpdate で成立させた「閉じたら止まる」を打ち消してしまう。
+    // 閉じている場合は何もしなくてよい。次に開いた時の startSidebarUpdate が新しい間隔で始める。
+    if (needsRestart && appState.sidebar.isOpen) {
         restartSidebarUpdate();
     }
 });

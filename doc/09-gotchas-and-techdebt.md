@@ -204,6 +204,7 @@
   1. `followPageSource.js` — `mapApiProgramToInfo`・`fillMissingDetails` の channel 経路にも `isLiveScreenshotUrl()` を通し、**ライブスクショだけ**を `large1280x720ThumbnailUrl`/`liveScreenshotThumbnailUrls` に入れる。**表示用 `thumbnailUrl` は従来どおり**なのでカードの見た目は不変。
   2. `sidebar.js` — `resolveLiveThumbnailBaseUrl` の channel 分岐から `|| info.thumbnailUrl` を削除（1をすり抜けた場合の防御）。user 側の同フォールバックは放送直後の未生成窓を `_fetchLiveThumbIfPendingYoung` が埋める設計のため**残す**。
 - **調査時の教訓（同種のバグで再発しやすい）**: 最初に 2 だけを直したがエラーは止まらなかった。**アイコンURLはその手前で「正規のライブサムネ」として登録済み**だったため。「どこで表示に使うか」ではなく「**どこでライブサムネとして登録されるか**」を先に見ること。
+- **🔴 この修正が生んだ二次回帰（同日レビューで検出・修正済み）**: 定期更新から外すと、その `<img>` に触れる経路が**他に一切無くなる**。channel は `src` と `data-src` が同一URLなので `handleThumbnailError` の `this.src !== dataSrc` が偽になり**必ず loading.gif へ落ちる**（`sidebar.js`）。変更前は次のサムネ周期で `applySuccess` の `if (img.src !== urlForAttempt) img.src = urlForAttempt` が実URLへ戻していたが、対象外にしたことで**唯一の復旧経路が消え、一過性の失敗だけで loading.gif がページ再読込まで固定**されるようになっていた。→ `computeNext` が null を返した時に `restoreStaticThumbIfLoading(img)` を呼び、loading.gif のときだけ `data-src` へ戻す（壊れたURLを毎周期叩かないようプリロード経路と同じ dataset バックオフに乗せる）。**「更新対象から外す」変更は、その要素の復旧経路も同時に奪っていないか必ず確認すること。**
 - 対象: `src/services/followPageSource.js`・`src/render/sidebar.js`。検証記録は [10-verification-playbook](./10-verification-playbook.md)
 
 ## ✅ AB. サイドバー更新チェーンの孤児化・二重化（既知欠陥#1）（🔴→修正済み・2026-07-26）
@@ -219,7 +220,9 @@
   - 再スケジュールは `scheduleNext()` に集約し、**`gen !== this._sidebarGen` なら張らない＝旧チェーンはそこで自然消滅**。不一致時は `appState` のタイマーも触らない（新世代が張ったものを消さないため）。
   - コールバック先頭でも世代チェック（clearTimeout が間に合わずキュー済みだった場合の保険）。
   - **`stopSidebarUpdate()` を新設**し、`stopAllTimers`（閉）と `cleanup`（離脱）の両方から呼ぶ＝サムネ側と対称に（項目K のライフサイクル非対称の解消でもある）。`restartSidebarUpdate` は `startSidebarUpdate` へ委譲するだけでよくなった。
-- **注意**: 「タイマーを clearTimeout すれば止まる」は **await を挟むチェーンでは成立しない**。停止フラグか世代トークンを必ず併用すること。
+- **世代照合は await の「後」にも要る（同日レビューで検出・追加）**: 発火時と再スケジュール時だけ照合しても、**await を跨いだ後の副作用**は止まらない。旧チェーンが `await this.updateSidebar()` から戻ると `getCurrentSessionId()` は「今動いている別の更新」のセッションを返すため、`finishSessionWithMinDuration` が**他人のセッションを finish** してしまう（`LoadingManager` はIDを受け取らず「今のセッション」を無条件に閉じる）。結果、`performManualUpdate` の force 一斉更新（実測15秒級）の最中に `isLoading()` が false へ落ち、更新ボタンの `pointer-events` が戻って**押せるのに無反応**になる。→ await 直後にも `if (gen !== this._sidebarGen) return;` を置く。
+- **閉じたタブでの再起動を塞ぐ（同日レビューで検出・修正）**: 設定は全タブ共有なので `chrome.storage.onChanged` は**サイドバーを閉じている別タブでも発火する**。`main.js` の更新間隔変更ハンドラだけが開閉を見ずに `restartSidebarUpdate()` を呼んでおり、閉じたままリスト取得が回り続けて `stopSidebarUpdate` の効果を打ち消していた（他の起動経路は全て `isOpen` を見ている）。→ `if (needsRestart && appState.sidebar.isOpen)` に。閉じている間は何もしなくてよく、次に開く時の `startSidebarUpdate` が新しい間隔で始める。
+- **注意**: 「タイマーを clearTimeout すれば止まる」は **await を挟むチェーンでは成立しない**。停止フラグか世代トークンを必ず併用し、**await の前後どちらでも照合**すること。
 - 対象: `src/managers/UpdateManager.js`（`startSidebarUpdate`・`stopSidebarUpdate`・`restartSidebarUpdate`）、`src/main.js`（`stopAllTimers`・`cleanup`）。再現/回帰手順は [10-verification-playbook](./10-verification-playbook.md) ブロックC
 
 ---
