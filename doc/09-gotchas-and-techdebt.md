@@ -187,10 +187,24 @@
   - 🔴 **lost update**: A1書き戻しを `upsertProgramInfos`（stale全置換）で行うと、await中にスクレイプが入れた最新の視聴者数等を巻き戻す。→ **`storage.patchProgramThumbnail`**（await後に再read→サムネ欄のみマージ）へ。
   - 中断サイクルのガードは `_pendingGuards` で追跡し、stop時は `finish()`（clear＋resolve）で**待機Promiseごと解放**（未resolveリーク防止）。
   - **背景タブ**は rAF 停止で `onSettled` が来ないため、`_runThumbCycle` は `document.hidden` 時は更新せず軽く再スケジュールのみ（ガード空回し回避、可視復帰で通常へ）。
+- **🔴 初回位相の均等配置（2026-07-26 追加・これが無いとドリフトが原理的に成立しない）**: `_syncThumbTimers` が全カードに**同じ** delay を張ると初回が完全同時になる。全画像が HTTP/2 の同一接続で多重化されて帯域を分け合うため、**どの番組も「同じ時間」で完了**してしまい、作業時間が共通化＝全番組が同じ瞬間に次を張り直す。「作業時間ぶん自然にドリフトする」という前提が崩れ、一斉状態がそのまま自己維持される（実測: 16番組で作業15.1秒→周期35.1秒。20秒間隔が守れずコマを取りこぼす）。→ 初回を `cycleMs + cycleMs*(i+1)/cards.length` で周期内へ均等配置。**必ず基準間隔ぶん「後ろへ」倒してから分散させること**（前倒しすると `performManualUpdate` の force 一斉更新の最中に発火し、新規カードは `dataset.lastSuccessAt/key` 未設定で TTL ガードが素通り＝同じ `<img>` に2本目の取得が走る）。
+- **実測による確認（2026-07-26 / 14番組・4分連続観測）**: 自己周期 **20.0秒**（20.0〜20.1）、位相の散らばり **18.1〜18.5秒**、1サイクルの作業時間 **0.0秒**、2×間隔ガード到達 **0/153回**、**同時に走ったサイクルは常に1本**。同一画像を fetch / crossOrigin付き`<img>` / 素の`<img>` / `fetchPriority=high` で同時取得する比較も4ラウンドとも全て 0.0秒で同着＝**`<img>` の優先度スターベーションは原因ではない**。キャッシュバスター有無の比較も 0.1秒/0.0秒（7KB・HTTP 200）で、**`?cache=` もサーバも回線も無罪**。→ 詳細は [10-verification-playbook](./10-verification-playbook.md)
 - **既知の据え置き（低・別件）**:
+  - **起動1秒の間に `startSidebarUpdate` が2回呼ばれる**（実測 0.6秒・1.6秒）。1本目は未発火のうちに `clearTimeout`（`UpdateManager.js` の `existingTimer` クリア）で破棄されるため現状は無害だが、**更新中に2回目が来ればチェーン二重化の入り口**になる。誘発手順（スロットリング）は未実施＝未検証。
   - A1が入れたライブスクショURLが、フォローAPIの listingThumbnail 非反映番組では各スクレイプ周期で一旦空へ戻り得る（`fillMissingDetails` が同周期で再補完するので実質一過性）。恒久化したければ upsertProgramInfos で「既存が有効ライブスクショ かつ 新規が空」なら保持マージする。
   - per-program 更新は毎サイクル localStorage 全体を `JSON.parse` する（旧一斉のN倍）。絶対コストは小（~数ms/秒）で据え置き。必要なら単一番組の高速updateパスで最適化可。
 - 対象: `src/managers/UpdateManager.js`・`src/render/sidebar.js`（`updateThumbnailsFromStorage` の `onSettled`）・`src/services/storage.js`（`patchProgramThumbnail`）・`src/main.js`（`cleanup`/`stopAllTimers`）・`src/config/constants.js`（`newProgramFastPollMs`）。→ [03-module-reference](./03-module-reference.md)・[04-data-flow](./04-data-flow.md)
+
+## ✅ AA. channel番組のサムネがアイコンURLで「ライブサムネ」登録され、毎周期100%失敗していた（🔴→修正済み・2026-07-26）
+- **前提（ニコ生の仕様・利用者確認済み）**: **チャンネル番組にライブサムネは提供されない。** チャンネルが固定画像／チャンネルアイコンを出しているのが正しい姿であり、「チャンネルのサムネが動かない」のは**不具合ではない**。ここを"直そう"としないこと。
+- **症状**: 動くサムネONで、Console に `listing-thumbnail.live.nicovideo.jp/?url=…comch/channel-icon/128x128/chXXXXXXX.jpg` に対する `blocked by CORS policy: No 'Access-Control-Allow-Origin'` が20秒ごとに出続ける。**画面上はサムネが正常に見える**（平文フォールバックで表示だけ確保されるため）。
+- **真因**: `mapApiProgramToInfo`（`followPageSource.js`）が、user には `isLiveScreenshotUrl()` を適用しながら **channel は `listingThumbnail` を無検査**で `large1280x720ThumbnailUrl`（＝定期更新の対象フィールド）へ入れていた。項目W のフィルタ方針が channel に適用されていなかった、という取りこぼし。
+- **被害**: (1) 永久に変わらない画像を20秒ごとに取り直す (2) このホストは ACAO を返さないため crossOrigin プリロードが必ず失敗し平文で読み直す＝**1周期2リクエスト** (3) `animThumbFeed.ingest` に到達せずその番組だけ動くサムネが機能しない。しかも平文フォールバックの `applySuccess()` が `dataset.thumbLive='1'` を立てるので、動くサムネ側からは「ライブサムネ表示中」に見える（項目Y の末尾スロット判定を惑わす実体はこれ）。
+- **修正（2層）**:
+  1. `followPageSource.js` — `mapApiProgramToInfo`・`fillMissingDetails` の channel 経路にも `isLiveScreenshotUrl()` を通し、**ライブスクショだけ**を `large1280x720ThumbnailUrl`/`liveScreenshotThumbnailUrls` に入れる。**表示用 `thumbnailUrl` は従来どおり**なのでカードの見た目は不変。
+  2. `sidebar.js` — `resolveLiveThumbnailBaseUrl` の channel 分岐から `|| info.thumbnailUrl` を削除（1をすり抜けた場合の防御）。user 側の同フォールバックは放送直後の未生成窓を `_fetchLiveThumbIfPendingYoung` が埋める設計のため**残す**。
+- **調査時の教訓（同種のバグで再発しやすい）**: 最初に 2 だけを直したがエラーは止まらなかった。**アイコンURLはその手前で「正規のライブサムネ」として登録済み**だったため。「どこで表示に使うか」ではなく「**どこでライブサムネとして登録されるか**」を先に見ること。
+- 対象: `src/services/followPageSource.js`・`src/render/sidebar.js`。検証記録は [10-verification-playbook](./10-verification-playbook.md)
 
 ---
 

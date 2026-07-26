@@ -22,6 +22,7 @@
 | 07 | [07-build-and-deploy.md](./07-build-and-deploy.md) | Viteビルド・manifest・dist構成・開発手順 | ビルド/配布する時 |
 | 08 | [08-styles.md](./08-styles.md) | CSSクラス/IDインベントリ | 見た目を直す時 |
 | 09 | [09-gotchas-and-techdebt.md](./09-gotchas-and-techdebt.md) | 技術的負債・潜在バグ・改修時の注意 | バグ調査・リファクタ前に |
+| 10 | [10-verification-playbook.md](./10-verification-playbook.md) | 実機での手動検証手順・実測結果・**判定不能な項目の一覧** | 改修後に実機で確かめる時 |
 
 ---
 
