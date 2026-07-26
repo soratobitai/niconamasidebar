@@ -15,18 +15,29 @@ function appendCacheParam(url, ts) {
 
 /**
  * 番組詳細から「ライブサムネのベースURL」を providerType 別に選ぶ（共通ロジック）。
- * user: ライブスクショ(middle) → thumbnailUrl / channel: large1280x720 → thumbnailUrl。
+ * user: ライブスクショ(middle) → thumbnailUrl / channel: large1280x720 のみ。
  * ?cache 付与・変更検知キー・会員限定判定は呼び出し側の責務。
  * @param {Object} info - 番組詳細
- * @returns {string|null} ベースURL（該当なしは null）
+ * @returns {string|null} ベースURL（該当なしは null＝この番組は定期更新の対象外）
  */
 export function resolveLiveThumbnailBaseUrl(info) {
     if (!info) return null
     if (info.providerType === 'user') {
+        // user は放送開始直後にスクショが未生成のことがある。その間は thumbnailUrl で繋ぎ、
+        // 実体は _fetchLiveThumbIfPendingYoung の追撃で埋まるため、ここのフォールバックは残す。
         return (info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle) || info.thumbnailUrl || null
     }
     if (info.providerType === 'channel') {
-        return info.large1280x720ThumbnailUrl || info.thumbnailUrl || null
+        // thumbnailUrl へフォールバックしないこと。channel のそれは listing-thumbnail プロキシ経由の
+        // 「チャンネルアイコン」であってライブのスクショではない（そもそもニコ生はチャンネル番組に
+        // ライブサムネを提供しない＝2026-07-26 に利用者確認。アイコン表示が正しい姿）。更新対象に含めると、
+        //   1. 永久に変わらない画像を20秒ごとに取り直す（無駄な通信）
+        //   2. このホストは ACAO を返さないので crossOrigin 読みが必ず失敗し、平文で読み直す＝1周期2リクエスト
+        //   3. ingest に到達せず、その番組だけ動くサムネが機能しない
+        // の3つが同時に起きる（実測: 14番組中1件が毎周期100%失敗）。
+        // null を返せば computeNext が nextUrl:null を返し、定期更新から外れる。
+        // 初期表示は makeProgramElement が入れた画像がそのまま残るので見た目は変わらない。
+        return info.large1280x720ThumbnailUrl || null
     }
     return null
 }

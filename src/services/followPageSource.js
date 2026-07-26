@@ -60,11 +60,21 @@ export function mapApiProgramToInfo(p) {
     if (!p || !p.id) return null
     const providerType = mapProviderType(p.providerType)
     // user は配信者設定の固定画像を出さずライブスクショのみ採用。
-    // channel/official は listingThumbnail がそのイベントの正規サムネ（固定画像形でも）なのでそのまま使う。
+    // channel/official は listingThumbnail がそのイベントの正規サムネ（固定画像形でも）なので表示には使う。
     const rawThumb = p.listingThumbnail || ''
     const thumb = providerType === 'user'
         ? (isLiveScreenshotUrl(rawThumb) ? rawThumb : '')
         : rawThumb
+    // ただし「20秒周期で取り直す対象」に含めてよいのはライブスクショだけ。
+    // 前提（ニコ生の仕様・2026-07-26 に利用者確認）: チャンネル番組にライブサムネは提供されない。
+    // チャンネルは固定画像／チャンネルアイコンを出しているのが正しい姿であり、
+    // 「チャンネルのサムネが動かない」のは不具合ではない。ここを"直そう"としないこと。
+    // listing-thumbnail 経由の固定画像・チャンネルアイコンは中身が変わらないうえ、このホストは
+    // Access-Control-Allow-Origin を返さない。動くサムネONだと crossOrigin 読みが必ず失敗して
+    // 平文で取り直す＝1周期2リクエストになり、ingest にも到達しない
+    // （実測 2026-07-26: 14番組中1件のチャンネルが毎周期100%失敗し続けていた）。
+    // 表示用の thumbnailUrl は従来どおり残すので、カードの見た目は変わらない。
+    const liveThumb = isLiveScreenshotUrl(thumb) ? thumb : ''
     const provider = p.programProvider || {}
     const stats = p.statistics || {}
     return {
@@ -78,9 +88,10 @@ export function mapApiProgramToInfo(p) {
         },
         // user は liveScreenshotThumbnailUrls.middle、channel は large1280x720ThumbnailUrl を見る。
         // 両方に同じライブスクショURLを入れ、resolveLiveThumbnailBaseUrl が provider 別に拾えるようにする。
-        liveScreenshotThumbnailUrls: thumb ? { middle: thumb } : undefined,
-        large1280x720ThumbnailUrl: thumb || undefined,
-        thumbnailUrl: thumb || '',                           // フォールバック＆静的サムネ兼用
+        // 入れるのは liveThumb（ライブスクショに限る）＝定期更新の対象を絞る。
+        liveScreenshotThumbnailUrls: liveThumb ? { middle: liveThumb } : undefined,
+        large1280x720ThumbnailUrl: liveThumb || undefined,
+        thumbnailUrl: thumb || '',                           // 表示用（固定画像・イベントサムネもここは従来どおり）
         isMemberOnly: !!p.isFollowerOnly,
         viewers: Number(stats.watchCount) || 0,
         comments: Number(stats.commentCount) || 0,
@@ -148,11 +159,12 @@ async function fillMissingDetails(programs) {
                         p.thumbnailUrl = cand
                     }
                 } else {
-                    // channel/official はイベントサムネ（固定画像形でも可）を採用
+                    // channel/official はイベントサムネ（固定画像形でも可）を表示に採用。
+                    // ただし定期更新の対象にするのはライブスクショだけ（mapApiProgramToInfo と同じ理由）。
                     const cand = detail.large1280x720ThumbnailUrl
                         || (detail.liveScreenshotThumbnailUrls && detail.liveScreenshotThumbnailUrls.middle) || ''
                     if (cand) {
-                        p.large1280x720ThumbnailUrl = cand
+                        if (isLiveScreenshotUrl(cand)) p.large1280x720ThumbnailUrl = cand
                         p.thumbnailUrl = cand
                     }
                 }
