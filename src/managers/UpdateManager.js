@@ -92,6 +92,46 @@ export class UpdateManager {
         }
     }
 
+    // ===================== 実行可否ポリシー =====================
+    //
+    // 「今この処理をしてよいか」の判定は、**どこで何を見るかが意図的に違う**。
+    // 同じ判定に見えるので取り違えやすい（実際に説明を誤ったことがある）。この表が正。
+    //
+    // | 判定             | リスト更新 | サムネ更新 | サムネ反映 | 手動更新 |
+    // |------------------|-----------|-----------|-----------|---------|
+    // | 破棄済み          | ○         | ○         | −         | −       |
+    // | サイドバーが閉    | ○ 取得しない | ○ 更新しない | −      | −       |
+    // | **背景タブ**      | **見ない** | ○ 更新しない | ○ 即完了 | （反映側で判定）|
+    // | 別の更新が実行中  | ○ 見送る   | −         | −         | ○ 多重防止 |
+    // | DOM差し替え中     | −         | −         | ○ 即完了   | −       |
+    //
+    // 🔴 **リスト更新だけが背景タブを見ない**のは 655df9c の意図的決定。
+    //    サイドバーが開いている間は裏タブでもリストを取り続ける（doc/09 項目AB-2）。
+    //    ここに可視判定を足すと仕様変更になる。
+    // 🔴 **サムネ側が背景タブを見る**のは、rAF が止まって完了通知が永久に来ないため
+    //    （待ち続けると手動更新が固まる。doc/09 項目AC-1）。
+    //
+    // 生の `document.hidden` / `appState.sidebar.isOpen` を各所に直書きせず、
+    // 必ず下の述語を通すこと（どこが何を見ているか grep で追えるようにするため）。
+
+    /** サイドバーが開いているか。閉じている間は「やらない」だけで、ループは止めない。 */
+    _isSidebarOpen() {
+        return !!this.appState.sidebar.isOpen;
+    }
+
+    /**
+     * 背景（非表示）タブか。
+     * ⚠️ **リスト更新のループでは使わないこと**（上の表を参照）。
+     */
+    _isBackgroundTab() {
+        return typeof document !== 'undefined' && !!document.hidden;
+    }
+
+    /** 別の更新（手動更新など）が実行中か。 */
+    _isUpdateInFlight() {
+        return this.appState.isLoading();
+    }
+
     /** サムネ1周期の基準間隔(ms)。作業完了後にこの時間だけ待って次サイクルを張る。 */
     _currentThumbCycleMs() {
         return (Number(this.options.updateThumbnailInterval) || updateThumbnailInterval) * 1000;
@@ -208,10 +248,10 @@ export class UpdateManager {
         let idled = false;
         try {
             // 閉じている間は更新しない（旧実装の stopThumbnailUpdate 相当。ループは生かしたまま素通り）
-            if (!this.appState.sidebar.isOpen) { idled = true; return; }
+            if (!this._isSidebarOpen()) { idled = true; return; }
             // 背景タブは rAF が止まり onSettled が来ない＝更新しても1枚も反映できない。
             // ガード40秒の空回しを避けるため素通りする。前景復帰後の一斉更新は performManualUpdate が担う。
-            if (typeof document !== 'undefined' && document.hidden) { idled = true; return; }
+            if (this._isBackgroundTab()) { idled = true; return; }
 
             this._syncThumbDueAt(); // カードの増減を期限表へ反映
 
@@ -394,11 +434,11 @@ export class UpdateManager {
         if (this._sidebarLoopStopped) return;
         try {
             // 閉じている間は取得しない（旧実装の stopAllTimers 相当。ループは生かしたまま素通り）
-            if (!this.appState.sidebar.isOpen) return;
+            if (!this._isSidebarOpen()) return;
             // まだ期限前（早すぎる起床への保険）
             if (Date.now() < this._sidebarNextDueAt) return;
             // 別の更新（手動更新）が進行中なら今回は見送り、次周期に回す
-            if (this.appState.isLoading()) return;
+            if (this._isUpdateInFlight()) return;
 
             const sessionId = await this.updateSidebar();
             if (this._sidebarLoopStopped) return;
@@ -461,7 +501,7 @@ export class UpdateManager {
             if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
 
             // 定期取得の位相をリセット（＝今から1周期後にする）。ループ自体は作り直さない。
-            if (this.appState.sidebar.isOpen) {
+            if (this._isSidebarOpen()) {
                 this.resetSidebarSchedule();
             }
         } catch (error) {
@@ -755,7 +795,7 @@ export class UpdateManager {
         // 更新ボタンは有効に見えるのに押しても無反応）。
         // そもそも背景では rAF が来ない＝実行しても1枚も更新できないので、待たせる意味がない。
         // 前景に戻れば番組ごとの20秒サイクルが通常どおり反映する（_runThumbCycle も同じ判定で見送る）。
-        if (typeof document !== 'undefined' && document.hidden) {
+        if (this._isBackgroundTab()) {
             if (onComplete) onComplete();
             if (onSettled) onSettled();
             return;

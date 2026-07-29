@@ -263,7 +263,7 @@ async function d6Static() {
         hasVis ? '⚠ 可視判定が混入している。裏タブでリスト取得が止まる＝仕様変更' : '可視判定なし')
 
     // サムネ側にだけ document.hidden があること（取り違えて消していないかの裏返し）
-    const thumbHasHidden = /document.hidden/.test(um.slice(um.indexOf('async _thumbTick'), um.indexOf('async _thumbTick') + 3000))
+    const thumbHasHidden = /_isBackgroundTab/.test(um.slice(um.indexOf('async _thumbTick'), um.indexOf('async _thumbTick') + 3000))
     check('D6 サムネ側の document.hidden は残っている（消し違えていない）', thumbHasHidden)
 
     // visibilitychange リスナーが src 全体で0件であること
@@ -659,6 +659,57 @@ async function r4() {
         'これが消えると上書きが復活し、押せるのに無反応が再発する')
 }
 
+/**
+ * R-5: 実行可否ポリシーが表どおりに実装されていることの検証（UpdateManager 冒頭の表）。
+ *
+ * 「今この処理をしてよいか」の判定は、どこで何を見るかが**意図的に違う**。
+ * 同じ判定に見えるので取り違えやすく、実際に説明を誤ったことがある。表を機械で守らせる。
+ */
+async function r5() {
+    const { readFileSync } = await import('fs')
+    const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
+    const body = (name, len = 2500) => {
+        const i = um.indexOf(name)
+        return i < 0 ? '' : um.slice(i, i + len)
+    }
+
+    // --- 生の判定が直書きされていないか（述語の定義を除く） ---
+    // ⚠️ コメント行は数えない。ポリシー表そのものが「document.hidden を直書きするな」と
+    //    書いているため、素朴に数えると表の記述を違反として数えてしまう。
+    const code = um.split('\n')
+        .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) })
+        .join('\n')
+    const rawCount = (re) => [...code.matchAll(re)].length
+    check('R-5 document.hidden の直書きは述語の定義1箇所だけ',
+        rawCount(/document\.hidden/g) === 1, `${rawCount(/document\.hidden/g)} 箇所`)
+    check('R-5 appState.sidebar.isOpen の直書きは述語の定義1箇所だけ',
+        rawCount(/appState\.sidebar\.isOpen/g) === 1, `${rawCount(/appState\.sidebar\.isOpen/g)} 箇所`)
+    check('R-5 appState.isLoading() の直書きは述語の定義1箇所だけ',
+        rawCount(/appState\.isLoading\(\)/g) === 1, `${rawCount(/appState\.isLoading\(\)/g)} 箇所`)
+
+    // --- 表のとおりか ---
+    const sidebarTick = body('async _sidebarTick()')
+    const thumbTick = body('async _thumbTick()')
+    const updThumb = body('updateThumbnail(force, onComplete', 1400)
+
+    check('R-5 リスト更新は「閉じているか」を見る', /_isSidebarOpen\(\)/.test(sidebarTick))
+    check('R-5 リスト更新は「別の更新中か」を見る', /_isUpdateInFlight\(\)/.test(sidebarTick))
+    check('R-5 🔴 リスト更新は背景タブを見ない（655df9c の意図的決定）',
+        !/_isBackgroundTab\(\)/.test(sidebarTick),
+        'ここに可視判定を足すと仕様変更。裏タブでもリストを取り続けるのが仕様')
+
+    check('R-5 サムネ更新は「閉じているか」を見る', /_isSidebarOpen\(\)/.test(thumbTick))
+    check('R-5 サムネ更新は背景タブを見る（rAF が止まるため）', /_isBackgroundTab\(\)/.test(thumbTick))
+
+    check('R-5 サムネ反映は背景タブを見る（完了通知が来ないため）', /_isBackgroundTab\(\)/.test(updThumb))
+    check('R-5 サムネ反映は DOM差し替え中を見る', /isInserting/.test(updThumb))
+
+    // --- ポリシー表そのものが残っているか（消されると意図が失われる） ---
+    check('R-5 実行可否ポリシーの表がコードに残っている',
+        um.includes('実行可否ポリシー') && um.includes('リスト更新だけが背景タブを見ない'),
+        '表が消えると「なぜ違うのか」が失われ、また取り違える')
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -690,6 +741,8 @@ if (real) {
     await r7()
     console.log('')
     await r4()
+    console.log('')
+    await r5()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
