@@ -755,6 +755,27 @@ async function flip() {
         `reorderFlipDurationMs=${c.reorderFlipDurationMs}ms`)
 }
 
+/**
+ * 他タブで設定を変えた時に、このタブが追随するか（doc/09 項目AJ）。
+ * optionsHandler の change リスナは変更したタブでしか発火しない。
+ * storage.onChanged が他タブ由来の変更を受け取る唯一の経路。
+ */
+async function crossTab() {
+    const { readFileSync } = await import('fs')
+    const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+    const i = mainSrc.indexOf('if (changes.programsSort)')
+    const blk = mainSrc.slice(i, i + 900)
+    check('他タブで並び順を変えたらこのタブも並べ替える', blk.includes('sortPrograms('),
+        '値を入れるだけだと古い順序のまま残る')
+    // ⚠️ needsRestart は宣言(435行付近)と使用(487行付近)が50行以上離れている。
+    //    先頭からの固定幅で切ると使用箇所に届かず「実装は正しいのにNG」になる（実際に踏んだ）。
+    const iv = mainSrc.slice(mainSrc.lastIndexOf('needsRestart'), mainSrc.lastIndexOf('needsRestart') + 300)
+    check('他タブで更新間隔を変えたらこのタブも位相を置き直す', iv.includes('resetSidebarSchedule()'),
+        iv.split('\n').slice(0, 2).join(' / ').trim())
+    check('他タブでテーマを変えたらこのタブも適用する',
+        mainSrc.includes('changes.sidebarTheme') && mainSrc.includes('applyTheme('))
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -790,6 +811,8 @@ if (real) {
     await r5()
     console.log('')
     await flip()
+    console.log('')
+    await crossTab()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

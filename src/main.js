@@ -439,7 +439,17 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.updateProgramsInterval = changes.updateProgramsInterval.newValue;
         needsRestart = true;
     }
-    if (changes.programsSort) options.programsSort = changes.programsSort.newValue;
+    if (changes.programsSort) {
+        options.programsSort = changes.programsSort.newValue;
+        // ⚠️ 値を入れるだけでは並び替わらない（doc/09 項目AJ）。
+        // 自タブで変えた時は optionsHandler の change リスナが即ソートするが、そのリスナは
+        // **変更したタブでしか発火しない**。この onChanged は他タブ由来の変更を受け取る唯一の経路なので、
+        // ここで並べ替えないと「他タブで並び順を変えたのにこのタブは古い順序のまま」になる。
+        // 次の定期更新で直る…とも限らない: 構造変化が無い周期は _sortOrderChanged が
+        // 「今のDOM順」と「あるべき順」を比べるので、そこで初めて直る＝最大1周期ぶん食い違う。
+        const container = document.getElementById('liveProgramContainer');
+        if (container) sortPrograms(container);
+    }
     if (changes.isOpenSidebar) {
         const newIsOpen = changes.isOpenSidebar.newValue;
         // 自タブのトグル操作は同期的に反映＆ handleSidebarOpenStateChange 呼び済み。

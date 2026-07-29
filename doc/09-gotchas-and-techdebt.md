@@ -608,3 +608,22 @@ R-2 の禁止事項の筆頭は「`_sortOrderChanged` をモデル同士の比�
 - **`replaceChildren` と `sortProgramsInContainer` は `flipReorder` の中で同期的に**完了させること。外に出すと First/Last の実測が噛み合わない
 - コールバックに `await` / `rAF` / `setTimeout` を挟まないこと。**デッドコードだった `appState.update.isInserting` が生き返り**、`updateThumbnail` が即 `onComplete` を返して**サムネが「更新0回・エラー0件」で止まる**
 - 動くサムネのオーバーレイは `.program_thumbnail` の子孫なのでカードごと `transform` で動く。ホバー判定も座標ではなく `closest()` なので**干渉しない**
+
+## ✅ AJ. 他タブで並び順を変えてもこのタブが追随しなかった（2026-07-29）
+
+`chrome.storage.onChanged` の `programsSort` 分岐が **`options` の値を入れるだけで並べ替えを呼んでいなかった**。
+
+```js
+if (changes.programsSort) options.programsSort = changes.programsSort.newValue;  // ← 旧: これだけ
+```
+
+自タブで変えた時は `optionsHandler` の change リスナが即ソートするが、**そのリスナは変更したタブでしか発火しない**。`onChanged` は他タブ由来の変更を受け取る唯一の経路なので、ここで並べ替えないと「他タブで並び順を変えたのに、このタブは古い順序のまま」になる。
+
+「次の定期更新で直る」とも限らない。構造変化が無い周期は `_sortOrderChanged` が「今のDOM順」と「あるべき順」を比べて初めて直るので、**最大1周期ぶん食い違う**。
+
+> **設定の伝播は3系統ある**（値の反映 / 副作用の実行 / 表示の更新）。`onChanged` に分岐を足す時は、
+> **「値を入れるだけで足りるのか」を毎回確認すること**。`updateProgramsInterval` は `resetSidebarSchedule`、
+> `sidebarTheme` は `applyTheme`、`animatedThumbnail` は `setAnimatedThumbnailEnabled` を呼んでいる。
+> 値の代入だけで済んでいるのは `autoOpen`（次回ロードで効く）だけである。
+
+`verify:loop` に3項目（並び順・更新間隔・テーマの追随）を追加した。
