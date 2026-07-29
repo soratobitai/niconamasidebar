@@ -912,6 +912,195 @@ async function syncRender() {
         /console\.warn/.test(guard),
         'この分岐は onComplete を呼ぶので、無警告だと原因に辿り着けない')
     check('AL 警告は1回だけ（毎サイクル出して埋もれさせない）', /_warnedInserting/.test(guard))
+
+    // --- ここから: 「DOM を唯一の真実にしておいてよい」根拠を機械で守る（項目AO） ---
+    //
+    // 根拠は2つ。どちらかが崩れたら、DOM から毎周期作り直す方式は成り立たなくなる。
+    //   (1) DOM を読んでから差し替えるまでが**同期**（間に await が無い）
+    //       → 読んだ内容が古くなりようがないので、作り直しがゼロコストで常に正しい
+    //   (2) カードの増減が**1箇所**しか無い
+    //       → 「どこかで勝手に増減している」経路が存在しない
+    const rs = um.indexOf('const existingMap = new Map();')
+    const re2 = um.indexOf('this.appState.update.isInserting = false;', rs)
+    const region = rs >= 0 && re2 > rs ? um.slice(rs, re2) : ''
+    check('AO 読み取り〜差し替えの全区間を特定できる', region.length > 1000, `${region.length} 文字`)
+    const regionCode = stripComments(region)
+    check('AO 読み取り〜差し替えの全区間が同期（await が無い）', !/\bawait\b/.test(regionCode),
+        'ここに await が入ると、読んだ DOM の内容が差し替え時点で古くなりうる')
+    check('AO 同区間に直接の rAF / setTimeout / .then が無い',
+        !/requestAnimationFrame|setTimeout|\.then\(/.test(regionCode))
+
+    const mutations = []
+    for (const f of await listSrcFiles()) {
+        const t = stripComments(readFileSync(f, 'utf8'))
+        for (const m of t.matchAll(/\.(replaceChildren|removeChild)\(|\.remove\(\)|\.innerHTML\s*=/g)) {
+            mutations.push(`${f.split(/[\\/]/).pop()} ${m[0]}`)
+        }
+    }
+    check('AO カードの増減点は container.replaceChildren の1箇所だけ', mutations.length === 1,
+        mutations.length ? mutations.join(' , ') : '(0件＝差し替え自体が消えている。それも異常)')
+
+    // --- AM: FLIP が空振りしない配線になっているか（静的側の網） ---
+    const iFlip = um.indexOf('flipReorder(container')
+    const iFrag = um.indexOf('createDocumentFragment')
+    check('AM フラグメントの組み立ては flipReorder のコールバック内にある',
+        iFlip >= 0 && iFrag > iFlip,
+        iFrag >= 0 && iFrag < iFlip
+            ? '外で組むと既存カードが container から抜けたあとに First を測ることになり、FLIP が毎回空振りする'
+            : `flipReorder ${iFlip} / createDocumentFragment ${iFrag}`)
+}
+
+/** コメント行を落とす。⚠️の説明文に await などの語が入るため、これを忘れると嘘のNGが出る。 */
+function stripComments(text) {
+    return text.split('\n')
+        .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) })
+        .join('\n')
+}
+
+/** src/ 配下の .js を全部集める */
+async function listSrcFiles() {
+    const { readdirSync, statSync } = await import('fs')
+    const { fileURLToPath } = await import('url')
+    const root = fileURLToPath(new URL('../src/', import.meta.url)).replace(/[\\/]$/, '')
+    const out = []
+    const walkDir = (d) => {
+        for (const name of readdirSync(d)) {
+            const p = d + '/' + name
+            if (statSync(p).isDirectory()) walkDir(p)
+            else if (name.endsWith('.js')) out.push(p)
+        }
+    }
+    walkDir(root)
+    return out
+}
+
+/**
+ * 描画経路そのものを、**本物の updateSidebar** で検証する。
+ *
+ * ここまでの検証は updateSidebar を丸ごとスタブに差し替えていた（周期・セッション・二重実行は
+ * それで足りる）。だが差分更新・構造変化判定・削除検知・並べ替え・FLIP は一度も自動検証されて
+ * おらず、実際にその穴から**FLIP が本番で一度も動いていない**という欠陥が漏れていた（項目AM）。
+ *
+ * 差し替えるのは globalThis.fetch と DOM だけ。それ以外は実コードが動く。
+ */
+async function render() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    const T = 1800000000000
+    const h = buildRenderHarness({ intervalSec: 60, programsSort: 'newest' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+
+    // updateSidebar はセッションを開けたまま返す（閉じるのは呼び出し元の役目）。
+    // 閉じないと 60 秒後にタイムアウト警告が出て出力が汚れるので、毎回ここで閉じる。
+    const run = async () => { const sid = await um.updateSidebar(); if (sid) loadingManager.finishSession(sid) }
+    const ids = () => h.dom.ids()
+    const transforms = () => h.dom.container.children.map((c) => c.style.transform || '')
+
+    console.log('=== 描画経路（本物の updateSidebar をモックDOMで動かす）===')
+
+    // --- 初回描画 ---
+    h.state.followPrograms = [
+        apiProgram({ id: 'lv100', beginAtMs: T + 3000 }),
+        apiProgram({ id: 'lv200', beginAtMs: T + 2000 }),
+        apiProgram({ id: 'lv300', beginAtMs: T + 1000 }),
+    ]
+    h.state.notifyRows = [{ id: 100, title: 'x' }]
+    await run()
+    check('初回描画: 放送開始が新しい順に並ぶ', ids().join(',') === '100,200,300', ids().join(','))
+    check('初回描画: data-api-index が並び位置と一致',
+        h.dom.container.children.map((c) => c.dataset.apiIndex).join(',') === '0,1,2')
+    check('初回描画: タイトルと配信者名が入る',
+        h.dom.container.children[0].querySelector('.program_title').textContent === '番組100' &&
+        h.dom.container.children[0].querySelector('.community_name').textContent === '配信者100')
+    check('初回描画: 件数表示がカード数と一致',
+        h.dom.getById('program_count').textContent === String(h.dom.container.children.length))
+    check('初回描画では FLIP を出さない（比較対象が無いので動かしようがない）',
+        transforms().every((t) => t === ''), transforms().join('|') || '(全て空)')
+
+    // --- 変化なし ---
+    const same = h.dom.container.children.slice()
+    await run()
+    check('変化なし: カードを作り直さない（同一オブジェクトのまま）',
+        same.length === h.dom.container.children.length && same.every((el, i) => el === h.dom.container.children[i]))
+    check('変化なし: 並べ替えもしない（FLIP が走らない）', transforms().every((t) => t === ''))
+
+    // --- 新番組が先頭に入る（構造変化＋FLIP） ---
+    // 🔴 これが項目AM の回帰テスト。フラグメントを flipReorder の外で組むと、
+    //    既存カードが container から抜けたあとに First を測ることになり transform が空になる。
+    const keep = h.dom.container.children.slice()
+    h.state.followPrograms.unshift(apiProgram({ id: 'lv400', beginAtMs: T + 9000 }))
+    await run()
+    check('新番組: 先頭に入り既存は再利用される',
+        ids().join(',') === '400,100,200,300' && keep.every((el) => h.dom.container.children.includes(el)),
+        ids().join(','))
+    check('AM 順位が下がった既存カードに FLIP の transform が入る',
+        h.dom.container.children.slice(1).every((c) => /translate\(/.test(c.style.transform || '')),
+        transforms().map((t, i) => `${ids()[i]}:${t || '空'}`).join(' '))
+    check('AM 新規カードは動かさない（元位置が無いので）', (h.dom.container.children[0].style.transform || '') === '')
+
+    // FLIP の後始末（rAF → transform 解除）が効くこと
+    await sleep(30)
+    check('AM FLIP は次フレームで transform を外す（Play フェーズ）',
+        transforms().every((t) => t === ''), transforms().join('|') || '(全て空)')
+
+    // --- 削除 ---
+    h.state.followPrograms = h.state.followPrograms.filter((p) => p.id !== 'lv200')
+    h.state.notifyRows = []
+    await run()
+    check('削除: 終了した番組のカードが消える', ids().join(',') === '400,100,300', ids().join(','))
+    check('削除: 件数表示がカード数と一致',
+        h.dom.getById('program_count').textContent === String(h.dom.container.children.length))
+
+    // --- 両API失敗 ---
+    const beforeFail = ids().join(',')
+    h.state.followFails = true
+    h.state.notifyFails = true
+    await run()
+    check('両API失敗: DOM を維持する（消さない）', ids().join(',') === beforeFail, ids().join(','))
+    h.state.followFails = false
+    h.state.notifyFails = false
+
+    // --- 放送中0件 ---
+    h.state.followPrograms = []
+    h.state.notifyRows = []
+    await run()
+    check('放送中0件: カードは維持される（取得成功なので消さない設計）', ids().join(',') === beforeFail, ids().join(','))
+    check('放送中0件: 件数表示は 0 になる（＝カード数と食い違う。現仕様。doc/09 項目AN）',
+        h.dom.getById('program_count').textContent === '0')
+
+    // --- notifybox だけ生きている（和集合） ---
+    h.state.notifyRows = [{ id: 777, title: '速報だけの番組' }]
+    await run()
+    check('和集合: フォローAPIが0件でも notifybox の番組が出る', ids().includes('777'), ids().join(','))
+    check('和集合: 詳細が無くてもタイトルは出る',
+        h.dom.getById('777').querySelector('.program_title').textContent === '速報だけの番組')
+
+    // --- ソート切替 ---
+    h.state.notifyRows = []
+    h.state.followPrograms = [
+        apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 1 }),
+        apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 99999 }),
+        apiProgram({ id: 'lv400', beginAtMs: T + 9000, viewers: 50 }),
+    ]
+    await run()
+    check('新着順: beginAt 降順', ids().join(',') === '400,100,300', ids().join(','))
+    um.options.programsSort = 'active'
+    await run()
+    check('人気順: active-point 降順', ids().join(',') === '300,400,100', ids().join(','))
+    um.options.programsSort = 'newest'
+
+    // --- その場更新で後から埋まった情報が反映される（項目AK の実経路版） ---
+    h.state.followPrograms = h.state.followPrograms.map((p) =>
+        p.id === 'lv100' ? { ...p, title: '差し替え後タイトル', programProvider: { ...p.programProvider, name: '改名した配信者' } } : p)
+    await run()
+    check('AK その場更新でタイトルが反映される',
+        h.dom.getById('100').querySelector('.program_title').textContent === '差し替え後タイトル')
+    check('AK その場更新で配信者名が反映される',
+        h.dom.getById('100').querySelector('.community_name').textContent === '改名した配信者')
+
+    check('詳細API(fetchProgramInfo)は呼ばれていない（前提が崩れていない）', h.state.calls.detail === 0,
+        `notifybox ${h.state.calls.notify} / フォローAPI ${h.state.calls.follow} / 詳細 ${h.state.calls.detail}`)
+
+    h.restore()
 }
 
 // ============================================================
@@ -955,6 +1144,9 @@ if (real) {
     await inPlaceUpdate()
     console.log('')
     await syncRender()
+    console.log('')
+    // 最後に置く。モックDOMを globalThis へ差し込むので、他のグループの最小スタブと混ぜない。
+    await render()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
