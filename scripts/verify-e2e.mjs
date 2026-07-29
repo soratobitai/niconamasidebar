@@ -99,14 +99,14 @@ log('拡張を読み込みました（CDP Extensions.loadUnpacked）')
 
 const ctx = browser.contexts()[0]
 let hits = []           // リスト取得（フォローAPI）の到達時刻
-let notifyboxHits = 0   // 撤去済みの notifybox が呼ばれた回数（0でなければ退行）
+let notifyboxHits = 0   // notifybox の呼び出し回数（和集合方式なので呼ばれるのが正常）
 let slow = false   // 応答を遅らせるか（D7用）
 
 const page = await ctx.newPage()
 await page.route('**/*', async (route) => {
     const u = route.request().url()
     if (u.includes('notifybox.content.php')) {
-        // 2026-07-29 に撤去済み。呼ばれたら退行なので記録して不合格にする。
+        // 和集合方式（doc/09 項目AD）。notifybox は「早さ」担当として併用している。
         notifyboxHits++
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(NOTIFYBOX) })
     }
@@ -184,8 +184,8 @@ check('D7-a 取得中に閉→開してもスピナーが固着しない',
 const pe = await page.evaluate(() => document.getElementById('reload_programs')?.style.pointerEvents ?? '')
 check('D7-b 更新ボタンが押せる状態に戻る', pe !== 'none', `pointerEvents="${pe}"`)
 
-check('撤去済みの notifybox API が一度も呼ばれない（R-3の退行検出）', notifyboxHits === 0,
-    `notifybox 呼び出し ${notifyboxHits} 回`)
+check('notifybox とフォローAPIの両方を叩いている（和集合方式）', notifyboxHits > 0 && hits.length > 0,
+    `notifybox ${notifyboxHits} 回 / フォローAPI ${hits.length} 回`)
 
 await browser.close()
 try { child.kill() } catch (_) {}

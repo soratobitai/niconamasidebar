@@ -1,11 +1,44 @@
-import { liveInfoAPI } from '../config/constants.js'
+import { notifyboxAPI, liveInfoAPI } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 
-// 2026-07-29: notifybox API（リスト取得）は撤去した。
-// フォローAPI（services/followPageSource.js）が同じ番組集合に加えて beginAt まで返すため、
-// リストも詳細も1系統で足りる（実測: 集合・並びとも完全一致）。加えて notifybox は
-// rows=100 でページングが無く、カードをそちらから作っていたため表示が100件で頭打ちだった。
-// 経緯は doc/09 項目AD。
+// notifybox はリストの「早さ」担当。2026-07-29 の実測で、user番組の新着検知が
+// フォローAPIより 20〜101秒 速いことが分かったため、和集合方式で併用している（doc/09 項目AD）。
+// 返すのは実質 id と title だけなので、詳細と並び順はフォローAPI側が担う。
+
+/**
+ * フォロー中の放送中番組リストを notifybox から取得する。
+ * @param {number} [rows=100] 取得件数（ページングは無い＝最大100件）
+ * @returns {Promise<false|Array<any>>} notifybox_content 配列、失敗時は false
+ */
+const liveProgramsInFlight = new Map()
+
+export async function fetchLivePrograms(rows = 100) {
+    const key = String(rows)
+    if (liveProgramsInFlight.has(key)) return liveProgramsInFlight.get(key)
+
+    const p = (async () => {
+        try {
+            let response = await fetch(`${notifyboxAPI}?rows=${rows}`, { credentials: 'include' })
+            response = await response.json()
+            if (response.meta?.status !== 200 || !response.data || !response.data.notifybox_content) {
+                handleError(
+                    new Error(`notifybox returned status ${response.meta?.status || 'unknown'}`),
+                    { api: 'fetchLivePrograms', rows, response: response.meta }
+                )
+                return false
+            }
+            return response.data.notifybox_content
+        } catch (error) {
+            handleError(error, { api: 'fetchLivePrograms', rows })
+            return false
+        } finally {
+            liveProgramsInFlight.delete(key)
+        }
+    })()
+
+    liveProgramsInFlight.set(key, p)
+    return p
+}
 
 /**
  * Fetch detailed program info by live id (number without "lv").

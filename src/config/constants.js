@@ -1,3 +1,4 @@
+export const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox.content.php';
 // 番組詳細API。フォローAPIがライブサムネを返さない番組（配信者が固定画像を設定）だけに使い、
 // liveScreenshotThumbnailUrls（ライブスクショ）を補完する。全番組には叩かない（＝旧方式の重さを避ける）。
 export const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';

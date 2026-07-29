@@ -35,6 +35,15 @@ globalThis.document = {
     hidden: false,
 }
 
+// localStorage / location も最小限だけ用意する（storage.js と utils/error.js が触るため）
+const _ls = new Map([['programInfos', '[]']])
+globalThis.localStorage = {
+    getItem: (k) => (_ls.has(k) ? _ls.get(k) : null),
+    setItem: (k, v) => { _ls.set(k, String(v)) },
+    removeItem: (k) => { _ls.delete(k) },
+}
+globalThis.location = { href: 'https://live.nicovideo.jp/watch/lv1' }
+
 const { AppState } = await import(`${SRC}core/AppState.js`)
 const { LoadingManager } = await import(`${SRC}managers/LoadingManager.js`)
 const { UpdateManager } = await import(`${SRC}managers/UpdateManager.js`)
@@ -405,6 +414,60 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
         '_thumbGen / _thumbTimers / _scheduleThumbCycle の残存なし')
 }
 
+/**
+ * R-3(A): 2つの取得元の和集合が正しく作られるか。
+ *
+ * notifybox は「早さ」担当（user番組の新着検知が 20〜101秒 速い）、
+ * フォローAPI は詳細・並び順・100件超の担当。旧実装は notifybox を絞り込みに使っていたため
+ * 表示が100件で頭打ちだった。和集合にして両方の利点を取る。
+ */
+async function r3merge() {
+    const { um } = build(60, 0)
+    const iso = (ms) => new Date(ms).toISOString()
+    const t = Date.now()
+
+    const follow = [
+        { id: 'lv100', title: 'F古い', onAirTime: { beginAt: iso(t - 300000) }, viewers: 1, comments: 0 },
+        { id: 'lv101', title: 'F新しい', onAirTime: { beginAt: iso(t - 60000) }, viewers: 2, comments: 0 },
+    ]
+    const notify = [
+        { id: '999', title: 'たった今始まった' },  // フォローAPIがまだ拾えていない新着
+        { id: '101', title: 'F新しい' },           // 重複（フォローAPI側が正）
+    ]
+
+    // --- 和集合になるか ---
+    let m = um._mergeSources(notify, follow)
+    check('R-3A 両方の番組が漏れなく含まれる', m.length === 3,
+        `${m.length} 件: ${m.map((x) => x.id).join(', ')}`)
+    check('R-3A 重複した番組はフォローAPI側の実データを使う',
+        m.find((x) => x.id === 'lv101')?.viewers === 2, '視聴者数が保持されている')
+
+    // --- notifybox にしか無い新着が先頭に来るか ---
+    const ordered = um._orderByBeginAtDesc(m)
+    check('R-3A notifybox にしか無い新着が新着順の先頭に来る', ordered[0].id === 'lv999',
+        `並び: ${ordered.map((x) => x.id).join(' → ')}`)
+
+    // --- 片方が失敗しても描画できるか ---
+    check('R-3A notifybox が失敗してもフォローAPIだけで描画できる',
+        um._mergeSources(false, follow).length === 2)
+    const onlyNotify = um._mergeSources(notify, null)
+    check('R-3A フォローAPIが失敗しても notifybox だけで描画できる', onlyNotify.length === 2,
+        `${onlyNotify.length} 件`)
+    check('R-3A 詳細が無い番組もタイトルは出る',
+        onlyNotify.every((x) => x.title && x.id.startsWith('lv')),
+        onlyNotify.map((x) => `${x.id}:${x.title}`).join(', '))
+
+    // --- 並びの安定性（同時刻は lv番号降順で決定的） ---
+    const same = [
+        { id: 'lv200', title: 'a', onAirTime: { beginAt: iso(t) } },
+        { id: 'lv300', title: 'b', onAirTime: { beginAt: iso(t) } },
+    ]
+    const o1 = um._orderByBeginAtDesc(same).map((x) => x.id).join()
+    const o2 = um._orderByBeginAtDesc([...same].reverse()).map((x) => x.id).join()
+    check('R-3A 同時刻の並びが入力順に依存せず安定している', o1 === o2 && o1 === 'lv300,lv200',
+        `${o1} / ${o2}`)
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -428,6 +491,8 @@ if (real) {
     await ac2()
     console.log('')
     await r1()
+    console.log('')
+    await r3merge()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

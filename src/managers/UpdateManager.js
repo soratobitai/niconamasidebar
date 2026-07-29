@@ -1,4 +1,4 @@
-import { fetchProgramInfo } from '../services/api.js';
+import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
@@ -10,9 +10,9 @@ import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manual
  * 更新処理とタイマーの管理
  *
  * データ取得の役割分担:
- *   - リスト＋詳細: フォロー中ページの公開フロントJSON API 1系統（fetchFollowedProgramsViaPage）。
- *     どの番組を並べるか・並び順(beginAt)・視聴者数/コメント/サムネURL/配信者/会員限定/開始時刻を
- *     1リクエストでまとめて取得し storage へ upsert する（notifybox は 2026-07-29 に撤去）。
+ *   - リスト: notifybox API（早さ担当）とフォローAPIの**和集合**。notifybox は user番組の
+ *     新着検知が 20〜101秒 速く、フォローAPIは詳細と100件超をカバーする（doc/09 項目AD）。
+ *   - 詳細＋並び順(beginAt): フォロー中ページの公開フロントJSON API 1リクエスト。
  *     storage へ upsert する。従来の「1番組=1詳細API×N」を1リクエストに置換した効率化。
  *   - サムネ画像の再取得: 別の常設ループ（startThumbnailLoop）が保存済みURL＋キャッシュバスターで更新。
  *
@@ -480,6 +480,54 @@ export class UpdateManager {
      *
      * 同時刻は lv番号の降順で決定的にする（安定ソート＝毎周期で順序が揺れない）。
      */
+    /**
+     * 2つの取得元を和集合にする。
+     *
+     * @param {false|Array<any>} notifyList notifybox の notifybox_content（失敗時 false）
+     * @param {null|Array<object>} fetched  フォローAPI の programInfo 配列（失敗時 null）
+     * @returns {Array<object>} 表示対象の programInfo 配列
+     *
+     * 優先順位は「フォローAPI の実データ ＞ storage の前回値 ＞ notifybox の最小情報」。
+     * notifybox にしか無い番組＝フォローAPIがまだ拾えていない**新着**なので、
+     * 詳細が来るまでの1周期だけタイトルだけのカードを出す（次の周期で本来の姿になる）。
+     */
+    _mergeSources(notifyList, fetched) {
+        const byId = new Map();
+        if (Array.isArray(fetched)) {
+            for (const p of fetched) if (p && p.id) byId.set(String(p.id), p);
+        }
+        if (!Array.isArray(notifyList)) return Array.from(byId.values());
+
+        // フォローAPIが失敗した周期でも、storage の前回値で詳細を補って描画を保つ
+        const stored = getProgramInfosFromStorage();
+        const storedById = new Map(Array.isArray(stored) ? stored.map((x) => [x.id, x]) : []);
+        const now = Date.now();
+
+        notifyList.forEach((row, i) => {
+            if (!row || row.id == null) return;
+            const id = 'lv' + String(row.id).replace(/^lv/, '');
+            if (byId.has(id)) return;                     // フォローAPI側にあるならそちらが正
+            const cached = storedById.get(id);
+            if (cached) { byId.set(id, cached); return; } // 前回値があれば使う（古くても出す）
+
+            // どこにも詳細が無い＝たった今始まった番組。
+            // notifybox は放送開始が新しい順に返すので、その並びを保ったまま
+            // 「今この瞬間に始まった」扱いにして新着順の先頭へ置く。
+            byId.set(id, {
+                id,
+                title: row.title || 'タイトル不明',
+                providerType: 'user',
+                contentOwner: { id: '', name: '', icon: '' },
+                thumbnailUrl: '',
+                isMemberOnly: false,
+                viewers: 0,
+                comments: 0,
+                onAirTime: { beginAt: new Date(now - i).toISOString() },
+            });
+        });
+        return Array.from(byId.values());
+    }
+
     _orderByBeginAtDesc(programs) {
         const beginMs = (p) => {
             const t = p && p.onAirTime && p.onAirTime.beginAt ? Date.parse(p.onAirTime.beginAt) : NaN;
@@ -514,23 +562,27 @@ export class UpdateManager {
             : this.loadingManager.startSession();
 
         try {
-            // 取得はフォローAPI 1系統のみ。リストも詳細もここから取れる。
+            // 2つの取得元を並列に叩き、**和集合**を表示する（doc/09 項目AD）。
             //
-            // 旧実装は notifybox（リスト）とフォローAPI（詳細）を並列取得し、notifybox の返却順を
-            // 新着順の基準に使っていた。しかし notifybox が返すのは id と title 程度で、
-            // フォローAPI は同じ番組集合に加えて beginAt まで返す（2026-07-29 実測: 集合・並びとも完全一致）。
-            // さらに notifybox は rows=100 でページングが無く、カードはそちらを元に作っていたため
-            // **放送中が100件を超えると101件目以降が表示されない**（詳細だけ取得して捨てていた）。
-            // 一本化でリクエストが毎周期2本→1本になり、突合ロジックと表示上限の両方が解消する。
-            const fetched = await this._refreshDetailsViaScrape();
+            //   notifybox   … 「誰がいるか」を早く知る担当。返すのは実質 id と title だけだが、
+            //                  user番組の新着検知がフォローAPIより 20〜101秒 速い（2026-07-29 実測）。
+            //   フォローAPI … 詳細・並び順(beginAt)・100件を超える番組の担当。
+            //
+            // ⚠️ 旧実装は notifybox を「絞り込み」に使っていた（notifybox に載った番組だけカード化）。
+            // notifybox は rows=100 でページングが無いため、**放送中が100件を超えると101件目以降が
+            // 表示されなかった**（詳細だけ取得して捨てていた）。和集合にすることでこれも解消する。
+            const [notifyList, fetched] = await Promise.all([
+                fetchLivePrograms(100),          // 失敗時 false
+                this._refreshDetailsViaScrape(), // 失敗時 null
+            ]);
 
-            // ログイン誘導の表示切替。null=取得失敗のみをエラー扱いにする（0件は成功）。
+            // ログイン誘導は「両方失敗」の時だけ出す（＝未ログイン/通信断）。
+            // 片方でも取れていれば描画できるので、エラー表示はしない。
+            const bothFailed = !fetched && !notifyList;
             if (this.elems.apiErrorElement) {
-                this.elems.apiErrorElement.style.display = fetched ? 'none' : 'block';
+                this.elems.apiErrorElement.style.display = bothFailed ? 'block' : 'none';
             }
-
-            if (!fetched) {
-                // 失敗時は既存の番組数を維持
+            if (bothFailed) {
                 const container = document.getElementById('liveProgramContainer');
                 if (container && container.children.length > 0) {
                     this.updateProgramCount(container.children.length);
@@ -538,14 +590,16 @@ export class UpdateManager {
                 return sessionId;
             }
 
-            // 空配列のときは既存DOMを維持
-            if (fetched.length === 0) {
+            const merged = this._mergeSources(notifyList, fetched);
+
+            // 空のときは既存DOMを維持（取得は成功していて放送中0件）
+            if (merged.length === 0) {
                 this.updateProgramCount(0);
                 return sessionId;
             }
 
             // 新着順の基準（放送開始が新しい順）。data-api-index はこの並びの位置を表す。
-            const livePrograms = this._orderByBeginAtDesc(fetched);
+            const livePrograms = this._orderByBeginAtDesc(merged);
 
             const container = document.getElementById('liveProgramContainer');
             if (!container) return sessionId;
