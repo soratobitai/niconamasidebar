@@ -1,10 +1,10 @@
 import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -729,9 +729,26 @@ export class UpdateManager {
                     const el = existingMap.get(id) || newElements.get(id);
                     if (el) frag.appendChild(el);
                 }
-                container.replaceChildren(frag);
-                // ソート（詳細が揃っているので programsSort で確定できる）
-                this.sortProgramsInContainer(container);
+
+                // 定期更新で順位が入れ替わった時だけ FLIP でスライドさせる（doc/09 項目AI）。
+                //
+                // 入れ替わり自体は FLIP の有無に関係なく起きている。FLIP は動きを足すのではなく、
+                // 既に起きている**瞬間移動を目で追える形にする**だけ。ユーザーが何もしていないのに
+                // カードが飛ぶのは「一斉に切り替わるのが気持ち悪い」（サムネのドリフト設計の起点）と
+                // 同じ種類の不快さなので、この拡張の既存の思想に沿う。
+                //
+                // ⚠️ 並べ替えは flipReorder の中で**同期的に**完了させること。First/Last の実測が
+                //    噛み合わなくなるため、ここに await / rAF / microtask を挟んではいけない。
+                //    （rAF を使うのは transform を外す Play フェーズだけで、DOM構造の変更は同期）
+                // ⚠️ 初回描画では既存カードが無く First が取れないので moved が空になり、
+                //    flipReorder は何もせずに返る（＝初回は自動的にアニメ無し）。
+                // ⚠️ 設定で並び順を変えた時は**通さない**。ユーザー自身が起こした変化なので
+                //    瞬時に切り替わる方がよい（optionsHandler → main.js の sortPrograms 経路）。
+                flipReorder(container, () => {
+                    container.replaceChildren(frag);
+                    // ソート（詳細が揃っているので programsSort で確定できる）
+                    this.sortProgramsInContainer(container);
+                }, reorderFlipDurationMs);
                 // 列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅(offsetWidth)を
                 // 使うと、開いた直後のリスト再描画がアニメ中に走った時に1列⇔多列がパタついてサムネが一瞬巨大化するため。
                 setProgramContainerWidth(this.elems, this.appState.sidebar.width);

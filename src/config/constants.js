@@ -37,3 +37,8 @@ export const animatedThumbnailPlayIntervalMs = 700;      // ホバー時の1コ�
 // 静止番組の古フレームは現在と同一なので、長めに設定して復元を効かせる（30分）。
 export const animatedThumbnailPersistTtlMs = 1800000;    // これより古い保存フレームは復元せず削除（30分）
 export const animatedThumbnailPersistMaxEntries = 300;   // 保存する番組レコード数の上限（古い順に掃除）
+
+// 定期更新で順位が入れ替わった時、カードをスライドさせる時間（ミリ秒）。
+// 入れ替わり自体は FLIP の有無に関わらず起きており、これは「瞬間移動を目で追える形にする」ためのもの。
+// 0 にすると実質アニメ無し（flipReorder 内の transition が 0ms になる）。
+export const reorderFlipDurationMs = 300;

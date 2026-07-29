@@ -710,6 +710,51 @@ async function r5() {
         '表が消えると「なぜ違うのか」が失われ、また取り違える')
 }
 
+/**
+ * FLIP: 定期更新で順位が入れ替わった時だけスライドさせる（doc/09 項目AI）。
+ *
+ * 入れ替わり自体は FLIP の有無に関係なく起きている。FLIP は動きを足すのではなく、
+ * 既に起きている瞬間移動を目で追える形にするだけ。
+ */
+async function flip() {
+    const { readFileSync } = await import('fs')
+    const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
+    const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+
+    // --- 定期更新の組み替えが FLIP を通っているか ---
+    const branch = um.slice(um.indexOf('if (structuralChange) {'), um.indexOf('if (structuralChange) {') + 2200)
+    check('FLIP 定期更新の組み替えが flipReorder を通る', /flipReorder\(/.test(branch))
+    check('FLIP replaceChildren と sort が flipReorder の中にある',
+        branch.indexOf('flipReorder(') < branch.indexOf('replaceChildren(') &&
+        branch.indexOf('flipReorder(') < branch.indexOf('sortProgramsInContainer('),
+        '外に出ると First/Last の実測が噛み合わない')
+
+    // --- 並べ替えが同期のままか（await/rAF を挟んでいないか） ---
+    const cb = branch.slice(branch.indexOf('flipReorder('), branch.indexOf('reorderFlipDurationMs'))
+    check('FLIP 並べ替えのコールバックが同期のまま',
+        !/await |requestAnimationFrame|setTimeout|\.then\(/.test(cb),
+        'ここに非同期を挟むと isInserting が生き返り、サムネが「更新0回・エラー0件」で止まる')
+
+    // --- 設定変更の経路は通っていないこと ---
+    const wrapper = mainSrc.slice(mainSrc.indexOf('function sortPrograms('), mainSrc.indexOf('function sortPrograms(') + 300)
+    check('FLIP 設定で並び順を変えた時は通さない（ユーザー自身の操作なので瞬時でよい）',
+        !/flipReorder/.test(wrapper), wrapper.trim().split('\n')[0])
+
+    // --- flipReorder 本体の性質 ---
+    const fr = sb.slice(sb.indexOf('export function flipReorder'), sb.indexOf('export function flipReorder') + 1800)
+    check('FLIP 移動量0の要素はスキップする', /dx === 0 && dy === 0/.test(fr))
+    check('FLIP First が取れない要素（新規カード）はスキップする', /if \(!first\) return/.test(fr),
+        '初回描画は既存カードが無いので自動的にアニメ無しになる')
+    check('FLIP 終了後にインラインスタイルを消す', /style\.transform = ''/.test(fr) && /setTimeout/.test(fr))
+
+    // --- 時間が定数化されているか ---
+    const c = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    check('FLIP アニメ時間が定数化されている（0で実質無効にできる）',
+        Number.isFinite(c.reorderFlipDurationMs) && c.reorderFlipDurationMs >= 0,
+        `reorderFlipDurationMs=${c.reorderFlipDurationMs}ms`)
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -743,6 +788,8 @@ if (real) {
     await r4()
     console.log('')
     await r5()
+    console.log('')
+    await flip()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
