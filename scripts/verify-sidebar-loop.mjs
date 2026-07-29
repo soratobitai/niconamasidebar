@@ -228,6 +228,49 @@ async function sessionOnClose() {
         `isLoading=${appState.isLoading()} / sessionId=${loadingManager.getCurrentSessionId()}`)
 }
 
+/**
+ * D6: サイドバーの更新ループに「裏タブでは走らない」ガードが混入していないこと。
+ *
+ * これは実ブラウザでの挙動テストにできない。CDP で操作しているページは Chrome が
+ * 常に visible 扱いにするため、自動化から本物の非表示状態を作れない
+ * （別タブ前面化・ウィンドウ最小化・Page.setWebLifecycleState('frozen') を試して全滅。
+ *  Emulation.setPageVisibilityOverride は現行 Chrome に存在しない）。
+ *
+ * しかし D6 が本当に問うているのは「可視ガードを混入させていないか」なので、
+ * ソースを直接検査するほうが挙動テストより決定的。655df9c で意図的に全撤去した仕様を守る。
+ */
+async function d6Static() {
+    const { readFileSync } = await import('fs')
+    const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
+
+    // _sidebarTick 本体を切り出す
+    const start = um.indexOf('async _sidebarTick()')
+    const end = um.indexOf('\n    }', um.indexOf('} finally {', start))
+    const tick = start >= 0 && end > start ? um.slice(start, end) : ''
+    check('D6 _sidebarTick を特定できる', tick.length > 200, `${tick.length} 文字`)
+
+    const hasVis = /document\.hidden|visibilityState|isVisible\s*\(/.test(tick)
+    check('D6 サイドバーの tick に可視ガードが無い（655df9c の仕様）', !hasVis,
+        hasVis ? '⚠ 可視判定が混入している。裏タブでリスト取得が止まる＝仕様変更' : '可視判定なし')
+
+    // サムネ側にだけ document.hidden があること（取り違えて消していないかの裏返し）
+    const thumbHasHidden = /document\.hidden/.test(um.slice(um.indexOf('_runThumbCycle'), um.indexOf('_runThumbCycle') + 3000))
+    check('D6 サムネ側の document.hidden は残っている（消し違えていない）', thumbHasHidden)
+
+    // visibilitychange リスナーが src 全体で0件であること
+    const files = [
+        'main.js', 'core/AppState.js', 'managers/UpdateManager.js',
+        'managers/LoadingManager.js', 'managers/AutoNextManager.js', 'render/sidebar.js',
+    ]
+    let listeners = []
+    for (const f of files) {
+        const s = readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+        if (/addEventListener\(\s*['"]visibilitychange/.test(s)) listeners.push(f)
+    }
+    check('D6 visibilitychange のリスナーが1つも無い', listeners.length === 0,
+        listeners.length ? `混入: ${listeners.join(', ')}` : '0件')
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -245,6 +288,7 @@ if (real) {
     await revive()
     await noDouble()
     await sessionOnClose()
+    await d6Static()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

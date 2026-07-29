@@ -12,11 +12,13 @@
     "verify:loop": "node scripts/verify-sidebar-loop.mjs",
     "clean": "rimraf dist",
     "clean:maps": "node scripts/remove-maps.js",
-    "watch": "vite build --watch"
+    "watch": "vite build --watch",
+    "verify:e2e": "node scripts/verify-e2e.mjs"
   },
   "devDependencies": {
     "glob": "^11.0.3",
     "rimraf": "^5.0.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "playwright-core": "^1.49.0"
   }
 }
