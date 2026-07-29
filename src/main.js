@@ -508,15 +508,6 @@ const insertSidebar = () => {
 
 // ===== 関数ラッパー（Managerへの委譲） =====
 
-/**
- * ローディングセッションを完了する
- * LoadingManager に完全委譲
- */
-function finishLoadingSession() {
-    if (loadingManager) {
-        loadingManager.finishSession();
-    }
-}
 
 async function performManualUpdate() {
     if (updateManager) {

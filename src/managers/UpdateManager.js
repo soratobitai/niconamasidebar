@@ -435,8 +435,11 @@ export class UpdateManager {
         // 多重防止（開閉/タブ復帰/自動移動が重なった時の二重取得を防ぐ）
         if (this.isPerformingManualUpdate) return;
         this.isPerformingManualUpdate = true;
+        // 自分が始めたセッションのIDを覚えておく。相乗り（＝別の更新が先に動いていた）なら null で、
+        // その場合は finish しない。持ち主が最後まで施錠を保つ（doc/09 項目AG）。
+        let sessionId = null;
         try {
-            await this.updateSidebar();
+            sessionId = await this.updateSidebar();
 
             // サムネイル更新。
             // 完了通知は待つが、上限を切って必ず前へ進める（doc/09 項目AC-1）。
@@ -454,8 +457,8 @@ export class UpdateManager {
                 this.updateThumbnail(true, () => { clearTimeout(guard); finish(); });
             });
 
-            // 最低1秒のローディング時間を確保して終了
-            await this.loadingManager.finishSessionWithMinDuration(1000);
+            // 最低1秒のローディング時間を確保して終了（自分が持ち主の時だけ）
+            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
 
             // 定期取得の位相をリセット（＝今から1周期後にする）。ループ自体は作り直さない。
             if (this.appState.sidebar.isOpen) {
@@ -463,9 +466,7 @@ export class UpdateManager {
             }
         } catch (error) {
             console.error('[手動更新] エラーが発生しました:', error);
-            if (this.loadingManager.getCurrentSessionId()) {
-                await this.loadingManager.finishSessionWithMinDuration(1000);
-            }
+            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
         } finally {
             this.isPerformingManualUpdate = false;
         }
@@ -573,9 +574,9 @@ export class UpdateManager {
         // 元の持ち主（例: 手動更新の force 一斉更新＝実測15秒級）がまだ走っているのに
         // isLoading() が false へ落ち、上と同じ「押せるのに無反応」＋定期取得の二重走行になる。
         // 相乗りなら持ち主が最後まで施錠を保てる。呼び出し元は null の時に finish しなければよい。
-        const sessionId = this.loadingManager.getCurrentSessionId()
-            ? null
-            : this.loadingManager.startSession();
+        // 既に動いているセッションがあれば startSession が null を返す（＝相乗り）。
+        // 呼び出し側は null の時に finish しなければよい。
+        const sessionId = this.loadingManager.startSession();
 
         try {
             // 2つの取得元を並列に叩き、**和集合**を表示する（doc/09 項目AD）。

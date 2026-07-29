@@ -606,6 +606,59 @@ async function r7() {
         /_clearAutoNextTimer\(\)/.test(cancelFn) && /hideModal\(\)/.test(cancelFn) && /scheduled = false/.test(cancelFn))
 }
 
+/**
+ * R-4: ローディングセッションを「奪えない」構造にしたことの検証（doc/09 項目AG）。
+ *
+ * 旧実装は startSession が前のセッションを finish せずに黙って上書きしていた。
+ * 後から来た者が持ち主からロックを奪い、それを閉じると持ち主がまだ実行中なのに
+ * isLoading() が false へ落ちて「押せるのに無反応」になる。
+ * IDスコープや相乗り判定は後付けの防御で、奪える構造がある限り同種の問題は出続けた。
+ */
+async function r4() {
+    const { appState, loadingManager: lm } = build(60, 0)
+
+    // --- 奪えないこと ---
+    const a = lm.startSession()
+    check('R-4 最初の開始でIDが返る', typeof a === 'string' && a.length > 0)
+    const b = lm.startSession()
+    check('R-4 動いている間の開始は null を返す（奪わない）', b === null, `2回目の戻り値: ${b}`)
+    check('R-4 持ち主のIDが保持されている', lm.getCurrentSessionId() === a)
+    check('R-4 施錠されたまま', appState.isLoading() === true)
+
+    // --- 相乗り側が閉じられないこと ---
+    await lm.finishSessionWithMinDuration(0, b)   // b は null＝相乗り。閉じてはいけない
+    check('R-4 相乗り側が finish しても施錠は解けない', appState.isLoading() === true,
+        `isLoading=${appState.isLoading()}`)
+
+    // --- 持ち主だけが閉じられること ---
+    await lm.finishSessionWithMinDuration(0, a)
+    check('R-4 持ち主が finish すると施錠が解ける', appState.isLoading() === false)
+    check('R-4 解けた後は新しく開始できる', typeof lm.startSession() === 'string')
+    await lm.finishSessionWithMinDuration(0, lm.getCurrentSessionId())
+
+    // --- 他人のIDでは閉じられないこと（IDスコープの二重防御） ---
+    const c = lm.startSession()
+    await lm.finishSessionWithMinDuration(0, 'update_999_bogus')
+    check('R-4 他人のIDでは閉じられない', appState.isLoading() === true)
+    await lm.finishSessionWithMinDuration(0, c)
+
+    // --- updateSidebar が相乗り時に null を返すこと ---
+    const { um: um2, loadingManager: lm2 } = build(60, 0)
+    const own = lm2.startSession()          // 先に誰かが持っている状態を作る
+    const joined = await um2.updateSidebar() // 実物ではなく差し替え版だが startSession の挙動は同じ
+    check('R-4 先客がいる時 updateSidebar は null を返す（＝finish してはいけない合図）',
+        joined === null, `戻り値: ${joined}`)
+    await lm2.finishSessionWithMinDuration(0, own)
+
+    // --- 構造の保証: 上書きを復活させていないか ---
+    const { readFileSync } = await import('fs')
+    const src = readFileSync(new URL('../src/managers/LoadingManager.js', import.meta.url), 'utf8')
+    const startFn = src.slice(src.indexOf('startSession() {'), src.indexOf('startSession() {') + 400)
+    check('R-4 startSession の先頭に「奪わない」ガードがある',
+        /if \(this\.currentUpdateSessionId\) return null/.test(startFn),
+        'これが消えると上書きが復活し、押せるのに無反応が再発する')
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -635,6 +688,8 @@ if (real) {
     await r1NoSpin()
     console.log('')
     await r7()
+    console.log('')
+    await r4()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
