@@ -46,7 +46,6 @@
 | `clearAllTimers()` | 全タイマークリア |
 | `setObserver/disconnectObserver/disconnectAllObservers` | ResizeObserver 等の管理。`disconnect()` を安全に呼ぶ |
 | `setHandler(name)/getHandler(name)` | イベントハンドラ参照の保持（削除は呼び出し側責任） |
-| `setVisibility(bool)/isVisible()` | Page Visibility 状態 |
 | `isLoading()` | **`loading.updateSession !== null`** を返す（＝セッション方式が真実） |
 | `startUpdateSession()` | `update_{Date.now()}_{Math.random()}` のIDを発行しセット。返り値=ID |
 | `finishUpdateSession(id)` | 現行IDと一致した時のみ null化（後発セッションを誤終了しない） |

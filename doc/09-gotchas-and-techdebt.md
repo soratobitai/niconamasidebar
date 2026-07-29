@@ -244,6 +244,26 @@
 - **意図的に変えた点（挙動差として承知）**: 取得中に「閉じる／間隔変更」が割り込んだ場合、旧は世代不一致で await 明けに打ち切っていたため**そのセッションが宙吊りになり、更新ボタンが最大60秒スピナー固着＋タイムアウト警告**が出ていた。新は自分のセッションを必ず閉じるのでどちらも起きない。**旧側の欠陥の解消**。
 - **裏タブ判定は入れていない**: 「サイドバーが開いている間は可視/非表示に関わらず走らせる」は 655df9c の意図的決定（`main.js` に明文あり）。`document.hidden` を見るのは**サムネ側だけ**。ここを混同しないこと（doc/10 の B5 が検証しているのもサムネ側）。
 - 対象: `src/managers/UpdateManager.js`（`startSidebarLoop`・`destroySidebarLoop`・`resetSidebarSchedule`・`_sidebarTick`）、`src/managers/LoadingManager.js`（IDスコープ）、`src/main.js`（`stopAllTimers`・`cleanup`・`updateSidebar` ラッパー）、`src/core/AppState.js`（`timers` から sidebar 削除）。
+- **検証は自動化済み**: `npm run verify:loop`（`scripts/verify-sidebar-loop.mjs`）。実コードをそのまま Node で動かすので実機・ログイン不要。手作業が残るのは doc/10 の D6・D7 だけ。
+
+## ⏸ AC. 常設ループ化の調査中に見つけた既存バグ（今回は意図的に未着手・2026-07-29）
+
+AB-2 の事前調査で**このリファクタとは無関係の既存バグ**が見つかった。切り分けを濁らせないため今回は触らないと判断した。**いずれも実在をコードで確認済み**（推測ではない）。
+
+1. 🔴 **裏タブで `performManualUpdate` が無期限にハングする**
+   `await new Promise(resolve => this.updateThumbnail(true, resolve))`（`UpdateManager.js`）は `updateThumbnailsFromStorage` の **rAF 駆動**（`render/sidebar.js` の `requestAnimationFrame(tick)` → `checkComplete` → `onComplete`）に完全依存している。裏タブでは rAF が来ないので `onComplete` が永久に呼ばれない。
+   到達経路は実在する: (a) バックグラウンドで watch ページを開いた時（`main.js` の起動300ms後）、(b) 他タブがサイドバーを開いて `storage.onChanged` 経由で `handleSidebarOpenStateChange(true)` が走った時。どちらも `main.js` の「rAFが実行されない場合のフォールバック」コメントが明示的に想定しているケース。
+   結果 `isPerformingManualUpdate` が立ちっぱなしになり、ローディングは60秒タイムアウトで閉じられて**更新ボタンだけ有効化される＝押せるのに無反応**。可視復帰の契機は 655df9c で撤去済みなので、そのタブを見に行くまで解けない。
+
+2. 🟡 **設定を1つ変えるだけで「サイドバーの開閉状態」が全タブへ伝播する**
+   `optionsHandler.saveOptions` → `storage.js` の `chrome.storage.local.set(options)` が **options 全キー**を書く。`options` には `isOpenSidebar` が含まれる（`main.js` の開閉時に代入される）。`getOptions` も merged 全キーを set する。
+   害: 自動オープンのタブでテーマや並び順を変えると `isOpenSidebar` が false→true に変わり、`storage.onChanged` が全タブで発火。**サイドバーを閉じている別タブが「開いた」と誤認**して幅0のまま取得を始める。「閉じたタブでは取得しない」という不変条件が、更新間隔以外の設定変更で破れる。
+
+3. 🟡 **`isSidebarLoading()` が死にコード**（`render/animatedThumbnail.js`）。定義だけで呼び出し0件。`.loading` クラスの消費者は CSS だけで、「動くサムネのキャプチャ抑制」という挙動は**存在しない**。改修時に「実在しない挙動」を保存対象と誤認しやすいので注意。
+
+4. ✅ **自動移動が作る孤児ローディングセッション** → AB-2 で**修正済み**。`main.js` の `updateSidebar` ラッパーが `startSession` するのに finish していなかった。旧実装では定期チェーンの無条件 finish が偶然の回収役になっていたが、それは「tick の await 中に発生した場合」しか届かない。ラッパー自身が閉じるようにして根本解決。
+
+> **AC-1 と AC-2 は、次に「裏タブ」「マルチタブ」まわりを触る時にまとめて片付けるのがよい。** 単独で直すと確認手順がそれぞれ重い（裏タブ再現・複数タブ同時操作）。
 
 ---
 

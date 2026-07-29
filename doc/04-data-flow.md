@@ -53,7 +53,7 @@
     - **閉じる**: `closeSidebar()` → `handleSidebarOpenStateChange(false)` → `stopAllTimers()`（**閉じている間はタイマーもデータ取得も走らない**）。
 23. `autoNextProgram==='on'` なら `startLiveStatusWatcher()`（→ フェーズ7）。
 24. 動くサムネ②の給餌配線（`setAnimThumbnailFeed`）＋ON/OFF反映（`setAnimatedThumbnailEnabled`）。
-25. `beforeunload`/`pagehide` → `cleanup`、`visibilitychange` → `handleVisibilityChange`（→ フェーズ6）。
+25. `beforeunload`/`pagehide` → `cleanup`。**`visibilitychange` は登録しない**（655df9c で撤去）。
 
 ## フェーズ3: 初回データ取得（サイドバーが開いている時のみ）
 
@@ -107,17 +107,18 @@
 
 ### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で60/120/180秒）
 36. `startSidebarLoop()` / `_sidebarTick()` … setup で1回だけ開始する**常設ループ**。**最初の実行も1周期後**（即時ではない）。毎回 `isOpen`→期限→`isLoading()` を判定して素通りし、通れば `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング。次回期限は**この回が終わった時点＋1周期**（＝実周期は interval＋作業時間）。停止は `destroySidebarLoop()`（ページ離脱時）のみで、**閉じても止めない**（閉じている間は tick が素通りする）。**サムネ<img>の全件同時更新は撤去**（一斉感を無くすため）。サムネ反映は各番組の自己連鎖サイクルに任せ、新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う。
-    - **タブが非表示の周期は更新をスキップ**（`isVisible()` false なら再スケジュールのみ）。背景でのフォローAPI/リスト取得を避け、可視復帰時に `handleVisibilityChange` が即 `performManualUpdate` で取り直す。
+    - **タブが非表示でもスキップしない**（可視ガードは 655df9c で撤去済み）。サイドバーが開いている限り裏タブでもリスト取得を続ける。`document.hidden` を見るのは 5.1 の thumbnail 側だけ。
     - **別更新が進行中(`isLoading()`)の周期もスキップ**して次回へ（手動更新との二重取得・セッション上書き防止）。
 37. `resetSidebarSchedule()` … オプション（`updateProgramsInterval`）変更時／サイドバーを開いた時／手動ロード末尾で、**次回取得の期限だけ**を置き直す（ループは作り直さない）。
 
 > ⚠️ **開いた瞬間の描画は sidebar タイマーではなく**、フェーズ3の `performManualUpdate` が担う。sidebar タイマーの初回も1周期（既定120秒）後である点に注意。
 
-## フェーズ6: タブ可視状態変化（Page Visibility）
+## フェーズ6: タブ可視状態変化 — **存在しない**
 
-38. `handleVisibilityChange`（`appState.setVisibility` で可視状態を記録。`appState.sidebar.isOpen` 時のみ以下）:
-    - **背景移行(hidden)**: `thumbnail` の各番組サイクルは `document.hidden` の間、**画像更新を行わずタイマーだけ軽く回す**（rAF が止まり `onSettled` が来ないため。タイマー自体は破棄しない）。sidebar タイマーは継続するが、非表示中の周期はフェーズ5.2で更新をスキップするので実質 notifybox/フォローAPIは走らない。アクティブなローディングセッションが残っていれば500ms後に `finishLoadingSession()`（セッション残留対策）。
-    - **復帰(visible)**: thumbnail は次サイクルから通常更新へ戻り、sidebar タイマーを再起動し、rAF内で `performManualUpdate()`（リスト＋詳細（フォローAPI）＋サムネ全件を即取り直す＝復帰時の一斉更新はここが担う）。詳細は毎回フォローAPIで全件更新されるため、旧方式の「長時間非表示なら `forceRefetch` でしっかり更新／短ければ軽量更新」という `thorough` 分岐は不要（常に同じ更新）。
+38. **`visibilitychange` ハンドラは無い。** 655df9c で「タブ可視状態によるガードを全撤去」した（`main.js` に「タブの可視/非表示による一時停止・復帰処理は行わない」と明記）。`AppState` の `visibility`／`setVisibility`／`isVisible` も同時に削除済みで、現行コードには1件も存在しない。
+    - **背景移行(hidden)**: 何もしない。サイドバーが開いていれば **sidebar の常設ループは裏タブでも notifybox＋フォローAPI を取り続ける**。thumbnail だけは `_runThumbCycle` 冒頭の `document.hidden` 判定で画像更新をせずタイマーだけ軽く回す（rAF が止まり `onSettled` が来ないため。タイマー自体は破棄しない）。
+    - **復帰(visible)**: 何もしない。取り直しの契機は無く、次の定期サイクルを待つ。
+    - ⚠️ この節は長らく「可視ガードがある」前提で書かれていたが、実装は 655df9c 以降そうなっていなかった（2026-07-29 に実装へ合わせて修正）。**裏タブ挙動を論じる時はここを信用せず、`main.js` のコメントと `_sidebarTick` / `_runThumbCycle` を直接読むこと。**
 
 ## フェーズ7: 番組自動移動（AutoNext）
 
@@ -168,8 +169,7 @@
 | 状態 | 主な書き込み | 主な読み取り |
 |------|------------|------------|
 | `sidebar.isOpen` | 初期化 / 開閉ボタン / onChanged | `_sidebarTick` の取得可否判定・`resetSidebarSchedule` を呼ぶかの判定 |
-| `visibility.isVisible` | `handleVisibilityChange` / 初期化 | sidebar 周期の更新スキップ判定（`isVisible()`） |
 | `update.isInserting` | `updateSidebar` 前後 | `updateThumbnail`（挿入中スキップ） |
-| `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタン・可視処理・sidebar周期スキップ |
+| `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタンの有効/無効・`_sidebarTick` の周期スキップ |
 | `timers.*`（thumbnail/sidebar/autoNext の3種） | 各 start/stop | `getTimer` による二重起動防止（`timers.thumbnail` はセンチネル `true`＝実タイマーは `UpdateManager._thumbTimers` Map） |
 | `autoNext.*` | AutoNextManager 各所 | 多重進入抑止・カウントダウン・cleanup |
