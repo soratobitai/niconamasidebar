@@ -36,6 +36,15 @@ export class UpdateManager {
         this._thumbGen = 0;
         // _updateOneThumbnailAndWait の安全ガードタイマー（stop時に一括clearするため追跡）。
         this._pendingGuards = new Set();
+
+        // === サイドバー更新の常設ループ ===
+        // 「次に取得してよい時刻」が唯一の正で、タイマーは単なる目覚まし。
+        // 誰が再スケジュールしても同じ _sidebarNextDueAt から遅延を計算するので、
+        // 複数の呼び出し元が食い違って二重に走ることが構造上ありえない。
+        this._sidebarLoopTimer = null;   // 常に高々1本。clear してから set する
+        this._sidebarLoopRunning = false; // 二重開始ガード（_sidebarLoopTimer は tick 実行中 null になるため当てにしない）
+        this._sidebarLoopStopped = false; // destroySidebarLoop で true。resetSidebarSchedule で復帰しうる
+        this._sidebarNextDueAt = 0;      // 次に updateSidebar してよい時刻（epoch ms）
     }
 
     /**
@@ -218,76 +227,125 @@ export class UpdateManager {
     }
 
     /**
-     * サイドバー更新タイマーを開始（updateProgramsInterval 周期）。
-     * 1周期ごとに notifybox（リスト）＋スクレイプ（詳細）を取り込んで再描画する。
+     * サイドバー更新の常設ループを開始する。init から1回だけ呼ぶ（冪等）。
+     *
+     * 旧実装は start/stop/restart でチェーンを作っては壊す方式だったが、
+     * 「取得中(await中)は保留タイマーが存在しない」ため clearTimeout が空振りし、
+     * 戻ってきたチェーンが自力で張り直して (A)閉じても止まらない (B)チェーンが二重化する、
+     * という欠陥があった（doc/09 項目AB）。世代トークンで押さえていたが、
+     * ここでは「作り直さない」ことで欠陥そのものを構造から消している。
+     *
+     * ページのライフサイクルは DOMContentLoaded で1回 setup → beforeunload/pagehide で1回 cleanup
+     * のみ（SPA的な再初期化経路は存在しない。自動移動も location.assign による完全遷移）。
+     * よってループは「ページ滞在中ずっと1本」で足り、停止は片道でよい。
      */
-    startSidebarUpdate() {
-        // 既存タイマーを消し、世代を進めて in-flight の旧チェーンと縁を切る。
-        const existingTimer = this.appState.getTimer('sidebar');
-        if (existingTimer) {
-            clearTimeout(existingTimer);
-        }
-        this._sidebarGen = (this._sidebarGen || 0) + 1;
-        const gen = this._sidebarGen; // このチェーンの世代を捕捉
-
-        // 次サイクルの予約。世代が進んでいたら張らない＝旧チェーンはここで自然消滅する。
-        // 不一致時は appState のタイマーも触らない（新世代が張ったものを消さないため）。
-        const scheduleNext = () => {
-            if (gen !== this._sidebarGen) return;
-            const timer = setTimeout(updateSidebarInterval, this._currentUpdateIntervalMs());
-            this.appState.setTimer('sidebar', timer);
-        };
-
-        const updateSidebarInterval = async () => {
-            // 発火時点で旧世代なら何もしない（clearTimeout が間に合わずキュー済みだった場合の保険）。
-            if (gen !== this._sidebarGen) return;
-            // 別の更新（手動更新）が進行中なら、今回の定期更新はスキップして次回に回す。
-            if (this.appState.isLoading()) {
-                scheduleNext();
-                return;
-            }
-            try {
-                await this.updateSidebar();
-                // await を跨いだ後にも世代を見る。停止/再開を跨いだ旧チェーンがここへ戻ってくると、
-                // getCurrentSessionId() は「今動いている別の更新」のセッションを返すため、
-                // 他人のローディングセッションを finish してしまう（＝手動更新がまだ走っているのに
-                // 更新ボタンの pointer-events が戻り、押せるのに無反応な状態になる）。
-                if (gen !== this._sidebarGen) return;
-                if (this.loadingManager.getCurrentSessionId()) {
-                    await this.loadingManager.finishSessionWithMinDuration(1000);
-                }
-                // サムネ<img>の反映は各番組の自己連鎖サイクルに任せる（全件同時更新はしない＝
-                // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbTimers が拾う。
-            } catch (error) {
-                console.error('[updateSidebarInterval] エラー:', error);
-            }
-            scheduleNext();
-        };
-
-        scheduleNext();
+    startSidebarLoop() {
+        // 二重開始は _sidebarLoopTimer では判定できない。_sidebarTick は入口で自分を null にするため、
+        // 取得中(await中)に呼ばれるとガードをすり抜けてもう1本張ってしまう。専用フラグで判定する。
+        if (this._sidebarLoopRunning) return;
+        this._sidebarLoopRunning = true;
+        this._sidebarLoopStopped = false;
+        const interval = this._currentUpdateIntervalMs();
+        this._sidebarNextDueAt = Date.now() + interval;
+        this._scheduleSidebarTick(interval);
     }
 
     /**
-     * サイドバー更新を停止する（閉／クリーンアップ）。
-     * clearTimeout だけでは await 中のチェーンを止められないため、世代を進めて張り直しを無効化する。
-     * サムネ側 stopThumbnailUpdate と対称に、閉パス・離脱パスの両方から呼ぶこと。
+     * 常設ループを止める（ページ離脱時のみ）。
+     * 「閉じたら止める」には使わないこと（閉じている間は _sidebarTick 側が isOpen で弾く）。
+     *
+     * 完全な片道にはしない。cleanup は beforeunload / pagehide で呼ばれるが、どちらも
+     * 「ページが破棄されずに生き残る」場合がある（bfcache 復帰、遷移のキャンセル）。
+     * 旧実装は停止が可逆で、その状況でもサイドバーを開き直せば定期更新が復活した
+     * （main.js の `!getTimer('sidebar')` ガード経由）。その復旧性を落とさないため、
+     * resetSidebarSchedule（＝開いた時・間隔変更時）から再武装できるようにしてある。
      */
-    stopSidebarUpdate() {
-        this._sidebarGen = (this._sidebarGen || 0) + 1; // in-flight チェーンの張り直しを無効化
-        const existingTimer = this.appState.getTimer('sidebar');
-        if (existingTimer) {
-            clearTimeout(existingTimer);
+    destroySidebarLoop() {
+        this._sidebarLoopStopped = true;
+        this._sidebarLoopRunning = false;
+        if (this._sidebarLoopTimer !== null) {
+            clearTimeout(this._sidebarLoopTimer);
+            this._sidebarLoopTimer = null;
         }
-        this.appState.clearTimer('sidebar');
     }
 
     /**
-     * サイドバー更新タイマーを再開
+     * 次回取得の期限を「今から1周期後」に置き直す（旧 restartSidebarUpdate 相当）。
+     * 位相のリセットだけを行い、ループを二重には増やさない。
+     *
+     * 呼ぶのは3箇所: サイドバーを開いた時、手動更新の完了後、更新間隔の変更時。
+     * いずれも「開いている時だけ」というガードは呼び出し側にある。
      */
-    restartSidebarUpdate() {
-        // startSidebarUpdate が世代を進めるので、await 中の旧チェーンも張り直せなくなる
-        // ＝ここで手前に clearTimeout を重ねる必要はない（旧実装は世代が無く、それだけが頼りだった）。
-        this.startSidebarUpdate();
+    resetSidebarSchedule() {
+        // cleanup 後にページが生き残っていた場合はここで再武装する（destroySidebarLoop 参照）
+        if (this._sidebarLoopStopped) {
+            this.startSidebarLoop();
+            return;
+        }
+        const interval = this._currentUpdateIntervalMs();
+        this._sidebarNextDueAt = Date.now() + interval;
+        this._scheduleSidebarTick(interval);
+    }
+
+    /** 目覚ましを張り直す。常に「clear してから set」なので同時に2本存在しない。 */
+    _scheduleSidebarTick(delayMs) {
+        if (this._sidebarLoopStopped) return;
+        if (this._sidebarLoopTimer !== null) {
+            clearTimeout(this._sidebarLoopTimer);
+        }
+        this._sidebarLoopTimer = setTimeout(() => { this._sidebarTick(); }, Math.max(0, delayMs));
+    }
+
+    /**
+     * 次の起床までの遅延。_sidebarNextDueAt から毎回計算し直すので、
+     * resetSidebarSchedule が割り込んでも結果が食い違わない。
+     * 期限が過ぎている（閉じている間に空振りしていた等）場合は1周期後にする＝暴走しない。
+     */
+    _sidebarDelayToNextMs() {
+        const interval = this._currentUpdateIntervalMs();
+        const remain = this._sidebarNextDueAt - Date.now();
+        return (remain > 0 && remain <= interval) ? remain : interval;
+    }
+
+    /**
+     * ループの1回ぶん。「今やるべきか」を毎回ここで判定する。
+     * 判定に外れても必ず finally で次の目覚ましを張るので、ループが死ぬ経路は destroy だけ。
+     */
+    async _sidebarTick() {
+        this._sidebarLoopTimer = null; // 自分は発火済み
+        if (this._sidebarLoopStopped) return;
+        try {
+            // 閉じている間は取得しない（旧実装の stopAllTimers 相当。ループは生かしたまま素通り）
+            if (!this.appState.sidebar.isOpen) return;
+            // まだ期限前（早すぎる起床への保険）
+            if (Date.now() < this._sidebarNextDueAt) return;
+            // 別の更新（手動更新）が進行中なら今回は見送り、次周期に回す
+            if (this.appState.isLoading()) return;
+
+            const sessionId = await this.updateSidebar();
+            if (this._sidebarLoopStopped) return;
+            // 自分が始めたセッションだけを閉じる。await 中に手動更新が別セッションを
+            // 立てている可能性があるため、無条件 finish は他人のセッションを閉じてしまう。
+            if (sessionId) {
+                await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
+            }
+            // サムネ<img>の反映は各番組の自己連鎖サイクルに任せる（全件同時更新はしない＝
+            // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbTimers が拾う。
+        } catch (error) {
+            console.error('[sidebarTick] エラー:', error);
+        } finally {
+            // 期限は「この回が終わった時点」から数え直す。旧実装は取得完了後に初めて
+            // setTimeout(interval) を張る自己連鎖だったため、実周期は interval＋その回の作業時間
+            // （＝取得時間と最低表示1秒の合成）だった。取得の前に期限を進めると周期が
+            // interval ちょうどに詰まり、ニコ生への取得頻度が上がってしまう＝挙動が変わる。
+            // ただし await 中に resetSidebarSchedule（手動更新の完了・間隔変更）が
+            // 期限を先へ置き直していた場合は、そちらを尊重して上書きしない。
+            const now = Date.now();
+            if (this._sidebarNextDueAt <= now) {
+                this._sidebarNextDueAt = now + this._currentUpdateIntervalMs();
+            }
+            this._scheduleSidebarTick(this._sidebarDelayToNextMs());
+        }
     }
 
     /**
@@ -310,9 +368,9 @@ export class UpdateManager {
             // 最低1秒のローディング時間を確保して終了
             await this.loadingManager.finishSessionWithMinDuration(1000);
 
-            // 定期タイマーをリセット
+            // 定期取得の位相をリセット（＝今から1周期後にする）。ループ自体は作り直さない。
             if (this.appState.sidebar.isOpen) {
-                this.restartSidebarUpdate();
+                this.resetSidebarSchedule();
             }
         } catch (error) {
             console.error('[手動更新] エラーが発生しました:', error);
@@ -355,8 +413,21 @@ export class UpdateManager {
      * サイドバーを更新（リスト＝notifybox、詳細＝スクレイプ を並列取得して描画）。
      */
     async updateSidebar() {
-        // ローディングセッション開始
-        this.loadingManager.startSession();
+        // ローディングセッションの扱い。
+        //
+        // 開始したIDを返すのは、await を跨いで戻ってきた呼び出し元が「自分が始めたセッションだけ」を
+        // 閉じられるようにするため（他人のセッションを閉じると、手動更新がまだ走っているのに
+        // 更新ボタンが有効化され「押せるのに無反応」になる）。
+        //
+        // 既に別の更新のセッションが動いている場合は、新しく立てずに相乗りする（null を返す）。
+        // startSession は前のセッションを finish せずに上書きするため、ここで素直に立てると
+        // 動いている持ち主からロックを奪ってしまう。奪ったIDを自分で閉じると、
+        // 元の持ち主（例: 手動更新の force 一斉更新＝実測15秒級）がまだ走っているのに
+        // isLoading() が false へ落ち、上と同じ「押せるのに無反応」＋定期取得の二重走行になる。
+        // 相乗りなら持ち主が最後まで施錠を保てる。呼び出し元は null の時に finish しなければよい。
+        const sessionId = this.loadingManager.getCurrentSessionId()
+            ? null
+            : this.loadingManager.startSession();
 
         try {
             // リスト（notifybox）と 詳細（スクレイプ→storage upsert）を並列取得。
@@ -372,20 +443,20 @@ export class UpdateManager {
                 if (container && container.children.length > 0) {
                     this.updateProgramCount(container.children.length);
                 }
-                return;
+                return sessionId;
             }
 
             // 空配列のときは既存DOMを維持
             if (Array.isArray(livePrograms) && livePrograms.length === 0) {
                 this.updateProgramCount(0);
-                return;
+                return sessionId;
             }
 
             // スクレイプ upsert 後の storage を読む（詳細が反映済み）
             const programInfos = getProgramInfosFromStorage();
 
             const container = document.getElementById('liveProgramContainer');
-            if (!container) return;
+            if (!container) return sessionId;
 
             // 現在DOMのカードを id で引けるように
             const existingMap = new Map();
@@ -476,6 +547,7 @@ export class UpdateManager {
             console.error('[updateSidebar] エラーが発生しました:', error);
             this.appState.update.isInserting = false;
         }
+        return sessionId;
     }
 
     /**

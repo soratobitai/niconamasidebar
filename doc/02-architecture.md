@@ -145,7 +145,7 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 
 | タイマー | 間隔 | 何をするか | 実装 |
 |---------|------|-----------|------|
-| **sidebar** | `updateProgramsInterval` 秒（既定120／設定60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager.startSidebarUpdate` → `updateSidebar` |
+| **sidebar** | `updateProgramsInterval` 秒（既定120／設定60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager._sidebarTick`（常設ループ） → `updateSidebar` |
 | **thumbnail** | 番組ごとに独立（基準 `updateThumbnailInterval` 秒＝既定20＋その回の作業時間） | **番組ごとの独立・自己連鎖タイマー**（`_thumbTimers` Map: id→timeoutId）。各カードが「自分の `<img>` を1件更新→画像読み込み完了(`onSettled`)を待って→20秒後に次サイクル」を回す（`_runThumbCycle`）。周期が毎回わずかに違うため一斉切替せず自然にドリフトする。空＆若い（放送開始から `newProgramFastPollMs`=3分以内）user番組だけ各サイクルで詳細APIを1回追撃（`_fetchLiveThumbIfPendingYoung`）。動くサムネ②もここでプリロードした画像から給餌 | `UpdateManager.startThumbnailUpdate` → `_syncThumbTimers` → `_runThumbCycle` |
 | **autoNext**（自動移動） | イベント駆動 | 視聴中番組の終了を DOM 監視し、条件を満たせばモーダル→カウントダウン→次番組へ遷移。変更なし | `AutoNextManager.startWatcher` → `observeProgramEnd` |
 

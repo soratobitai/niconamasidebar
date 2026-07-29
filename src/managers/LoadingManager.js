@@ -38,12 +38,22 @@ export class LoadingManager {
 
     /**
      * ローディングセッションを完了する
+     *
+     * @param {string|null} expectedSessionId
+     *   指定すると「現在のセッションがそれと一致する時だけ」閉じる（IDスコープ）。
+     *   startSession は前セッションを finish せずに上書きするため、await を跨いで戻ってきた
+     *   呼び出し元が素朴に finish すると「他人のセッション」を閉じてしまう。結果、手動更新が
+     *   まだ走っているのに更新ボタンの pointer-events が戻り「押せるのに無反応」になる。
+     *   省略時は従来どおり現在のセッションを無条件に閉じる。
      */
-    finishSession() {
+    finishSession(expectedSessionId = null) {
         if (!this.currentUpdateSessionId) {
             return;
         }
-        
+        if (expectedSessionId && expectedSessionId !== this.currentUpdateSessionId) {
+            return; // 自分が始めたセッションではない＝触らない
+        }
+
         const sessionId = this.currentUpdateSessionId;
         const duration = this.sessionStartTime 
             ? (performance.now() - this.sessionStartTime).toFixed(0) 
@@ -71,22 +81,29 @@ export class LoadingManager {
     /**
      * 最低ローディング時間を確保してセッションを完了する
      * @param {number} minDuration - 最低表示時間（ミリ秒）
+     * @param {string|null} expectedSessionId - finishSession と同じIDスコープ。
+     *   この関数自身が最低表示時間ぶん await するため、待っている間にセッションが差し替わりうる。
+     *   よって入口だけでなく await の後にも照合する（finishSession 側で再照合される）。
      */
-    async finishSessionWithMinDuration(minDuration = 1000) {
+    async finishSessionWithMinDuration(minDuration = 1000, expectedSessionId = null) {
+        if (expectedSessionId && this.currentUpdateSessionId
+            && expectedSessionId !== this.currentUpdateSessionId) {
+            return; // 自分が始めたセッションではない＝待つ必要も閉じる必要もない
+        }
         if (!this.currentUpdateSessionId || !this.sessionStartTime) {
-            this.finishSession();
+            this.finishSession(expectedSessionId);
             return;
         }
-        
+
         const elapsed = performance.now() - this.sessionStartTime;
         const remaining = minDuration - elapsed;
-        
+
         if (remaining > 0) {
             // 最低表示時間に達していない場合は待つ
             await new Promise(resolve => setTimeout(resolve, remaining));
         }
-        
-        this.finishSession();
+
+        this.finishSession(expectedSessionId);
     }
 
     /**

@@ -118,6 +118,11 @@ const setup = async () => {
     autoNextManager = new AutoNextManager(appState);
     updateManager = new UpdateManager(appState, loadingManager, options, elems, loadingImageURL);
 
+    // サイドバー更新の常設ループを開始する。ページ滞在中ずっと1本だけ回り、
+    // 停止は cleanup（beforeunload/pagehide）の destroySidebarLoop だけ。
+    // 開閉による停止/再開はしない（閉じている間は _sidebarTick が isOpen を見て素通りする）。
+    updateManager.startSidebarLoop();
+
     // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
     // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
     // ことで、開閉中の列パタつき（1列⇔多列の切替でサムネが一瞬巨大化する崩れ）を防ぐ。
@@ -336,8 +341,8 @@ const cleanup = () => {
     // 番組ごとの自己連鎖サムネタイマーを停止（appState.timers はセンチネルのみ保持するため、
     // appState.cleanup だけでは実タイマーが止まらない。閉パス stopAllTimers と対称にする）。
     if (updateManager) updateManager.stopThumbnailUpdate();
-    // サイドバー更新チェーンも同様に、appState.cleanup だけでは await 中のものが止まらない。
-    if (updateManager) updateManager.stopSidebarUpdate();
+    // サイドバー更新の常設ループを破棄（片道）。ページ離脱時だけに呼ぶ唯一の停止経路。
+    if (updateManager) updateManager.destroySidebarLoop();
 
     // AppStateで全てのリソースをクリーンアップ
     appState.cleanup();
@@ -351,14 +356,17 @@ const cleanup = () => {
     hideAutoNextModal();
 }
 
-// すべての更新タイマーを停止
+// サイドバーを閉じた時に止めるもの
+//
+// サイドバー更新の常設ループはここでは止めない。閉じている間は _sidebarTick が
+// appState.sidebar.isOpen を見て素通りするので、取得は走らない（＝挙動は従来と同じ）。
+// ここで止めてしまうと、閉じた状態で起動する既定経路（main.js の handleSidebarOpenStateChange(false)）
+// でループが即死し、二度と復活しない（作り直す関数がもう無い）。
+//
+// autoNext のクリアは「閉じたら自動移動のカウントダウンも止まる」という既存挙動なので必ず残すこと。
 function stopAllTimers() {
     if (updateManager) updateManager.stopThumbnailUpdate(); // 番組ごとの自己連鎖サムネタイマーを全停止
-    // サイドバー更新チェーンは await 中だとタイマーが存在せず clearTimer では止まらない
-    // （戻ってきて自力で張り直す＝閉じても回り続ける）。世代を進める stopSidebarUpdate で止める。
-    if (updateManager) updateManager.stopSidebarUpdate();
     appState.clearTimer('thumbnail');
-    appState.clearTimer('sidebar'); // updateManager 未生成（初期化前）でも最低限タイマーは止める
     appState.clearTimer('autoNext');
 }
 
@@ -367,7 +375,9 @@ async function handleSidebarOpenStateChange(open) {
     if (open) {
         // タイマーを先に開始（UIの反応を優先）
         if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
-        if (!appState.getTimer('sidebar')) startSidebarUpdate();
+        // サイドバー更新は常設ループなので「開始」は不要。開いた時点から1周期後になるよう
+        // 位相だけ置き直す（旧 startSidebarUpdate が毎回フル1周期を張り直していたのと同じ）。
+        resetSidebarSchedule();
 
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）。
         // requestAnimationFrameで次のフレームに延期し、非アクティブタブ向けに setTimeout フォールバックも用意する。
@@ -396,9 +406,10 @@ const startThumbnailUpdate = () => {
     }
 }
 
-const startSidebarUpdate = () => {
+// サイドバー定期取得の位相リセット（常設ループはこれで作り直されない）
+const resetSidebarSchedule = () => {
     if (updateManager) {
-        updateManager.startSidebarUpdate();
+        updateManager.resetSidebarSchedule();
     }
 }
 
@@ -466,22 +477,14 @@ chrome.storage.onChanged.addListener(function (changes) {
         setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
     }
 
-    // 更新間隔が変更された場合はタイマーを再起動。
+    // 更新間隔が変更された場合は位相を置き直す（＝今から新しい間隔ぶん後）。
     // 設定は全タブ共有なので、この listener は「サイドバーを閉じている別タブ」でも発火する。
-    // 開閉を見ずに再起動すると、閉じたままリスト取得（notifybox＋フォローページ走査）が
-    // 回り続ける＝stopSidebarUpdate で成立させた「閉じたら止まる」を打ち消してしまう。
-    // 閉じている場合は何もしなくてよい。次に開いた時の startSidebarUpdate が新しい間隔で始める。
+    // 閉じている場合は何もしなくてよい。次に開いた時の resetSidebarSchedule が新しい間隔で始める。
+    // （常設ループ自体は閉じていても回っているが、_sidebarTick が isOpen で素通りするため取得はしない）
     if (needsRestart && appState.sidebar.isOpen) {
-        restartSidebarUpdate();
+        resetSidebarSchedule();
     }
 });
-
-// サイドバー更新タイマーを再起動
-const restartSidebarUpdate = () => {
-    if (updateManager) {
-        updateManager.restartSidebarUpdate();
-    }
-}
 
 // オプションを取得
 const getOptions = async () => getOptionsFromStorage(defaultOptions);
@@ -533,9 +536,18 @@ function sortPrograms(container) {
     sortProgramsUtil(container, options.programsSort);
 }
 
+// 自動移動（番組終了検知 → AutoNextManager）からのリスト更新。
+//
+// updateSidebar はローディングセッションを開始するが、この経路は誰も閉じていなかった。
+// 旧実装では定期チェーンが await 明けに「今開いているセッション」を無条件 finish していたため、
+// それが偶然の回収役になっていた。定期tickが自分のセッションだけを閉じるようになった以上、
+// ここで自分の後始末をする。閉じないと最大60秒、更新ボタンがスピナー固着のまま押せず、
+// appState.isLoading() が真の間は定期取得も素通りし続ける。
 async function updateSidebar() {
-    if (updateManager) {
-        await updateManager.updateSidebar();
+    if (!updateManager) return;
+    const sessionId = await updateManager.updateSidebar();
+    if (sessionId && loadingManager) {
+        await loadingManager.finishSessionWithMinDuration(1000, sessionId);
     }
 }
 

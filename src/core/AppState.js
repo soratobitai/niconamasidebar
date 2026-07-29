@@ -5,9 +5,11 @@
 export class AppState {
     constructor() {
         // タイマー管理
+        // ※サイドバーのリスト更新ループはここに載せない。UpdateManager が常設ループとして
+        //   自前で1本だけ持ち、停止は destroySidebarLoop（ページ離脱時のみ）に一本化している。
+        //   ここに載せると stopAllTimers / cleanup から外部に殺され、閉じた瞬間に復活不能になる。
         this.timers = {
             thumbnail: null, // サムネ更新ループ（20秒）
-            sidebar: null,   // リスト＋詳細スクレイプ更新ループ（updateProgramsInterval）
             autoNext: null,  // 自動移動
         };
 
@@ -61,7 +63,7 @@ export class AppState {
 
     /**
      * タイマーを設定
-     * @param {string} name - タイマー名 ('thumbnail' | 'sidebar' | 'autoNext')
+     * @param {string} name - タイマー名 ('thumbnail' | 'autoNext')。未知のキーは無言で捨てられる
      * @param {number|object} timer - タイマーIDまたはタイマーオブジェクト
      */
     setTimer(name, timer) {

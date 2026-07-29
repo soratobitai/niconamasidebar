@@ -59,7 +59,7 @@
 
 26. **`handleSidebarOpenStateChange(true)`**:
     1. なければ `startThumbnailUpdate()`（フェーズ5.1／番組ごとの自己連鎖タイマーを起動）
-    2. なければ `startSidebarUpdate()`（フェーズ5.2）
+    2. `resetSidebarSchedule()` で次回取得の期限を「今から1周期後」に置き直す（常設ループは起動時から回っている／フェーズ5.2）
     3. rAF内で `await performManualUpdate()`（初回・手動・再オープン・可視復帰いずれも同じ経路。専用の初回ロード関数は無い）
     4. rAF不発（非アクティブタブ等）に備え `setTimeout(100ms)` フォールバックでも `performManualUpdate()`。
 27. **`performManualUpdate()`**（→ フェーズ8と同一実装）:
@@ -67,7 +67,7 @@
     2. `await updateSidebar()`（フェーズ4）… リスト＝notifybox と 詳細＝フォローAPI（ページング）を**並列取得**し、詳細を storage へ upsert してからカードを組む。**詳細が揃った状態で描画・ソートするので、初回の1回目の描画から `programsSort`（人気順/新着順）で正しく並ぶ**。
     3. `await updateThumbnail(true)`（サムネ強制反映。保存済みURL＋キャッシュバスター）
     4. `finishSessionWithMinDuration(1000)`（最低1秒ローディング表示＝更新ボタンのスピナー）
-    5. 開いていれば `restartSidebarUpdate()`
+    5. 開いていれば `resetSidebarSchedule()`
 
 > ✅ **人気順のガチャつき（settling）機構は撤去**: 旧方式は詳細を後追いキューで取るため「詳細が揃うまで新着順で表示 → 確定後に人気順へFLIPで並べ替え」という整列確定処理（`settling`/`performInitialLoad`/`flipReorder`）が必要だった。現行は詳細がリストと**同時に**storage へ載るので、**最初から `programsSort` で確定描画**でき、退避表示も再ソートも不要。
 > ⚠️ 初回ロード専用の分岐（`oneTimeFlag`/`startToDoListUpdate`）は無くなり、開/手動/再オープン/可視復帰はすべて `performManualUpdate` に一本化された。
@@ -106,10 +106,10 @@
     - タブが非表示（`document.hidden`）の間は**画像更新を行わずタイマーだけ軽く回す**（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う（フェーズ6）。
 
 ### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で60/120/180秒）
-36. `startSidebarUpdate()` … **最初の実行も1周期後**（即時ではない）。1周期ごとに `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング → 自己再帰。**サムネ<img>の全件同時更新は撤去**（一斉感を無くすため）。サムネ反映は各番組の自己連鎖サイクルに任せ、新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う。
+36. `startSidebarLoop()` / `_sidebarTick()` … setup で1回だけ開始する**常設ループ**。**最初の実行も1周期後**（即時ではない）。毎回 `isOpen`→期限→`isLoading()` を判定して素通りし、通れば `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング。次回期限は**この回が終わった時点＋1周期**（＝実周期は interval＋作業時間）。停止は `destroySidebarLoop()`（ページ離脱時）のみで、**閉じても止めない**（閉じている間は tick が素通りする）。**サムネ<img>の全件同時更新は撤去**（一斉感を無くすため）。サムネ反映は各番組の自己連鎖サイクルに任せ、新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う。
     - **タブが非表示の周期は更新をスキップ**（`isVisible()` false なら再スケジュールのみ）。背景でのフォローAPI/リスト取得を避け、可視復帰時に `handleVisibilityChange` が即 `performManualUpdate` で取り直す。
     - **別更新が進行中(`isLoading()`)の周期もスキップ**して次回へ（手動更新との二重取得・セッション上書き防止）。
-37. `restartSidebarUpdate()` … オプション（`updateProgramsInterval`）変更時／初回・手動ロード末尾で張り直し。
+37. `resetSidebarSchedule()` … オプション（`updateProgramsInterval`）変更時／サイドバーを開いた時／手動ロード末尾で、**次回取得の期限だけ**を置き直す（ループは作り直さない）。
 
 > ⚠️ **開いた瞬間の描画は sidebar タイマーではなく**、フェーズ3の `performManualUpdate` が担う。sidebar タイマーの初回も1周期（既定120秒）後である点に注意。
 
@@ -131,13 +131,13 @@
 
 ## フェーズ8: 手動更新
 
-41. `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate()`**: `updateSidebar()`（notifybox＝新着/終了反映 と フォローAPIの詳細（ページング）を並列取得し、詳細が揃った状態で `programsSort` の確定描画）→ `updateThumbnail(true)`（サムネ強制反映）→ 最低1秒ローディング → 開いていれば `restartSidebarUpdate()`。
+41. `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate()`**: `updateSidebar()`（notifybox＝新着/終了反映 と フォローAPIの詳細（ページング）を並列取得し、詳細が揃った状態で `programsSort` の確定描画）→ `updateThumbnail(true)`（サムネ強制反映）→ 最低1秒ローディング → 開いていれば `resetSidebarSchedule()`。
     - `isPerformingManualUpdate` フラグで多重防止（開閉/タブ復帰/自動移動が重なった時の二重取得を防ぐ）。
     - **初回ロード・タブ復帰・サイドバー再オープンもすべてこの同じ実装**。詳細は毎回フォローAPIで全件更新されるため、旧方式の settle（`processNow`/`flipReorder`）や `forceRefetch`／TTLの「軽量↔しっかり」の区別は無い。
 
 ## フェーズ9: オプション変更の伝播（`chrome.storage.onChanged`）
 
-42. `updateProgramsInterval` 変更 → `restartSidebarUpdate()`
+42. `updateProgramsInterval` 変更 → 開いていれば `resetSidebarSchedule()`
     `isOpenSidebar` 変更 → 未反映（他タブ由来）の時だけ `handleSidebarOpenStateChange()`（自タブのトグルは同期反映済みなので二重発火を防ぐ）
     `autoNextProgram` 変更 → watcher start/stop
     `sidebarTheme` 変更 → `applyTheme`
@@ -167,7 +167,7 @@
 
 | 状態 | 主な書き込み | 主な読み取り |
 |------|------------|------------|
-| `sidebar.isOpen` | 初期化 / 開閉ボタン / onChanged | visibility処理・末尾の `restartSidebarUpdate` 判定 |
+| `sidebar.isOpen` | 初期化 / 開閉ボタン / onChanged | `_sidebarTick` の取得可否判定・`resetSidebarSchedule` を呼ぶかの判定 |
 | `visibility.isVisible` | `handleVisibilityChange` / 初期化 | sidebar 周期の更新スキップ判定（`isVisible()`） |
 | `update.isInserting` | `updateSidebar` 前後 | `updateThumbnail`（挿入中スキップ） |
 | `loading.updateSession` | Loading系 start/finish | `isLoading()`・更新ボタン・可視処理・sidebar周期スキップ |

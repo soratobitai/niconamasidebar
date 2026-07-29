@@ -155,9 +155,12 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `_runThumbCycle(id)`（内部） | 1番組の1サイクル。空＆若い番組なら詳細API追撃（`_fetchLiveThumbIfPendingYoung`）→その番組の `<img>` を1件更新し画像読み込み完了を待つ（`_updateOneThumbnailAndWait`）→ `updateThumbnailInterval`(20秒)後に次サイクルを張る自己連鎖。周期が毎回わずかに違うため自然にドリフトする。`document.hidden` 中は更新せず軽く次サイクルだけ張る（rAF停止で `onSettled` が来ないため）。世代不一致（stop/再開跨ぎ）の古いサイクルは張り直さない |
 | `_updateOneThumbnailAndWait(id)`（内部） | その番組の `<img>` を1件更新し、画像の読み込み（全プリロード）が settle するまで待つ Promise。`updateThumbnailsFromStorage` の `onSettled` で検知。画像がハングしても基準間隔の2倍で安全にタイムアウトして前進 |
 | `_fetchLiveThumbIfPendingYoung(id)`（内部）★A1統合 | 「user・非会員・ライブサムネ空」かつ `onAirTime.beginAt` が `newProgramFastPollMs`(3分)以内の若い番組だけ、詳細API `fetchProgramInfo` で1回追撃し、取れたら `patchProgramThumbnail` でサムネ欄だけをマージ更新（await 跨ぎの lost update 回避）。3分超の空番組は追撃せずスクレイプ `fillMissingDetails` に委譲。旧「別建てA1バッチ `_retryPendingLiveThumbnails`／8回打ち切り／10件/回上限」は撤去済み |
-| `startSidebarUpdate()` | 既存タイマー掃除→`updateSidebarInterval` を `updateProgramsInterval` 秒間隔で回す。**非表示タブではスキップ**（次回へ）、**別更新が進行中(`isLoading()`)でもスキップ**。それ以外は `updateSidebar`→最低1秒ローディング確保→自己再帰。**サムネの全件同時更新は呼ばない**（一斉感を無くすため。反映は各番組の自己連鎖サイクル任せ。新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う） |
-| `restartSidebarUpdate()` | sidebar タイマーを張り直す（間隔変更時など） |
-| `performManualUpdate()` ★ | 手動更新（初回ロード・更新ボタン・タブ復帰・再オープン**共通**）。`updateSidebar()`→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`restartSidebarUpdate()`。詳細は毎回スクレイプで全件更新されるためTTLや「軽量/しっかり」の区別は無い。**多重防止**：冒頭 `isPerformingManualUpdate` in-flight ガードで、開閉/タブ復帰/自動移動が重なった時の二重取得を直列化 |
+| `startSidebarLoop()` | 常設ループを開始（`main.js` の setup から1回だけ）。以後**作り直さない**ので孤児化・二重化が構造上起こらない。冪等（`_sidebarLoopRunning` で判定。`_sidebarLoopTimer` は tick 実行中 null になるため使わない） |
+| `destroySidebarLoop()` | 常設ループを止める（`cleanup` ＝ページ離脱時のみ）。**「閉じたら止める」には使わない**。完全な片道にはせず `resetSidebarSchedule` から再武装できる（bfcache 復帰・遷移キャンセルでページが生き残る場合があるため） |
+| `resetSidebarSchedule()` | 次回取得の期限を「今から1周期後」に置き直すだけ（旧 `restartSidebarUpdate` 相当）。ループは作らない。呼ばれるのは**サイドバーを開いた時／手動更新の完了後／更新間隔の変更時**の3箇所で、いずれも `isOpen` ガード付き |
+| `_sidebarTick()` | ループ1回ぶん。毎回 `isOpen` → 期限（`_sidebarNextDueAt`） → `isLoading()` の順で判定して素通りする。**裏タブ判定は無い**（655df9c の意図的決定。`document.hidden` を見るのはサムネ側だけ）。取得したら**自分が始めたセッションだけ**を `finishSessionWithMinDuration(1000, sessionId)` で閉じる。`finally` で必ず次を張るのでループが死ぬ経路は destroy だけ。周期は「この回が終わった時点＋1周期」＝旧の自己再帰と同じく **interval＋作業時間**。**サムネの全件同時更新は呼ばない**（一斉感を無くすため。反映は各番組の自己連鎖サイクル任せ。新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う） |
+| `performManualUpdate()` ★ | 手動更新（初回ロード・更新ボタン・タブ復帰・再オープン**共通**）。`updateSidebar()`→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`resetSidebarSchedule()`。詳細は毎回スクレイプで全件更新されるためTTLや「軽量/しっかり」の区別は無い。**多重防止**：冒頭 `isPerformingManualUpdate` in-flight ガードで、開閉/タブ復帰/自動移動が重なった時の二重取得を直列化 |
+| `updateSidebar()` | リスト＋詳細を取得して描画。**開始したローディングセッションIDを返す**（呼び出し元が自分のぶんだけ閉じられるように）。既に別のセッションが動いている時は**新しく立てず相乗りし `null` を返す** — `startSession` は前セッションを finish せず上書きするため、素直に立てると持ち主からロックを奪い、それを閉じると持ち主がまだ走っているのに `isLoading()` が false へ落ちる |
 | `getLivePrograms(rows=100)` | `fetchLivePrograms` ラッパ。失敗時は `#api_error` を表示（ログイン促し） |
 | `_refreshDetailsViaScrape()` | `fetchFollowedProgramsViaPage()`（スクレイプ）→ 成功時のみ `upsertProgramInfos` で storage へ全件書き戻し。失敗時は何もしない＝その周は詳細が古いまま（**フォールバック無し**） |
 | `updateSidebar()` ★★ | ローディングセッション開始→ `Promise.all([getLivePrograms(100), _refreshDetailsViaScrape()])` で**リストと詳細を並列取得**→ スクレイプ upsert 後の `getProgramInfos()` を読む→ 一覧を回して**既存DOMは軽量更新**（active-point/title/link/`data-api-index`）、**新規は`makeProgramElement`で生成**（詳細が無い番組は notifybox の生データで生成＝タイトルのみ）→ `replaceChildren(frag)`→ソート（`options.programsSort` で最初から確定）→カラム幅→番組数更新→**末尾で `_syncThumbTimers()`**（新規/削除カードに合わせて番組ごとの自己連鎖サムネタイマーを生成/破棄）。番組ごとに try/catch で1件失敗しても全体は描画。失敗/空配列時は既存DOM維持 |
@@ -360,10 +363,11 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 | `cleanup()` | `appState.cleanup()`＋`UpdateManager.stopThumbnailUpdate()`（番組ごとの自己連鎖タイマーを全停止）＋サムネ監視破棄＋onResize解除＋モーダル閉じ |
 | `stopAllTimers()` | `UpdateManager.stopThumbnailUpdate()`（番組ごとの自己連鎖サムネタイマーを全停止）＋sidebar/autoNext をクリア |
 | `handleSidebarOpenStateChange(open)` ★ | 開: thumbnail/sidebarタイマー開始＋`performManualUpdate()` を RAF/フォールバックで実行。閉: 全タイマー停止 |
-| `startThumbnailUpdate/startSidebarUpdate` | UpdateManager へ委譲。thumbnail の停止は `stopAllTimers`（サイドバー閉）と `cleanup`（ページ離脱）の両方から `UpdateManager.stopThumbnailUpdate()` を呼ぶ |
+| `startThumbnailUpdate` | UpdateManager へ委譲。thumbnail の停止は `stopAllTimers`（サイドバー閉）と `cleanup`（ページ離脱）の両方から `UpdateManager.stopThumbnailUpdate()` を呼ぶ |
+| `updateSidebar`（ラッパー） | AutoNextManager へ注入される番組終了時のリスト更新。`updateManager.updateSidebar()` の戻り値が非 null の時だけ、**自分が始めたセッションを自分で閉じる**（旧実装では誰も閉じず、定期チェーンの無条件 finish が偶然の回収役になっていた） |
 | `hideAutoNextModal`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲（`ensure/showModal`・`scheduleNavigation` は AutoNextManager が内部で直接呼ぶため main.js ラッパーは 2026-07-11 整理で削除） |
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |
-| `restartSidebarUpdate` | UpdateManager へ委譲 |
+| `resetSidebarSchedule` | UpdateManager へ委譲（次回取得の期限を置き直すだけ。ループは作らない） |
 | `getOptions()` | `storage.getOptions(defaultOptions)` |
 | `insertSidebar()` ★ | `buildSidebarShell` の結果を `body` 先頭に挿入、`#optionContainer` に設定HTMLを挿入（**body直下へは移動しない＝サイドバー内に保持**）、`elems.sidebar` 等を確定、body を `display:flex` に、`#root` を `flexGrow:1` に |
 | `applyTheme(theme)` ✅新規 | `document.body` に `nicosidebar-light` クラスをトグル（`theme==='light'`）。CSS変数(`--sb-*`)が切り替わる。setup時＋onChangedで適用。`#theme_toggle` クリックで `dark`⇄`light`、`setSidebarTheme` で保存 |

@@ -223,7 +223,27 @@
 - **世代照合は await の「後」にも要る（同日レビューで検出・追加）**: 発火時と再スケジュール時だけ照合しても、**await を跨いだ後の副作用**は止まらない。旧チェーンが `await this.updateSidebar()` から戻ると `getCurrentSessionId()` は「今動いている別の更新」のセッションを返すため、`finishSessionWithMinDuration` が**他人のセッションを finish** してしまう（`LoadingManager` はIDを受け取らず「今のセッション」を無条件に閉じる）。結果、`performManualUpdate` の force 一斉更新（実測15秒級）の最中に `isLoading()` が false へ落ち、更新ボタンの `pointer-events` が戻って**押せるのに無反応**になる。→ await 直後にも `if (gen !== this._sidebarGen) return;` を置く。
 - **閉じたタブでの再起動を塞ぐ（同日レビューで検出・修正）**: 設定は全タブ共有なので `chrome.storage.onChanged` は**サイドバーを閉じている別タブでも発火する**。`main.js` の更新間隔変更ハンドラだけが開閉を見ずに `restartSidebarUpdate()` を呼んでおり、閉じたままリスト取得が回り続けて `stopSidebarUpdate` の効果を打ち消していた（他の起動経路は全て `isOpen` を見ている）。→ `if (needsRestart && appState.sidebar.isOpen)` に。閉じている間は何もしなくてよく、次に開く時の `startSidebarUpdate` が新しい間隔で始める。
 - **注意**: 「タイマーを clearTimeout すれば止まる」は **await を挟むチェーンでは成立しない**。停止フラグか世代トークンを必ず併用し、**await の前後どちらでも照合**すること。
-- 対象: `src/managers/UpdateManager.js`（`startSidebarUpdate`・`stopSidebarUpdate`・`restartSidebarUpdate`）、`src/main.js`（`stopAllTimers`・`cleanup`）。再現/回帰手順は [10-verification-playbook](./10-verification-playbook.md) ブロックC
+
+### AB-2. 上の欠陥を「構造から」消した（常設ループ化・2026-07-29）
+
+**世代トークンは効いていたが、増やした仕組みで元の仕組みを押さえつける形だった**（照合を1か所書き忘れれば穴が開く。実際 AB の時点で await 直後の照合が抜けていた）。そこで **start/stop/restart そのものを廃止**した。
+
+- **新構造**: `UpdateManager` が常設ループを1本だけ持つ。`startSidebarLoop()`（init で1回）／`destroySidebarLoop()`（cleanup で1回）／`resetSidebarSchedule()`（位相リセットのみ、ループは作らない）。
+  - **`_sidebarNextDueAt`（次に取得してよい時刻）が唯一の正**。タイマーは単なる目覚ましで、誰が張り直しても同じ値から遅延を計算するため**食い違いようがない**。
+  - `_sidebarTick` が毎回 `isOpen` → 期限 → `isLoading()` を判定して素通りする。**「閉じたら止める」ではなく「閉じている間はやらない」**。判定に外れても `finally` で必ず次を張るので、ループが死ぬ経路は destroy だけ。
+  - チェーンを作り直さないので**孤児化も二重化も構造上起こりえない**。世代トークン `_sidebarGen` は削除。
+- **前提**: ページのライフサイクルは DOMContentLoaded で1回 setup → beforeunload/pagehide で1回 cleanup のみ。**SPA的な再初期化経路は存在しない**（自動移動も `location.assign` の完全遷移）。だから「ページ滞在中ずっと1本」で足りる。
+- **世代トークンの2つ目の仕事は残るので別途手当てした**: 孤児化防止（＝廃止でよい）とは別に、**await を跨いだ後に他人のローディングセッションを finish しない**という仕事があった。常設ループでも `await this.updateSidebar()` は残るため、これは消えない。→ `LoadingManager.finishSession` / `finishSessionWithMinDuration` に **`expectedSessionId` を追加してIDスコープ化**し、`updateSidebar()` は開始した sessionId を返すようにした。`AppState.finishUpdateSession` は元からID照合を持っており、**`LoadingManager` 側だけが揃っていなかった**。
+- 🔴 **ループのハンドルを `appState.timers` に置いてはいけない**: `stopAllTimers`（閉）と `AppState.cleanup` が外から殺してしまい、**閉じた状態で起動する既定経路でループが即死して復活不能**になる。例外もログも出ない。よって `timers` から `sidebar` キー自体を削除し、`UpdateManager` の内部フィールドで持つ。なお `AppState.setTimer/getTimer/clearTimer` は**未知のキーを無言で捨てる**ので、新キーを足しても気付けない。
+- 🔴 **`stopAllTimers` から sidebar を外す時、`clearTimer('autoNext')` を巻き添えで消さないこと**: 「サイドバーを閉じると自動移動のカウントダウンも止まる」は既存の挙動。消すと**閉じたのにページが勝手に遷移する**。
+- **リファクタ時に自分で作り込んだ回帰（多観点レビューで検出・修正済み）**:
+  1. **周期が `interval + 作業時間` → `interval ちょうど` に詰まっていた**。取得の「前」に期限を進めたため。旧は取得完了後に初めて `setTimeout(interval)` を張る自己連鎖で、実周期は interval ＋（取得時間と最低表示1秒の合成）だった。→ 期限は `finally` で「この回が終わった時点」から数え直す。ただし await 中に `resetSidebarSchedule` が先へ置き直していたら尊重して上書きしない。
+  2. **自動移動が開くセッションの回収役が消えていた**。`main.js` の `updateSidebar()` ラッパー（`AutoNextManager` へ注入）は `startSession` するが finish しない。旧は定期チェーンの**無条件 finish が偶然の回収役**になっていた（ただし届くのは「tick の await 中に発生した場合」だけ）。IDスコープ化でその偶然が消え、最大60秒スピナー固着＋定期取得停止になっていた。→ ラッパー自身が自分のセッションを閉じるよう根本を修正。
+  3. **`destroySidebarLoop` を完全な片道にすると復旧経路を奪う**。`beforeunload`/`pagehide` は**ページが生き残る場合がある**（bfcache 復帰、遷移キャンセル）。旧は停止が可逆で開き直せば復活した。→ `resetSidebarSchedule` から再武装できるようにした。
+  4. `startSidebarLoop` の冪等ガードを `_sidebarLoopTimer !== null` で判定すると、**tick 実行中は null なのですり抜ける**。→ 専用フラグ `_sidebarLoopRunning` で判定。
+- **意図的に変えた点（挙動差として承知）**: 取得中に「閉じる／間隔変更」が割り込んだ場合、旧は世代不一致で await 明けに打ち切っていたため**そのセッションが宙吊りになり、更新ボタンが最大60秒スピナー固着＋タイムアウト警告**が出ていた。新は自分のセッションを必ず閉じるのでどちらも起きない。**旧側の欠陥の解消**。
+- **裏タブ判定は入れていない**: 「サイドバーが開いている間は可視/非表示に関わらず走らせる」は 655df9c の意図的決定（`main.js` に明文あり）。`document.hidden` を見るのは**サムネ側だけ**。ここを混同しないこと（doc/10 の B5 が検証しているのもサムネ側）。
+- 対象: `src/managers/UpdateManager.js`（`startSidebarLoop`・`destroySidebarLoop`・`resetSidebarSchedule`・`_sidebarTick`）、`src/managers/LoadingManager.js`（IDスコープ）、`src/main.js`（`stopAllTimers`・`cleanup`・`updateSidebar` ラッパー）、`src/core/AppState.js`（`timers` から sidebar 削除）。
 
 ---
 
