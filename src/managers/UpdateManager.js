@@ -10,11 +10,11 @@ import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manual
  * 更新処理とタイマーの管理
  *
  * データ取得の役割分担:
- *   - リスト＋詳細: フォロー中ページの公開フロントJSON API 1系統（fetchFollowedProgramsViaPage）で
- *   - 番組詳細（視聴者数/コメント/ライブサムネURL/配信者/会員限定/開始時刻）:
- *     フォロー中ページのスクレイプ1回（fetchFollowedProgramsViaPage）で全番組ぶんを一括取得し
+ *   - リスト＋詳細: フォロー中ページの公開フロントJSON API 1系統（fetchFollowedProgramsViaPage）。
+ *     どの番組を並べるか・並び順(beginAt)・視聴者数/コメント/サムネURL/配信者/会員限定/開始時刻を
+ *     1リクエストでまとめて取得し storage へ upsert する（notifybox は 2026-07-29 に撤去）。
  *     storage へ upsert する。従来の「1番組=1詳細API×N」を1リクエストに置換した効率化。
- *   - サムネ画像の再取得: 別の20秒ループ（startThumbnailUpdate）が保存済みURL＋キャッシュバスターで更新。
+ *   - サムネ画像の再取得: 別の常設ループ（startThumbnailLoop）が保存済みURL＋キャッシュバスターで更新。
  *
  * 詳細はリストと同時（updateSidebar内で並列取得）に storage へ載るため、カード生成時点で
  * 人気度（active-point）が確定している。よって「詳細が揃うまで新着順で待つ」整列確定機構は不要。
@@ -32,12 +32,16 @@ export class UpdateManager {
         // 手動更新がサムネ反映の完了通知を待つ上限（doc/09 項目AC-1）。
         // フィールドに持たせてあるのは検証用に短縮できるようにするため（scripts/verify-sidebar-loop.mjs）。
         this._manualThumbWaitMs = manualThumbWaitMaxMs;
-        // 番組ごとの自己連鎖サムネタイマー（id -> timeoutId）と稼働フラグ。
-        this._thumbTimers = new Map();
-        this._thumbRunning = false;
-        // 実行世代。start/stop のたび ++ し、停止/再開を跨いだ古いサイクルの張り直しを無効化する。
-        this._thumbGen = 0;
-        // _updateOneThumbnailAndWait の安全ガードタイマー（stop時に一括clearするため追跡）。
+        // === サムネ更新の常設ループ ===
+        // サイドバー側と同じモデル。「番組ごとの次に更新してよい時刻」が唯一の正で、
+        // タイマーは1本の目覚ましだけ。旧実装は番組数ぶんの自己連鎖タイマー＋世代トークンで、
+        // stop→即再開の境界で二重化する「ゴースト連鎖」を世代照合で押さえていた（doc/09 項目Z）。
+        // 作り直さない構造にして、その欠陥の発生源ごと消している。
+        this._thumbLoopTimer = null;    // 常に高々1本。clear してから set する
+        this._thumbLoopRunning = false; // 二重開始ガード（tick 実行中は _thumbLoopTimer が null になる）
+        this._thumbLoopStopped = false; // destroyThumbnailLoop で true。開き直しで復帰しうる
+        this._thumbDueAt = new Map();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
+        // _updateOneThumbnailAndWait の安全ガードタイマー（破棄時に一括clearするため追跡）。
         this._pendingGuards = new Set();
 
         // === サイドバー更新の常設ループ ===
@@ -51,35 +55,38 @@ export class UpdateManager {
     }
 
     /**
-     * サムネイル更新を開始する（番組ごとの独立・自己連鎖タイマー方式）。
+     * サムネ更新の常設ループを開始する（setup から1回だけ）。
      *
-     * 昔は「全番組を同時に一斉更新」→ リストがいっぺんに切り替わって気持ち悪かった。
-     * いまは各番組が自分のタイマーを持ち、「更新が完了してから次の20秒を張り直す」自己連鎖にする。
-     * 周期＝20秒＋その回の作業時間（ライブサムネの取得・デコード）になり、作業時間が毎回わずかに違うため、
-     * 読み込み時に一斉に始まっても時間とともに少しずつズレていく（自然ドリフト）。
-     * ※読み込み時の一斉更新は performManualUpdate（updateThumbnail 全件）が担う。ここは以後の更新を受け持つ。
+     * 「全番組を同時に一斉更新」だとリストがいっぺんに切り替わって気持ち悪い、というUX要望が起点。
+     * 番組ごとに「次に更新してよい時刻」を持ち、更新が完了してからその時刻を20秒先へ置き直す。
+     * 周期＝20秒＋その回の作業時間になり、作業時間が毎回わずかに違うため時間とともに位相がばらける
+     * （自然ドリフト）。**タイマーは1本**で、ドリフトは期限の持ち方だけで表現している。
+     * ※読み込み時の一斉更新は performManualUpdate が担う。ここは以後の更新を受け持つ。
      */
-    startThumbnailUpdate() {
-        if (!this._thumbTimers) this._thumbTimers = new Map(); // id -> timeoutId
-        if (this._thumbRunning) { this._syncThumbTimers(); return; } // 二重開始防止（冪等）
-        this._thumbRunning = true;
-        this._thumbGen = (this._thumbGen || 0) + 1; // 世代を進める（停止跨ぎの旧サイクルを無効化）
-        // main.js の二重開始ガード(!getTimer('thumbnail'))と停止処理(stopAllTimers)に乗せるためのセンチネル。
-        this.appState.setTimer('thumbnail', true);
-        this._syncThumbTimers();
+    startThumbnailLoop() {
+        // 二重開始は _thumbLoopTimer では判定できない（tick 実行中は null になるため）。専用フラグで判定する。
+        if (this._thumbLoopRunning) return;
+        this._thumbLoopRunning = true;
+        this._thumbLoopStopped = false;
+        this._refreshThumbSchedule(); // 現在のカードに初回の期限を配り、目覚ましを張る
     }
 
-    /** サムネ更新を停止し、全番組の自己連鎖タイマー・ガードを片付ける（サイドバー閉/クリーンアップ時）。 */
-    stopThumbnailUpdate() {
-        this._thumbRunning = false;
-        this._thumbGen = (this._thumbGen || 0) + 1; // 世代を進める（in-flightサイクルの張り直しを無効化）
-        if (this._thumbTimers) {
-            for (const t of this._thumbTimers.values()) clearTimeout(t);
-            this._thumbTimers.clear();
+    /**
+     * サムネ更新の常設ループを止める（ページ離脱時のみ）。
+     * 「閉じたら止める」には使わないこと（閉じている間は _thumbTick が isOpen を見て素通りする）。
+     * サイドバー側 destroySidebarLoop と同じく完全な片道にはしない（bfcache 復帰等でページが生き残るため）。
+     */
+    destroyThumbnailLoop() {
+        this._thumbLoopStopped = true;
+        this._thumbLoopRunning = false;
+        if (this._thumbLoopTimer !== null) {
+            clearTimeout(this._thumbLoopTimer);
+            this._thumbLoopTimer = null;
         }
+        this._thumbDueAt.clear();
         if (this._pendingGuards) {
-            // 各待機を finish() で解決（ガードclear＋Promise resolve）＝await で宙吊りの中断サイクルの
-            // フレーム（detachedカード参照ごと）を解放する。単に clearTimeout だけだと未resolveでリークする。
+            // 各待機を finish() で解決（ガードclear＋Promise resolve）＝await で宙吊りのフレーム
+            // （detachedカード参照ごと）を解放する。単に clearTimeout だけだと未resolveでリークする。
             for (const e of Array.from(this._pendingGuards)) { try { e.finish(); } catch (_e) { /* noop */ } }
             this._pendingGuards.clear();
         }
@@ -91,25 +98,25 @@ export class UpdateManager {
     }
 
     /**
-     * 現在のカードと自己連鎖タイマーを突き合わせる。
-     * 新しく現れたカードにはサイクルを開始し、消えたカードのタイマーは片付ける。
-     * 初回サイクルは「基準間隔を番組数で割った位置」へ均等配置する（理由は下のコメント）。
+     * 現在のカードと「次に更新してよい時刻」の表を突き合わせる。
+     * 新しく現れたカードには初回の期限を配り、消えたカードの期限は捨てる。
+     * 初回は基準間隔の内側へ均等配置する（理由は下のコメント）。
      * 読み込み直後の一斉更新は performManualUpdate 側が担うため、ここでは間隔を空けてよい。
      * 開始時と updateSidebar の後（新規/削除カードの後）に呼ぶ。
      */
-    _syncThumbTimers() {
-        if (!this._thumbRunning) return;
-        if (!this._thumbTimers) this._thumbTimers = new Map();
+    _syncThumbDueAt() {
+        if (!this._thumbLoopRunning) return;
         const container = document.getElementById('liveProgramContainer');
         if (!container) return;
         const cycleMs = this._currentThumbCycleMs();
         const cards = Array.from(container.children);
         const present = new Set();
+        const now = Date.now();
         cards.forEach((el, i) => {
             const id = el && el.id;
             if (!id) return;
             present.add(id);
-            if (!this._thumbTimers.has(id)) {
+            if (!this._thumbDueAt.has(id)) {
                 // 初回サイクルを周期内へ均等配置する（＝位相をずらす）。
                 // 全カードに同じ delay を張ると初回が完全同時になり、全画像が HTTP/2 の同一接続で
                 // 多重化されて帯域を分け合う＝どの番組も「同じ時間」で完了してしまう。作業時間が
@@ -124,52 +131,104 @@ export class UpdateManager {
                 // 新規カードの dataset.lastSuccessAt/key が未設定（makeProgramElement は src を入れる
                 // だけで、これらを書くのは applySuccess＝プリロード完了後）なので TTL ガードが素通りし、
                 // 同じ <img> に2本目の取得が走る＝減らしたい同時接続を起動直後に増やしてしまう。
-                this._scheduleThumbCycle(id, cycleMs + Math.round((cycleMs * (i + 1)) / cards.length));
+                this._thumbDueAt.set(id, now + cycleMs + Math.round((cycleMs * (i + 1)) / cards.length));
             }
         });
-        // 消えた番組のタイマーを解放（各サイクルでも自然停止するが、ここで即掃除する）
-        for (const id of Array.from(this._thumbTimers.keys())) {
-            if (!present.has(id)) {
-                clearTimeout(this._thumbTimers.get(id));
-                this._thumbTimers.delete(id);
-            }
+        // 消えた番組の期限を解放
+        for (const id of Array.from(this._thumbDueAt.keys())) {
+            if (!present.has(id)) this._thumbDueAt.delete(id);
         }
-    }
-
-    /** 指定番組の次サイクルを delayMs 後に予約する（既存タイマーは必ず clear してから張り＝孤児化防止）。 */
-    _scheduleThumbCycle(id, delayMs) {
-        const prev = this._thumbTimers.get(id);
-        if (prev) clearTimeout(prev); // set による上書きで旧タイマーが孤児化するのを防ぐ
-        const timer = setTimeout(() => this._runThumbCycle(id), delayMs);
-        this._thumbTimers.set(id, timer);
     }
 
     /**
-     * 1番組の1サイクル: （空サムネの若い番組なら詳細APIで追撃 →）その番組のサムネ<img>を更新し、
-     * 画像の読み込み完了を待ってから次の20秒を張り直す（自己連鎖＝作業時間ぶん自然にドリフトする）。
-     * stop/再開を跨いだ古いサイクルは世代(gen)不一致で張り直さない（二重タイマー＝ゴースト連鎖の防止）。
+     * 期限表を更新し、目覚ましを張り直す（ループの外から呼ぶ用）。
+     *
+     * ⚠️ **`_syncThumbDueAt` 自体はタイマーを張らないこと。** tick の中から呼ばれるため、
+     * そこで張ると tick が await している間に発火して**二重実行**になる（実装中に実際に踏んだ）。
+     * 張り直しは tick の finally か、この関数のようにループ外の呼び出し元だけが行う。
      */
-    async _runThumbCycle(id) {
-        if (!this._thumbRunning) return; // 停止中（Mapはstopで掃除済み）→何もしない
-        const gen = this._thumbGen; // このサイクルの世代を捕捉
-        const container = document.getElementById('liveProgramContainer');
-        const card = container ? document.getElementById(id) : null;
-        // カードが消えた/コンテナ外ならこのサイクルを終了（再スケジュールしない）
-        if (!card || !container.contains(card)) { this._thumbTimers.delete(id); return; }
-        // 背景タブは rAF が止まり onSettled が来ない（更新も走らない）。ガード40秒の空回しを避けるため、
-        // 更新は行わず軽く次サイクルだけ張る。前景復帰後の一斉更新は performManualUpdate が担う。
-        if (typeof document !== 'undefined' && document.hidden) {
-            if (this._thumbRunning && gen === this._thumbGen) this._scheduleThumbCycle(id, this._currentThumbCycleMs());
-            return;
-        }
+    _refreshThumbSchedule() {
+        this._syncThumbDueAt();
+        this._scheduleThumbTick(this._thumbNextDelayMs());
+    }
+
+    /** 目覚ましを張り直す。常に「clear してから set」なので同時に2本存在しない。 */
+    _scheduleThumbTick(delayMs) {
+        if (this._thumbLoopStopped || !this._thumbLoopRunning) return;
+        if (this._thumbLoopTimer !== null) clearTimeout(this._thumbLoopTimer);
+        this._thumbLoopTimer = setTimeout(() => { this._thumbTick(); }, Math.max(0, delayMs));
+    }
+
+    /**
+     * 次の起床までの遅延＝「いちばん早い期限」まで。期限を毎回見直すので、
+     * カードが増減しても resetSidebarSchedule 相当の割り込みがあっても結果が食い違わない。
+     * 対象が無ければ1周期後に様子を見に来る（暴走しない）。
+     */
+    _thumbNextDelayMs() {
+        const cycleMs = this._currentThumbCycleMs();
+        if (this._thumbDueAt.size === 0) return cycleMs;
+        const now = Date.now();
+        let min = Infinity;
+        for (const t of this._thumbDueAt.values()) if (t < min) min = t;
+        const remain = min - now;
+        if (!(remain > 0)) return 0;          // 既に期限切れ＝すぐ処理する
+        return Math.min(remain, cycleMs);     // 異常に先の期限でも1周期以内には見に来る
+    }
+
+    /**
+     * ループの1回ぶん。**期限が来ている番組を1件だけ**処理する。
+     *
+     * 1件ずつにしているのは、1番組の画像がハング（最大2×間隔のガード）しても
+     * 他の番組を巻き添えにしないため。まとめて処理すると1件の遅延が全体を止める。
+     * 期限切れが複数あれば次の tick が遅延0で連続して回るので、総処理量は変わらない。
+     *
+     * ドリフト（番組ごとに更新タイミングがばらける）は「**完了した時点＋20秒**」を
+     * 次の期限にすることで表現される。タイマーの本数とは無関係なので、1本のループでも保たれる。
+     */
+    async _thumbTick() {
+        this._thumbLoopTimer = null; // 自分は発火済み
+        if (this._thumbLoopStopped) return;
+        // 先行の tick が await 中なら重ねない。重なると同じ番組を連続更新して暴走する。
+        // （先行側が finally で必ず張り直すので、ここは何もせず戻ってよい）
+        if (this._thumbTickBusy) return;
+        this._thumbTickBusy = true;
+        if (this._thumbLoopStopped) return;
         try {
-            await this._fetchLiveThumbIfPendingYoung(id); // A1統合（空＆若い番組だけ詳細API追撃）
-            await this._updateOneThumbnailAndWait(id);    // <img>更新（読み込み完了まで待つ＝ドリフト源）
-        } catch (_e) { /* 個別失敗は無視して次サイクルへ */ }
-        // 世代一致かつ稼働中のときだけ張り直す。不一致（stop/再開を跨いだ古いサイクル）は Map を触らず終了
-        // ＝新世代が張ったタイマーを消さない。
-        if (this._thumbRunning && gen === this._thumbGen) {
-            this._scheduleThumbCycle(id, this._currentThumbCycleMs());
+            // 閉じている間は更新しない（旧実装の stopThumbnailUpdate 相当。ループは生かしたまま素通り）
+            if (!this.appState.sidebar.isOpen) return;
+            // 背景タブは rAF が止まり onSettled が来ない＝更新しても1枚も反映できない。
+            // ガード40秒の空回しを避けるため素通りする。前景復帰後の一斉更新は performManualUpdate が担う。
+            if (typeof document !== 'undefined' && document.hidden) return;
+
+            this._syncThumbDueAt(); // カードの増減を期限表へ反映
+
+            // 期限が来ているもののうち、いちばん古いものを1件選ぶ
+            const now = Date.now();
+            let target = null, oldest = Infinity;
+            for (const [id, due] of this._thumbDueAt) {
+                if (due <= now && due < oldest) { oldest = due; target = id; }
+            }
+            if (target === null) return;
+
+            const container = document.getElementById('liveProgramContainer');
+            const card = container ? document.getElementById(target) : null;
+            if (!card || !container.contains(card)) { this._thumbDueAt.delete(target); return; }
+
+            try {
+                await this._fetchLiveThumbIfPendingYoung(target); // A1統合（空＆若い番組だけ詳細API追撃）
+                await this._updateOneThumbnailAndWait(target);    // <img>更新（読み込み完了まで待つ＝ドリフト源）
+            } catch (_e) { /* 個別失敗は無視して次へ */ }
+
+            // 「完了した時点」から次の期限を数え直す＝作業時間ぶん自然にドリフトする。
+            // カードが消えていたら期限も消す（復活時は _syncThumbDueAt が配り直す）。
+            if (this._thumbDueAt.has(target)) {
+                this._thumbDueAt.set(target, Date.now() + this._currentThumbCycleMs());
+            }
+        } catch (error) {
+            console.error('[thumbTick] エラー:', error);
+        } finally {
+            this._thumbTickBusy = false;
+            this._scheduleThumbTick(this._thumbNextDelayMs());
         }
     }
 
@@ -333,7 +392,7 @@ export class UpdateManager {
                 await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
             }
             // サムネ<img>の反映は各番組の自己連鎖サイクルに任せる（全件同時更新はしない＝
-            // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbTimers が拾う。
+            // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbDueAt が拾う。
         } catch (error) {
             console.error('[sidebarTick] エラー:', error);
         } finally {
@@ -572,8 +631,8 @@ export class UpdateManager {
             // 番組数更新
             this.updateProgramCount(livePrograms.length);
 
-            // 新規/削除カードに合わせて番組ごとの自己連鎖サムネタイマーを同期する。
-            this._syncThumbTimers();
+            // 新規/削除カードに合わせてサムネ更新の期限表を同期する。
+            this._refreshThumbSchedule();
         } catch (error) {
             console.error('[updateSidebar] エラーが発生しました:', error);
             this.appState.update.isInserting = false;

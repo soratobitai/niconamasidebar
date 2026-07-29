@@ -122,6 +122,8 @@ const setup = async () => {
     // 停止は cleanup（beforeunload/pagehide）の destroySidebarLoop だけ。
     // 開閉による停止/再開はしない（閉じている間は _sidebarTick が isOpen を見て素通りする）。
     updateManager.startSidebarLoop();
+    // サムネ更新の常設ループも同様に1回だけ開始する（番組ごとの期限はループ内で管理）。
+    updateManager.startThumbnailLoop();
 
     // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
     // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
@@ -338,9 +340,9 @@ const cleanup = () => {
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 
-    // 番組ごとの自己連鎖サムネタイマーを停止（appState.timers はセンチネルのみ保持するため、
-    // appState.cleanup だけでは実タイマーが止まらない。閉パス stopAllTimers と対称にする）。
-    if (updateManager) updateManager.stopThumbnailUpdate();
+    // 更新ループ2本を破棄。ページ離脱時だけに呼ぶ唯一の停止経路。
+    // （サイドバー開閉では止めない。閉じている間は各 tick が isOpen を見て素通りする）
+    if (updateManager) updateManager.destroyThumbnailLoop();
     // サイドバー更新の常設ループを破棄（片道）。ページ離脱時だけに呼ぶ唯一の停止経路。
     if (updateManager) updateManager.destroySidebarLoop();
 
@@ -365,16 +367,14 @@ const cleanup = () => {
 //
 // autoNext のクリアは「閉じたら自動移動のカウントダウンも止まる」という既存挙動なので必ず残すこと。
 function stopAllTimers() {
-    if (updateManager) updateManager.stopThumbnailUpdate(); // 番組ごとの自己連鎖サムネタイマーを全停止
-    appState.clearTimer('thumbnail');
     appState.clearTimer('autoNext');
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
 async function handleSidebarOpenStateChange(open) {
     if (open) {
-        // タイマーを先に開始（UIの反応を優先）
-        if (!appState.getTimer('thumbnail')) startThumbnailUpdate();
+        // 更新ループ2本はどちらも常設なので「開始」は不要。閉じている間は各 tick が
+        // isOpen を見て素通りしている。開いた時点から1周期後になるよう位相だけ置き直す。
         // サイドバー更新は常設ループなので「開始」は不要。開いた時点から1周期後になるよう
         // 位相だけ置き直す（旧 startSidebarUpdate が毎回フル1周期を張り直していたのと同じ）。
         resetSidebarSchedule();
@@ -396,13 +396,6 @@ async function handleSidebarOpenStateChange(open) {
         }, 100); // 100ms後にチェック
     } else {
         stopAllTimers();
-    }
-}
-
-// サムネイル更新開始
-const startThumbnailUpdate = () => {
-    if (updateManager) {
-        updateManager.startThumbnailUpdate();
     }
 }
 

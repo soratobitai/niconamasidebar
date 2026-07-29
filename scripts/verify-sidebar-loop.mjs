@@ -124,8 +124,8 @@ async function d3() {
     um.startSidebarLoop()
 
     // 閉パス（main.js の stopAllTimers 相当）が走ってもループが死なないこと。
-    // 現行 stopAllTimers はサムネと autoNext だけを触る。'sidebar' は削除済みキー。
-    appState.clearTimer('thumbnail')
+    // 現行 stopAllTimers が触るのは autoNext だけ。'sidebar'/'thumbnail' は削除済みキー。
+    appState.clearTimer('autoNext')   // 現行 stopAllTimers が触るのはこれだけ
     appState.clearTimer('autoNext')
     appState.clearTimer('sidebar')
 
@@ -254,7 +254,7 @@ async function d6Static() {
         hasVis ? '⚠ 可視判定が混入している。裏タブでリスト取得が止まる＝仕様変更' : '可視判定なし')
 
     // サムネ側にだけ document.hidden があること（取り違えて消していないかの裏返し）
-    const thumbHasHidden = /document\.hidden/.test(um.slice(um.indexOf('_runThumbCycle'), um.indexOf('_runThumbCycle') + 3000))
+    const thumbHasHidden = /document.hidden/.test(um.slice(um.indexOf('async _thumbTick'), um.indexOf('async _thumbTick') + 3000))
     check('D6 サムネ側の document.hidden は残っている（消し違えていない）', thumbHasHidden)
 
     // visibilitychange リスナーが src 全体で0件であること
@@ -333,6 +333,78 @@ async function ac2() {
         keys.includes('updateProgramsInterval') && keys.includes('sidebarTheme'))
 }
 
+/**
+ * R-1: サムネ更新も常設ループ1本になったことの検証。
+ *
+ * 旧実装は番組数ぶんの自己連鎖タイマー＋世代トークン（_thumbGen）で、stop→即再開の境界で
+ * 二重化する「ゴースト連鎖」を世代照合で押さえていた。作り直さない構造にして発生源ごと消した。
+ * ドリフト（番組ごとに更新タイミングがばらける）は「完了時点＋20秒」という期限の持ち方で
+ * 表現されるので、タイマーが1本でも保たれる——それをここで確かめる。
+ */
+async function r1(cards = 4, cycleSec = 2, workMs = 200) {
+    const { appState, um } = build(60, 0)   // サイドバー側は動かさない
+    um.options.updateThumbnailInterval = cycleSec
+    appState.sidebar.isOpen = true
+
+    // DOM を差し替えてカードを模す
+    const container = { id: 'liveProgramContainer', children: [], contains: (el) => container.children.includes(el) }
+    const els = Array.from({ length: cards }, (_, i) => ({ id: String(1000 + i) }))
+    container.children = els
+    globalThis.document.getElementById = (q) =>
+        q === 'liveProgramContainer' ? container : (els.find((e) => e.id === q) || null)
+
+    const marks = []   // [id, 時刻]
+    um._fetchLiveThumbIfPendingYoung = async () => {}
+    um._updateOneThumbnailAndWait = async (id) => { marks.push([id, Date.now()]); await sleep(workMs) }
+
+    um.startThumbnailLoop()
+    um.startThumbnailLoop()      // 連打しても増えないこと
+    const cycleMs = cycleSec * 1000
+    await sleep(cycleMs * 2 + (cycleMs + workMs) * 2 + 600)
+    um.destroyThumbnailLoop()
+
+    check('R-1 全カードが更新される', new Set(marks.map((m) => m[0])).size === cards,
+        `更新された番組 ${new Set(marks.map((m) => m[0])).size} / ${cards}`)
+
+    // 同一番組の周期＝間隔＋作業時間 になっているか（ドリフトの根拠）
+    const per = new Map()
+    for (const [id, t] of marks) { if (!per.has(id)) per.set(id, []); per.get(id).push(t) }
+    const periods = []
+    for (const ts of per.values()) for (let i = 1; i < ts.length; i++) periods.push(ts[i] - ts[i - 1])
+    const expect = cycleMs + workMs
+    const ok = periods.length > 0 && periods.every((p) => Math.abs(p - expect) < 400)
+    check('R-1 同一番組の周期が「間隔＋作業時間」（ドリフトが保たれている）', ok,
+        periods.length ? `実測 ${periods.map((p) => (p / 1000).toFixed(2) + 's').join(', ')}（期待 ${(expect / 1000).toFixed(2)}s）` : '2周目まで到達せず')
+
+    // 位相がばらけているか（同時に更新されていない）
+    const firsts = [...per.values()].map((ts) => ts[0]).sort((a, b) => a - b)
+    const spread = firsts.length > 1 ? firsts[firsts.length - 1] - firsts[0] : 0
+    check('R-1 初回の位相が分散している（一斉更新になっていない）', spread > cycleMs * 0.4,
+        `先頭と末尾の差 ${(spread / 1000).toFixed(2)}s（1周期 ${cycleSec}s）`)
+
+    // 閉じている間は動かないこと
+    marks.length = 0
+    appState.sidebar.isOpen = false
+    um.startThumbnailLoop()
+    await sleep(cycleMs * 2 + 500)
+    um.destroyThumbnailLoop()
+    check('R-1 サイドバーを閉じている間はサムネを更新しない', marks.length === 0, `更新 ${marks.length} 回`)
+
+    // 閉→開で復活すること
+    appState.sidebar.isOpen = true
+    um.startThumbnailLoop()
+    await sleep(cycleMs * 2 + workMs + 600)
+    um.destroyThumbnailLoop()
+    check('R-1 開き直すとサムネ更新が復活する', marks.length >= 1, `復活後 ${marks.length} 回`)
+
+    // 世代トークンが消えていること（構造の保証）
+    const { readFileSync } = await import('fs')
+    const src = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
+    check('R-1 サムネ側の世代トークン・番組ごとタイマーが消えている',
+        !/_thumbGen|_thumbTimers|_scheduleThumbCycle/.test(src),
+        '_thumbGen / _thumbTimers / _scheduleThumbCycle の残存なし')
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -354,6 +426,8 @@ if (real) {
     console.log('')
     await ac1()
     await ac2()
+    console.log('')
+    await r1()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
