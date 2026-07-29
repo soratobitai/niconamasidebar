@@ -776,6 +776,105 @@ async function crossTab() {
         mainSrc.includes('changes.sidebarTheme') && mainSrc.includes('applyTheme('))
 }
 
+/**
+ * 既存カードのその場更新が「後から埋まった情報」を反映するか（doc/09 項目AK）。
+ *
+ * フォローAPIは channel の programProvider を返さないので、配信者名/アイコンは
+ * fillMissingDetails が詳細APIで後から埋める。生成時サムネが空の番組も同様。
+ * その場更新がそれらを反映しないと、カードは生成時のまま固定される。
+ */
+async function inPlaceUpdate() {
+    const sb = await import(`${SRC}render/sidebar.js`)
+
+    // 最小限の要素モック（querySelector / insertBefore / 属性）
+    const mkEl = (cls) => {
+        const el = {
+            className: cls || '', children: [], attrs: {}, style: {},
+            textContent: '', title: '', _src: '', _href: '',
+            get src() { return this.attrs.src || '' }, set src(v) { this.attrs.src = v },
+            get href() { return this.attrs.href || '' }, set href(v) { this.attrs.href = v },
+            getAttribute(k) { return this.attrs[k] ?? null },
+            setAttribute(k, v) { this.attrs[k] = String(v) },
+            appendChild(c) { this.children.push(c); c.parentElement = this; return c },
+            insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : 0; this.children.splice(i < 0 ? 0 : i, 0, c); c.parentElement = this; return c },
+            get firstChild() { return this.children[0] || null },
+            querySelector(sel) {
+                const want = sel.replace(/^\./, '').split(' ').pop().replace(/^\./, '')
+                const walk = (n) => {
+                    for (const c of n.children) {
+                        if ((c.className || '').split(' ').includes(want) || c.tag === want) return c
+                        const r = walk(c); if (r) return r
+                    }
+                    return null
+                }
+                return walk(this)
+            },
+        }
+        return el
+    }
+    globalThis.document.createElement = (tag) => { const e = mkEl(''); e.tag = tag; return e }
+
+    // 生成時: 配信者名もアイコンもサムネURLも無い状態のカードを手で組む
+    const card = mkEl('program_container')
+    const community = mkEl('community')
+    const name = mkEl('community_name'); name.textContent = 'コミュニティ名不明'
+    community.appendChild(name)
+    card.appendChild(community)
+    const thumb = mkEl('program_thumbnail')
+    const a = mkEl(''); a.tag = 'a'
+    const img = mkEl('program_thumbnail_img'); img.setAttribute('data-src', '')
+    a.appendChild(img); thumb.appendChild(a); card.appendChild(thumb)
+    const title = mkEl('program_title'); title.textContent = '旧タイトル'; card.appendChild(title)
+
+    // 後から詳細が埋まった programInfo を反映
+    sb.applyProgramInfoToCard(card, {
+        id: 'lv555', title: '新タイトル', providerType: 'channel',
+        contentOwner: { id: 'ch99', name: '公式チャンネル', icon: 'https://x/icon.png' },
+        thumbnailUrl: 'https://dlive.nicovideo.jp/s.jpg',
+        viewers: 1, comments: 1, onAirTime: { beginAt: new Date().toISOString() },
+    })
+
+    check('AK 後から埋まった配信者名が反映される', name.textContent === '公式チャンネル',
+        `"${name.textContent}"`)
+    const iconImg = community.children.find((c) => c.tag === 'img' || (c.children[0] && c.children[0].tag === 'img'))
+    check('AK 生成時に無かったアイコンが後から挿入される', !!iconImg,
+        iconImg ? '挿入された' : 'community の子: ' + community.children.map((c) => c.tag || c.className).join(','))
+    check('AK アイコンは配信者名より前に入る', community.children[0] !== name)
+    check('AK 空だった data-src が実URLに更新される',
+        img.getAttribute('data-src') === 'https://dlive.nicovideo.jp/s.jpg',
+        `data-src="${img.getAttribute('data-src')}"`)
+    check('AK タイトルも更新される', title.textContent === '新タイトル')
+    check('AK 表示中の画像(src)は触らない（差し替えはサムネ更新ループの仕事）',
+        !img.attrs.src, `src="${img.attrs.src || ''}"`)
+
+    // 2回目の適用で重複挿入しないこと
+    const before = community.children.length
+    sb.applyProgramInfoToCard(card, {
+        id: 'lv555', title: '新タイトル', providerType: 'channel',
+        contentOwner: { id: 'ch99', name: '公式チャンネル', icon: 'https://x/icon.png' },
+        thumbnailUrl: 'https://dlive.nicovideo.jp/s.jpg',
+        viewers: 1, comments: 1, onAirTime: { beginAt: new Date().toISOString() },
+    })
+    check('AK 2回適用してもアイコンが増殖しない', community.children.length === before,
+        `${before} → ${community.children.length}`)
+
+    // 導出が1箇所に集約されているか（同じ事実を2箇所に置かない）
+    const { readFileSync } = await import('fs')
+    const src = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    // ⚠️ コメント行は数えない。説明文が同じ語を含むため、素朴に数えると自分の説明を
+    //    違反として数えてしまう（R-5 でも同じ罠を踏んだ）。
+    const codeOnly = src.split('\n')
+        .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) })
+        .join('\n')
+    const derivations = (codeOnly.match(/コミュニティ名不明/g) || []).length
+    check('AK 配信者名のフォールバックが deriveCardFields に集約されている', derivations === 2,
+        `コード中の出現 ${derivations} 箇所（deriveCardFields の2分岐のみが正常）`)
+    const applyFn = src.slice(src.indexOf('export function applyProgramInfoToCard'),
+        src.indexOf('export function makeProgramElement'))
+    check('AK その場更新も deriveCardFields を通す（導出を二重に書かない）',
+        /deriveCardFields\(/.test(applyFn))
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -813,6 +912,8 @@ if (real) {
     await flip()
     console.log('')
     await crossTab()
+    console.log('')
+    await inPlaceUpdate()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

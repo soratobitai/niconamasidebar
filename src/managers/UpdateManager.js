@@ -1,7 +1,7 @@
 import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
@@ -684,14 +684,14 @@ export class UpdateManager {
                     const existing = existingMap.get(id);
 
                     if (existing) {
-                        // その場更新（属性・タイトル・リンク先）。カードのDOMは移動しない。
+                        // その場更新。**カードのDOMは移動も作り直しもしない。**
                         existing.setAttribute('active-point', String(calculateActivePoint(data)));
                         // 新着順（放送開始が新しい順）での位置。sorting.js の newest がこれを昇順に並べる。
                         existing.setAttribute('data-api-index', String(apiIndex));
-                        const titleEl = existing.querySelector('.program_title');
-                        if (titleEl) titleEl.textContent = data.title || 'タイトル不明';
-                        const linkEl = existing.querySelector('.program_thumbnail a');
-                        if (linkEl) linkEl.href = `${watchPageBaseUrl}${data.id}`;
+                        // タイトル・リンク先・配信者名・アイコン・静止サムネの戻り先(data-src)を反映。
+                        // 旧実装はタイトルとリンク先しか更新しておらず、fillMissingDetails が後から
+                        // 埋めた配信者名/アイコンと、空だった data-src が固定されたままだった（doc/09 項目AK）。
+                        applyProgramInfoToCard(existing, data);
                         orderedIds.push(id);
                     } else {
                         // DOM要素を直接作成（構造変更）

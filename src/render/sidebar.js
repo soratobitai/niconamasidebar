@@ -48,7 +48,17 @@ export function resolveLiveThumbnailBaseUrl(info) {
  * @param {string} loadingImageURL - ローディング画像のURL
  * @returns {HTMLElement|null} 作成されたDOM要素、またはnull
  */
-export function makeProgramElement(data, loadingImageURL) {
+/**
+ * programInfo からカードに出す各フィールドを導出する。
+ *
+ * **カードの新規生成（makeProgramElement）と、既存カードのその場更新（applyProgramInfoToCard）で
+ * 必ずこの1つを使うこと。** 2箇所に同じ導出を書くと、片方だけ直して食い違う
+ * （doc/02 設計原則 1-b「同じ事実を2箇所に置かない」）。
+ *
+ * @param {object} data programInfo
+ * @returns {object|null} 導出済みフィールド。data が不正なら null
+ */
+export function deriveCardFields(data) {
     if (!data || !data.id) return null
 
     // notifybox のリスト項目は id が数値（lvなし）で来ることがあるため文字列化してから扱う。
@@ -98,6 +108,86 @@ export function makeProgramElement(data, loadingImageURL) {
             if (match) user_page_url = `https://www.nicovideo.jp/user/${match[1]}`
         }
     }
+
+    return { id, user_page_url, community_name, thumbnail_link_url, thumbnail_url, icon_url, live_thumbnail_url, title }
+}
+
+/**
+ * 既存カードに programInfo を反映する（**カードは作り直さない**）。
+ *
+ * 旧実装は updateSidebar が active-point / data-api-index / タイトル / リンク先の4つしか
+ * その場更新していなかった。そのため次の2つが後から埋まらなかった（doc/09 項目AK）:
+ *   - 配信者名・アイコン: フォローAPIは channel の programProvider を返さないので、
+ *     `fillMissingDetails` が詳細APIで後から埋める。カードは生成時のまま「コミュニティ名不明」で固定。
+ *   - `img[data-src]`（静止サムネの戻り先）: 生成時に `thumbnailUrl` が空だと空文字のまま固定され、
+ *     読み込み失敗時に `restoreStaticThumbIfLoading` が `if (!dataSrc) return` で塞がる＝
+ *     一度 loading.gif に落ちるとページ再読込まで戻らない。
+ *
+ * ⚠️ **カードを作り直して解決しないこと。** 要素の再利用が img.dataset の TTL/バックオフ・
+ * error リスナ・動くサムネのオーバーレイ・ホバー状態を同時に生かしている（doc/09 R-2 調査）。
+ *
+ * @param {HTMLElement} card `.program_container`
+ * @param {object} data programInfo
+ */
+export function applyProgramInfoToCard(card, data) {
+    if (!card) return
+    const f = deriveCardFields(data)
+    if (!f) return
+
+    const titleEl = card.querySelector('.program_title')
+    if (titleEl && titleEl.textContent !== f.title) titleEl.textContent = f.title
+
+    const linkEl = card.querySelector('.program_thumbnail a')
+    if (linkEl && f.thumbnail_link_url && linkEl.getAttribute('href') !== f.thumbnail_link_url) {
+        linkEl.href = f.thumbnail_link_url
+    }
+
+    // 静止サムネの戻り先。**空→実URL に変わった時に更新されないと復帰経路が塞がったままになる。**
+    // img.src（今表示している画像）は触らない。差し替えはサムネ更新ループの仕事。
+    const img = card.querySelector('.program_thumbnail_img')
+    if (img && f.thumbnail_url && img.getAttribute('data-src') !== f.thumbnail_url) {
+        img.setAttribute('data-src', f.thumbnail_url)
+    }
+
+    const communityDiv = card.querySelector('.community')
+    if (!communityDiv) return
+
+    const nameEl = communityDiv.querySelector('.community_name')
+    if (nameEl && f.community_name && nameEl.textContent !== f.community_name) {
+        nameEl.textContent = f.community_name
+        nameEl.title = f.community_name
+    }
+
+    // アイコンは**生成時に空だと要素そのものが作られない**ので、後から挿入する必要がある。
+    const existingImg = communityDiv.querySelector('img')
+    const existingLink = existingImg && existingImg.parentElement !== communityDiv ? existingImg.parentElement : null
+    if (f.icon_url) {
+        if (existingImg) {
+            if (existingImg.getAttribute('src') !== f.icon_url) existingImg.src = f.icon_url
+            if (existingLink && f.user_page_url && existingLink.getAttribute('href') !== f.user_page_url) {
+                existingLink.href = f.user_page_url
+            }
+        } else {
+            const iconImg = document.createElement('img')
+            iconImg.src = f.icon_url
+            let node = iconImg
+            if (f.user_page_url) {
+                const iconLink = document.createElement('a')
+                iconLink.href = f.user_page_url
+                iconLink.target = '_blank'
+                iconLink.appendChild(iconImg)
+                node = iconLink
+            }
+            communityDiv.insertBefore(node, communityDiv.firstChild) // 名前より前＝生成時と同じ並び
+        }
+    }
+}
+
+export function makeProgramElement(data, loadingImageURL) {
+    const f = deriveCardFields(data)
+    if (!f) return null
+    const { id, user_page_url, community_name, thumbnail_link_url, icon_url, title } = f
+    let { thumbnail_url, live_thumbnail_url } = f
 
     if (!live_thumbnail_url) {
         live_thumbnail_url = thumbnail_url || loadingImageURL

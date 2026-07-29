@@ -627,3 +627,40 @@ if (changes.programsSort) options.programsSort = changes.programsSort.newValue; 
 > 値の代入だけで済んでいるのは `autoOpen`（次回ロードで効く）だけである。
 
 `verify:loop` に3項目（並び順・更新間隔・テーマの追随）を追加した。
+
+## ✅ AK. 既存カードのその場更新が「後から埋まる情報」を反映していなかった（2026-07-29）
+
+`updateSidebar` のその場更新が **active-point / data-api-index / タイトル / リンク先の4つしか**反映していなかった。カードは作り直さない設計（要素の再利用が TTL・エラーリスナ・動くサムネのオーバーレイ・ホバー状態を同時に生かしている）なので、**ここで反映しない情報は生成時のまま固定される**。
+
+### 実害1: 配信者名・アイコンが「コミュニティ名不明」で固定される
+
+フォローAPIは channel の `programProvider` を返さない。`fillMissingDetails` が詳細APIで**後から**埋めるが、その場更新が見ていないためカードに出ない。
+
+**アイコンは生成時に空だと要素そのものが作られない**（`makeProgramElement` は `if (icon_url)` で分岐）ので、後から**挿入**する必要がある。
+
+### 実害2: 一度 loading.gif に落ちるとページ再読込まで戻らない
+
+`img[data-src]`（静止サムネの戻り先）は `makeProgramElement` が生成時に1回書くだけ。生成時に `thumbnailUrl` が空だと空文字で固定され、`restoreStaticThumbIfLoading` の
+
+```js
+const dataSrc = img.getAttribute('data-src')
+if (!dataSrc) return          // ← ここで塞がる
+```
+
+で復帰経路が閉じる。後から `fillMissingDetails` が `thumbnailUrl` を埋めても届かない。
+
+### 修正
+
+導出ロジックを **`deriveCardFields(data)` に集約**し、生成（`makeProgramElement`）とその場更新（`applyProgramInfoToCard`）の**両方から呼ぶ**。
+
+> ⚠️ **2箇所に同じ導出を書かないこと**（doc/02 設計原則 1-b）。片方だけ直して食い違う。
+> 検証で「`コミュニティ名不明` のコード中の出現が2箇所（`deriveCardFields` の2分岐）だけ」を担保している。
+
+`applyProgramInfoToCard` が更新するのは タイトル / リンク先 / 配信者名 / アイコン（無ければ挿入）/ `data-src` の5つ。
+
+> ⚠️ **`img.src`（今表示している画像）は触らない。** 差し替えはサムネ更新ループの仕事であり、
+> ここで書くと TTL・バックオフ・`thumbLive` の状態と食い違う。
+
+### 副作用（意図したもの）
+
+`data-src` が更新されるようになったことで、これまで `if (!dataSrc) return` で走らなかった **`restoreStaticThumbIfLoading` のバックオフ経路が走り始める**。これは修正の目的そのもの（一度落ちた静止サムネが復帰できるようになる）。
