@@ -668,9 +668,13 @@ async function r4() {
 async function r5() {
     const { readFileSync } = await import('fs')
     const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
-    const body = (name, len = 2500) => {
-        const i = um.indexOf(name)
-        return i < 0 ? '' : um.slice(i, i + len)
+    // ⚠️ 固定幅で切らないこと。コメントを足しただけで判定対象が窓から押し出され、
+    //    「実装は正しいのにNG」になる（この罠を4回踏んだ）。終端は実際の内容で指定する。
+    const body = (start, endAnchor) => {
+        const i = um.indexOf(start)
+        if (i < 0) return ''
+        const j = endAnchor ? um.indexOf(endAnchor, i) : -1
+        return um.slice(i, j > i ? j : i + 2500)
     }
 
     // --- 生の判定が直書きされていないか（述語の定義を除く） ---
@@ -688,9 +692,9 @@ async function r5() {
         rawCount(/appState\.isLoading\(\)/g) === 1, `${rawCount(/appState\.isLoading\(\)/g)} 箇所`)
 
     // --- 表のとおりか ---
-    const sidebarTick = body('async _sidebarTick()')
-    const thumbTick = body('async _thumbTick()')
-    const updThumb = body('updateThumbnail(force, onComplete', 1400)
+    const sidebarTick = body('async _sidebarTick()', 'async _thumbTick()')
+    const thumbTick = body('async _thumbTick()', '_fetchLiveThumbIfPendingYoung(id)')
+    const updThumb = body('updateThumbnail(force, onComplete', 'updateThumbnailsFromStorage(programInfos')
 
     check('R-5 リスト更新は「閉じているか」を見る', /_isSidebarOpen\(\)/.test(sidebarTick))
     check('R-5 リスト更新は「別の更新中か」を見る', /_isUpdateInFlight\(\)/.test(sidebarTick))
@@ -875,6 +879,41 @@ async function inPlaceUpdate() {
         /deriveCardFields\(/.test(applyFn))
 }
 
+/**
+ * 描画が同期のままであることの保証（doc/09 項目AL）。
+ *
+ * isInserting=true 〜 false の区間に await が入ると、updateThumbnail の早期returnが
+ * 到達可能になる。その分岐は onComplete を呼んで「完了した」と嘘をつくため、
+ * サムネが「更新0回・エラー0件」で静かに止まる。区間を機械で守る。
+ */
+async function syncRender() {
+    const { readFileSync } = await import('fs')
+    const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
+
+    const s = um.indexOf('this.appState.update.isInserting = true;')
+    const e = um.indexOf('this.appState.update.isInserting = false;', s)
+    const block = s >= 0 && e > s ? um.slice(s, e) : ''
+    check('AL DOM差し替え区間を特定できる', block.length > 100, `${block.length} 文字`)
+
+    // コメント行は除く（⚠️の説明文に await などの語が入るため）
+    const code = block.split('\n')
+        .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) })
+        .join('\n')
+    check('AL 差し替え区間に await が無い', !/\bawait\b/.test(code),
+        '入れると updateThumbnail の早期returnが到達可能になり、サムネが無言で止まる')
+    check('AL 差し替え区間に直接の rAF / setTimeout / .then が無い',
+        !/requestAnimationFrame|setTimeout|\.then\(/.test(code),
+        'flipReorder の内部で使うのは可（reorderFn は同期）。ここに直接書くのは不可')
+
+    // 到達したら黙って通さず警告すること
+    const guard = um.slice(um.indexOf('if (this.appState.update.isInserting) {'),
+        um.indexOf('if (this.appState.update.isInserting) {') + 500)
+    check('AL 到達したら警告を出す（黙って「完了」と嘘をつかない）',
+        /console\.warn/.test(guard),
+        'この分岐は onComplete を呼ぶので、無警告だと原因に辿り着けない')
+    check('AL 警告は1回だけ（毎サイクル出して埋もれさせない）', /_warnedInserting/.test(guard))
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -914,6 +953,8 @@ if (real) {
     await crossTab()
     console.log('')
     await inPlaceUpdate()
+    console.log('')
+    await syncRender()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

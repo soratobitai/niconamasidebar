@@ -797,8 +797,21 @@ export class UpdateManager {
      * サムネイルを更新
      */
     updateThumbnail(force, onComplete, onlyIds, onSettled) {
-        // DOM操作中は実行しない
+        // DOM差し替え中は実行しない。
+        //
+        // 🔴 **ここは本来到達しない**（doc/09 項目AL）。差し替え（`isInserting=true` 〜 `false`）は
+        // await を1つも挟まない同期区間なので、単一スレッドである以上、別のコールバックが
+        // その途中で `isInserting=true` を観測することはできない。
+        //
+        // 到達したなら「描画のどこかが非同期化された」合図である。そして**この分岐は
+        // onComplete/onSettled を呼んで「完了した」と嘘をつく**ため、呼び出し元の `_thumbTick` は
+        // 成功したものとして次の期限を +20秒 進める＝**サムネが「更新0回・エラー0件」のまま
+        // 静かに止まる**。原因に辿り着けない類の壊れ方なので、1回だけ警告を出す。
         if (this.appState.update.isInserting) {
+            if (!this._warnedInserting) {
+                this._warnedInserting = true;
+                console.warn('[サムネ反映] DOM差し替え中に呼ばれました。描画が非同期化された可能性があります（doc/09 項目AL）。このままだとサムネ更新が無言で止まります。');
+            }
             if (onComplete) onComplete();
             if (onSettled) onSettled();
             return;
