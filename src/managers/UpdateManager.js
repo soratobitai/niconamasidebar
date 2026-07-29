@@ -148,6 +148,14 @@ export class UpdateManager {
      * 張り直しは tick の finally か、この関数のようにループ外の呼び出し元だけが行う。
      */
     _refreshThumbSchedule() {
+        // 破棄済みでもページが生き残っていればここで再武装する。
+        // cleanup は beforeunload / pagehide で走るが、どちらも**ページが破棄されずに生き残る**
+        // 場合がある（bfcache 復帰・遷移のキャンセル）。サイドバー側 resetSidebarSchedule と
+        // 同じく、再武装の入口を必ず1つ用意しておく（doc/09 項目AB-2 の復旧経路と同じ理由）。
+        if (this._thumbLoopStopped) {
+            this._thumbLoopStopped = false;
+            this._thumbLoopRunning = true;
+        }
         this._syncThumbDueAt();
         this._scheduleThumbTick(this._thumbNextDelayMs());
     }

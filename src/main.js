@@ -33,10 +33,6 @@ let defaultOptions = {
 let options = {};
 let elems = {};
 
-// AppStateに設定とDOM要素の参照を保存
-appState.config.defaultOptions = defaultOptions;
-appState.config.options = options;
-appState.elements = elems;
 
 // 各Managerのインスタンス化（setupの後で初期化される）
 let loadingManager = null;
@@ -85,7 +81,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // オプションを取得
     options = await getOptions();
-    appState.config.options = options;
     appState.sidebar.width = options.sidebarWidth || sidebarMinWidth;
     appState.sidebar.isOpen = !!options.isOpenSidebar;
 
@@ -367,7 +362,12 @@ const cleanup = () => {
 //
 // autoNext のクリアは「閉じたら自動移動のカウントダウンも止まる」という既存挙動なので必ず残すこと。
 function stopAllTimers() {
-    appState.clearTimer('autoNext');
+    // 自動移動のカウントダウンを取り消す。
+    // ⚠️ `appState.clearTimer('autoNext')` だけで済ませてはいけない。タイマーは止まっても
+    // `autoNext.scheduled` が true のまま残り、以後そのページで自動移動が二度と動かなくなる
+    // （doc/09 項目AF）。タイマー・フラグ・モーダルを3点セットで戻す必要がある。
+    if (autoNextManager) autoNextManager.cancelScheduledNavigation();
+    else appState.clearTimer('autoNext'); // Manager 未生成（初期化前）でも最低限タイマーは止める
 }
 
 // 開いたときに即時更新しつつ、各タイマーを開始
@@ -375,9 +375,9 @@ async function handleSidebarOpenStateChange(open) {
     if (open) {
         // 更新ループ2本はどちらも常設なので「開始」は不要。閉じている間は各 tick が
         // isOpen を見て素通りしている。開いた時点から1周期後になるよう位相だけ置き直す。
-        // サイドバー更新は常設ループなので「開始」は不要。開いた時点から1周期後になるよう
-        // 位相だけ置き直す（旧 startSidebarUpdate が毎回フル1周期を張り直していたのと同じ）。
         resetSidebarSchedule();
+        // サムネ側も同様に期限表を置き直す（cleanup 後に生き残ったページではここで再武装される）
+        if (updateManager) updateManager._refreshThumbSchedule();
 
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）。
         // requestAnimationFrameで次のフレームに延期し、非アクティブタブ向けに setTimeout フォールバックも用意する。

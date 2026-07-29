@@ -8,8 +8,64 @@
 
 キーとなる設計上の約束事:
 
-1. **状態は `AppState` に集約する** — タイマー・オブザーバー・可視状態・ローディング・自動移動状態・
-   設定・DOM参照をすべて1インスタンスで持ち、`cleanup()` 一発で後始末できる。
+1. **状態は「寿命」と「読み手の広さ」で置き場所を決める**（2026-07-29 改訂）
+
+   > 旧原則は「状態は `AppState` に集約する」だった。しかし**実測すると実装の約1/3にしか当てはまっておらず**、
+   > 2026-07-29 の改修では更新ループ2本を**意図的に `AppState` の外へ出した**（下記の理由）。
+   > 原則と実装が逆を向いた状態は、読む人に誤った判断をさせるため書き直した。
+
+   **1箱に集めること自体は目的ではない。** 次の3分類に従うこと。
+
+   | 置き場所 | 条件 |
+   |---|---|
+   | **`AppState`** | モジュールをまたいで読まれる **かつ** ページ離脱時に確実に解放したいもの |
+   | **Manager / モジュールが自前で持つ** | その所有者しか読まないもの、および**外部から一括破棄されると復旧できないループ制御** |
+   | **DOM / dataset** | カード1枚ごとに紐づき、カードと寿命を共にするもの |
+
+   **`AppState` に置く場合**（例: `sidebar.isOpen`・`loading.updateSession`・`timers.autoNext`・
+   `observers.resize*`・`handlers.onResize`・`autoNext.liveStatusStopper`）
+
+   `AppState` の一括API（`clearAllTimers` / `disconnectAllObservers` / `cleanup`）は
+   **「名前を舐めて無条件に殺す」意味論しか持たない**。載せてよいのは
+   **外部から一方的に殺されても壊れないもの**だけである。
+
+   > 🔴 **同じ事象に属する状態は、全部載せるか全部載せないかのどちらかにする。**
+   > 一部だけ載せると「タイマーだけ殺されてフラグとDOMが取り残される」破綻になる。
+   > 実例: 閉じた時の `stopAllTimers` が `timers.autoNext` だけを殺し、`autoNext.scheduled` と
+   > 自動移動モーダルが残って**そのページで自動移動が二度と動かなくなっていた**（doc/09 項目AF）。
+
+   **Manager が自前で持つ場合**（例: `UpdateManager._sidebarLoop*` / `_thumbLoop*` /
+   `_thumbDueAt` / `_sidebarNextDueAt`、`LoadingManager.sessionTimeoutTimer`、
+   `animatedThumbnail` の `buffers` / `enabled`）
+
+   更新ループ2本を `AppState.timers` に載せると `stopAllTimers` / `cleanup` から外部に殺され、
+   **閉じた瞬間に復活不能**になる。だから外に出した。その代わり所有者には義務がある。
+
+   - **`destroy()` 相当を公開し、`main.js` の `cleanup()` から明示的に呼ぶ**
+     （「`AppState` に無いから解放されない」を許さないための対価）
+   - **破棄を片道にしない。** `beforeunload` / `pagehide` は**ページが生き残る場合がある**
+     （bfcache 復帰・遷移キャンセル）。再武装できる入口を必ず1つ用意する
+   - **「停止中」は期限やカウンタごと止める。** 素通りさせるだけだと期限が過去のまま残り、
+     遅延0の再スケジュールが連鎖する（実例: 閉じている間 `_thumbTick` が素通り →
+     `_thumbNextDelayMs()` が 0 を返し続け、**実測 2秒で180回**の暴走。doc/09 項目AE）
+
+   **DOM / dataset に置く場合**（例: `active-point`・`data-api-index`・
+   `img.dataset.key / lastSuccessAt / errors / nextTryAt / thumbLive`）
+
+   **同じ事実を JS 側にも持たないこと。** 二重管理になった瞬間、カードの作り直しで片方だけ失われる。
+
+1-b. **同じ事実を2箇所に置かない。置くなら「正」を1つ明示する。**
+
+   現状 `sidebarWidth` は3箇所、開閉状態は3箇所、更新セッションは3箇所
+   （`AppState` / `LoadingManager` / 更新ボタンの `loading` クラス）に複製されている。
+   新たに複製を増やすなら、**正がどれで、他はどの経路でいつ追従するのか**をここに書くこと。
+   書けないなら複製してはならない。
+
+1-c. **`AppState` に「とりあえず置く」を禁止する。読み手が現れるまでフィールドを作らない。**
+
+   `update.isUpdating` / `update.pending` / `observers.thumbnail` / `config.*` / `elements` は
+   **読み手ゼロのまま残り**、「更新中フラグはどこにあるのか」を探す時間を恒常的に奪っていた
+   （2026-07-29 に削除）。
 2. **`main.js` は結線役に徹する** — イベント配線と初期化順序の制御が主。
    実処理は Manager / services / render / ui に委譲し、`main.js` 内の関数の多くは「委譲ラッパー」。
 3. **I/O は services 層に閉じ込める** — fetch は `services/api.js`、永続化は `services/storage.js`、

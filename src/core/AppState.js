@@ -17,7 +17,6 @@ export class AppState {
         this.observers = {
             resizeWatchPage: null,
             resizeSidebar: null,
-            thumbnail: null, // thumbnailObserver は外部で管理されるため、参照のみ
         };
 
         // サイドバー状態
@@ -28,8 +27,6 @@ export class AppState {
 
         // 更新状態
         this.update = {
-            isUpdating: false,
-            pending: false,
             // DOM差し替え中フラグ。サムネ更新がDOM操作に割り込まないためのガード。
             isInserting: false,
         };
@@ -53,12 +50,6 @@ export class AppState {
             reloadBtn: null,
         };
 
-        // 設定とDOM要素（参照のみ保持）
-        this.config = {
-            options: {},
-            defaultOptions: {},
-        };
-        this.elements = {};
     }
 
     /**

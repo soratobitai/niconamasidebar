@@ -159,6 +159,24 @@ export class AutoNextManager {
     }
 
     /**
+     * 進行中のカウントダウンを取り消して、次の番組終了をまた検知できる状態へ戻す。
+     *
+     * ⚠️ **タイマーだけを止めてはいけない**（doc/09 項目AF）。
+     * `appState.timers.autoNext` を外から `clearTimer` するだけだと、カウントダウンは止まるが
+     * `autoNext.scheduled` が true のまま残り、モーダルも出しっぱなしになる。
+     * `scheduled` は `observeProgramEnd` のコールバック先頭で多重進入を弾く条件に使われているため、
+     * **以後そのページでは自動移動が二度と動かない**（リセットするのは stopWatcher だけで、
+     * 閉パスからは呼ばれない）。タイマー・フラグ・モーダルは必ず3点セットで戻すこと。
+     */
+    cancelScheduledNavigation() {
+        this._clearAutoNextTimer();
+        this.hideModal();
+        this.appState.autoNext.scheduled = false;
+        this.appState.autoNext.selectingNext = false;
+        this.appState.autoNext.canceled = false;
+    }
+
+    /**
      * 自動次番組への遷移をスケジュール
      * @param {string} nextHref - 遷移先URL
      * @param {Object} preview - プレビュー情報

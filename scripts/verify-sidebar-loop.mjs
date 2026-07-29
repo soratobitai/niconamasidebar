@@ -532,6 +532,80 @@ async function r1NoSpin() {
     check('R-1 破棄→開き直しでサムネ更新が復活する', updated >= 1, `復活後 ${updated} 回`)
 }
 
+/**
+ * R-7: 状態の置き場所の原則が守られていることの検証（doc/02 設計原則①）。
+ *
+ * - AppState に読み手ゼロのフィールドを増やしていないか
+ * - 更新ループ2本が AppState.timers に載っていないか（載せると外部から殺される）
+ * - 自動移動の状態が「タイマーだけ殺される」形になっていないか
+ */
+async function r7() {
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const all = ['main.js', 'core/AppState.js', 'managers/UpdateManager.js', 'managers/LoadingManager.js',
+        'managers/AutoNextManager.js', 'render/sidebar.js', 'render/animatedThumbnail.js',
+        'ui/sidebarControl.js', 'ui/layout.js', 'handlers/optionsHandler.js', 'services/storage.js',
+        'services/status.js', 'services/api.js', 'services/followPageSource.js'].map(rd).join('\n')
+
+    // --- AppState.timers に更新ループを載せていないか ---
+    const st = rd('core/AppState.js')
+    const timersBlock = st.slice(st.indexOf('this.timers = {'), st.indexOf('};', st.indexOf('this.timers = {')))
+    check('R-7 AppState.timers に更新ループ2本が載っていない',
+        !/sidebar|thumbnail/.test(timersBlock),
+        'timers のキー: ' + (timersBlock.match(/^\s*(\w+):/gm) || []).map((x) => x.trim()).join(' '))
+
+    // --- 死にフィールドを復活させていないか ---
+    const dead = ['isUpdating', 'pending:', 'config = {', 'this.elements =']
+    const revived = dead.filter((d) => st.includes(d))
+    check('R-7 削除した読み手ゼロのフィールドが復活していない', revived.length === 0,
+        revived.length ? '復活: ' + revived.join(', ') : 'なし')
+
+    // --- AppState の全フィールドに読み手がいるか ---
+    // ⚠️ observers / timers / handlers は setObserver('resizeSidebar', ...) のように
+    // **文字列キー**でしか触られない。ドットアクセスだけを数えると誤検出する。
+    // （裏を返すと、これらは文字列を打ち間違えても AppState 側の `name in this.xxx` で
+    //   無言で捨てられ、エラーにならない。増やす時は注意すること）
+    // 判定は「宣言行以外にどこかで参照されているか」。
+    // 触られ方は3通りあり、どれも正しい:
+    //   1. 外からドットで   （例: appState.sidebar.isOpen）
+    //   2. 外から文字列キーで（例: setObserver('resizeSidebar', ...)。読むのは cleanup の keys ループ）
+    //   3. AppState.js 内のメソッド経由のみ（例: loading.updateSession は isLoading() などに閉じている）
+    // したがって「宣言行を除いて1回も現れない」ものだけを死にフィールドとする。
+    const declLine = (f) => new RegExp('^\\s+' + f + ':', 'm')
+    const fields = [...st.matchAll(/^\s{12}(\w+):/gm)].map((m) => m[1])
+    const unread = fields.filter((f) => {
+        const inSelf = st.split('\n').filter((l) => l.includes(f) && !declLine(f).test(l)).length
+        const dot = (all.match(new RegExp('\\.' + f + '\\b', 'g')) || []).length
+        const str = (all.match(new RegExp("['\"]" + f + "['\"]", 'g')) || []).length
+        return inSelf === 0 && dot === 0 && str === 0
+    })
+    check('R-7 AppState に宣言だけの死にフィールドが無い', unread.length === 0,
+        unread.length ? '疑わしい: ' + unread.join(', ') : `${fields.length} フィールドすべてに参照あり`)
+
+    // --- 更新ループの破棄が cleanup から呼ばれているか ---
+    const mainSrc = rd('main.js')
+    check('R-7 更新ループ2本の破棄が cleanup から呼ばれている',
+        /destroySidebarLoop\(\)/.test(mainSrc) && /destroyThumbnailLoop\(\)/.test(mainSrc))
+
+    // --- 破棄が片道になっていないか（再武装の入口があるか） ---
+    const um = rd('managers/UpdateManager.js')
+    const resetFn = um.slice(um.indexOf('resetSidebarSchedule() {'), um.indexOf('resetSidebarSchedule() {') + 600)
+    const refreshFn = um.slice(um.indexOf('_refreshThumbSchedule() {'), um.indexOf('_refreshThumbSchedule() {') + 600)
+    check('R-7 サイドバーループに再武装の入口がある', /_sidebarLoopStopped/.test(resetFn))
+    check('R-7 サムネループにも再武装の入口がある', /_thumbLoopStopped/.test(refreshFn))
+
+    // --- 自動移動を「タイマーだけ」殺していないか ---
+    const stopAll = mainSrc.slice(mainSrc.indexOf('function stopAllTimers()'), mainSrc.indexOf('function stopAllTimers()') + 800)
+    check('R-7 閉パスが自動移動をタイマーだけ殺していない（フラグとモーダルも戻す）',
+        /cancelScheduledNavigation\(\)/.test(stopAll),
+        'タイマーだけ clearTimer すると scheduled が残り、以後そのページで自動移動が動かなくなる')
+
+    const anm = rd('managers/AutoNextManager.js')
+    const cancelFn = anm.slice(anm.indexOf('cancelScheduledNavigation() {'), anm.indexOf('cancelScheduledNavigation() {') + 500)
+    check('R-7 取り消しがタイマー・フラグ・モーダルの3点を戻す',
+        /_clearAutoNextTimer\(\)/.test(cancelFn) && /hideModal\(\)/.test(cancelFn) && /scheduled = false/.test(cancelFn))
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -559,6 +633,8 @@ if (real) {
     await r3merge()
     console.log('')
     await r1NoSpin()
+    console.log('')
+    await r7()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
