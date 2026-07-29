@@ -9,6 +9,7 @@
     "build": "vite build",
     "postbuild": "node scripts/remove-maps.js",
     "preview": "vite preview",
+    "verify:loop": "node scripts/verify-sidebar-loop.mjs",
     "clean": "rimraf dist",
     "clean:maps": "node scripts/remove-maps.js",
     "watch": "vite build --watch"
