@@ -1,44 +1,11 @@
-import { notifyboxAPI, liveInfoAPI } from '../config/constants.js'
+import { liveInfoAPI } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 
-/**
- * Fetch followed live programs list.
- * @param {number} [rows=100] - Max number of rows to request.
- * @returns {Promise<false|Array<any>>} notifybox_content array on success, or false on failure.
- */
-// In-flight dedupe for list API
-const liveProgramsInFlight = new Map()
-
-export async function fetchLivePrograms(rows = 100) {
-    const key = String(rows)
-    if (liveProgramsInFlight.has(key)) {
-        return liveProgramsInFlight.get(key)
-    }
-
-    const p = (async () => {
-        try {
-            let response = await fetch(`${notifyboxAPI}?rows=${rows}`, { credentials: 'include' })
-            response = await response.json()
-            if (response.meta?.status !== 200 || !response.data || !response.data.notifybox_content) {
-                handleError(
-                    new Error(`API returned status ${response.meta?.status || 'unknown'}`),
-                    { api: 'fetchLivePrograms', rows, response: response.meta }
-                )
-                return false
-            }
-            return response.data.notifybox_content
-        } catch (error) {
-            handleError(error, { api: 'fetchLivePrograms', rows })
-            return false
-        } finally {
-            // clear in-flight regardless of outcome
-            liveProgramsInFlight.delete(key)
-        }
-    })()
-
-    liveProgramsInFlight.set(key, p)
-    return p
-}
+// 2026-07-29: notifybox API（リスト取得）は撤去した。
+// フォローAPI（services/followPageSource.js）が同じ番組集合に加えて beginAt まで返すため、
+// リストも詳細も1系統で足りる（実測: 集合・並びとも完全一致）。加えて notifybox は
+// rows=100 でページングが無く、カードをそちらから作っていたため表示が100件で頭打ちだった。
+// 経緯は doc/09 項目AD。
 
 /**
  * Fetch detailed program info by live id (number without "lv").

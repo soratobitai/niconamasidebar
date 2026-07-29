@@ -451,7 +451,7 @@ chrome.storage.onChanged.addListener(function (changes) {
         const newIsOpen = changes.isOpenSidebar.newValue;
         // 自タブのトグル操作は同期的に反映＆ handleSidebarOpenStateChange 呼び済み。
         // storage.onChanged は書いた自タブでも発火するため、未反映（＝他タブ由来）の時だけ処理して
-        // 開閉あたり getLivePrograms が2回走る二重発火を防ぐ。
+        // 開閉あたり リスト取得 が2回走る二重発火を防ぐ。
         if (appState.sidebar.isOpen !== newIsOpen) {
             options.isOpenSidebar = newIsOpen;
             appState.sidebar.isOpen = newIsOpen;

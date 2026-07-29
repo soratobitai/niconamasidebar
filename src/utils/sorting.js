@@ -12,9 +12,9 @@ export function sortPrograms(container, sortType) {
         // 人気順：active-point属性でソート
         sortProgramsByActivePoint(container);
     } else {
-        // 新着順：notifybox API は「放送開始が新しい順」で番組を返すため、その並び順(data-api-index 昇順)を保つ。
-        // ※lv番号(ID)は予約/作成順で放送開始順とズレる（予約枠など）ため、番号ではなくAPIの並びを採用する。
-        // data-api-index が無いカードは末尾側へ回し、その中では lv番号降順でフォールバック。
+        // 新着順：data-api-index 昇順を保つ。この属性は updateSidebar が「beginAt 降順」で
+        // 並べた位置を書き込んだもの（＝放送開始が新しい順）。
+        // ※lv番号(ID)は予約/作成順で放送開始順とズレる（予約枠など）ため、番号では並べない。
         const programs = Array.from(container.children);
         programs.sort((a, b) => {
             const ia = a.dataset.apiIndex !== undefined ? (parseInt(a.dataset.apiIndex, 10) || 0) : Infinity;

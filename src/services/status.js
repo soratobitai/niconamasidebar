@@ -14,7 +14,7 @@ function detectProgramEndGuide() {
 // 終了ガイド表示中に onEnded を再発火してよい最小間隔（ミリ秒）。
 // onEnded → updateSidebar は replaceChildren で body 配下に大量の変異を撒くため、
 // スロットルが無いと「変異 → onEnded → updateSidebar → さらに変異」の自己駆動ループになり
-// getLivePrograms API が暴走する（1分に数十回）。ガイド表示中はこの間隔でのみ再チェックする。
+// リスト取得(フォローAPI) が暴走する（1分に数十回）。ガイド表示中はこの間隔でのみ再チェックする。
 const PROGRAM_END_RECHECK_MIN_INTERVAL_MS = 20000
 
 // MutationObserver + 軽量ポーリングで終了を検出

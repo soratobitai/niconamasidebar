@@ -1,4 +1,4 @@
-import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
+import { fetchProgramInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
@@ -10,7 +10,7 @@ import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manual
  * 更新処理とタイマーの管理
  *
  * データ取得の役割分担:
- *   - リスト（どの番組を並べるか）: notifybox API（fetchLivePrograms）
+ *   - リスト＋詳細: フォロー中ページの公開フロントJSON API 1系統（fetchFollowedProgramsViaPage）で
  *   - 番組詳細（視聴者数/コメント/ライブサムネURL/配信者/会員限定/開始時刻）:
  *     フォロー中ページのスクレイプ1回（fetchFollowedProgramsViaPage）で全番組ぶんを一括取得し
  *     storage へ upsert する。従来の「1番組=1詳細API×N」を1リクエストに置換した効率化。
@@ -402,25 +402,36 @@ export class UpdateManager {
     }
 
     /**
-     * ライブ番組リスト（並び順の元）を notifybox から取得する。
-     * 返り値は notifybox_content 配列（{id: bare番号, title} 等）、失敗時は false。
-     * ログイン/取得状態に応じて #api_error の表示を切り替える。
-     */
-    async getLivePrograms(rows = 100) {
-        const result = await fetchLivePrograms(rows);
-        if (this.elems.apiErrorElement) {
-            this.elems.apiErrorElement.style.display = result ? 'none' : 'block';
-        }
-        return result;
-    }
-
-    /**
      * フォロー中ページを1回スクレイプして、放送中フォロー番組の詳細を storage へ一括 upsert する。
      * 失敗（未ログイン/構造変化/通信エラー）時は何もしない＝その周は詳細が古いまま（フォールバックしない）。
      */
     async _refreshDetailsViaScrape() {
         const scraped = await fetchFollowedProgramsViaPage(); // 内部programInfo形の配列 or null
         if (scraped) upsertProgramInfos(scraped); // 全件フルレコードで書き戻し（_fetchedAt付与）
+        return scraped; // null = 取得失敗（未ログイン/仕様変更/通信エラー）。[] = 放送中0件
+    }
+
+    /**
+     * 新着順の基準となる並び（放送開始が新しい順）を作る。
+     *
+     * 旧実装は notifybox API の返却順をそのまま使っていた。lv番号は予約/作成順で採番され
+     * 放送開始順とズレる（予約枠など）ため、番号で並べると新着順が崩れるからである。
+     * フォローAPIは全番組の beginAt（放送開始時刻）を返すので、**番号ではなく時刻**で
+     * 直接並べれば同じ順序が得られる（2026-07-29 実測: notifybox の並びと完全一致）。
+     *
+     * 同時刻は lv番号の降順で決定的にする（安定ソート＝毎周期で順序が揺れない）。
+     */
+    _orderByBeginAtDesc(programs) {
+        const beginMs = (p) => {
+            const t = p && p.onAirTime && p.onAirTime.beginAt ? Date.parse(p.onAirTime.beginAt) : NaN;
+            return Number.isFinite(t) ? t : -Infinity; // 時刻不明は末尾へ
+        };
+        const lvNum = (p) => parseInt(String((p && p.id) || '').replace(/^lv/, ''), 10) || 0;
+        return [...programs].sort((a, b) => {
+            const d = beginMs(b) - beginMs(a);
+            if (d !== 0) return d;
+            return lvNum(b) - lvNum(a);
+        });
     }
 
     /**
@@ -444,14 +455,22 @@ export class UpdateManager {
             : this.loadingManager.startSession();
 
         try {
-            // リスト（notifybox）と 詳細（スクレイプ→storage upsert）を並列取得。
-            // 詳細を先に storage へ載せてからカードを組むので、初回から人気度が確定する。
-            const [livePrograms] = await Promise.all([
-                this.getLivePrograms(100),
-                this._refreshDetailsViaScrape(),
-            ]);
+            // 取得はフォローAPI 1系統のみ。リストも詳細もここから取れる。
+            //
+            // 旧実装は notifybox（リスト）とフォローAPI（詳細）を並列取得し、notifybox の返却順を
+            // 新着順の基準に使っていた。しかし notifybox が返すのは id と title 程度で、
+            // フォローAPI は同じ番組集合に加えて beginAt まで返す（2026-07-29 実測: 集合・並びとも完全一致）。
+            // さらに notifybox は rows=100 でページングが無く、カードはそちらを元に作っていたため
+            // **放送中が100件を超えると101件目以降が表示されない**（詳細だけ取得して捨てていた）。
+            // 一本化でリクエストが毎周期2本→1本になり、突合ロジックと表示上限の両方が解消する。
+            const fetched = await this._refreshDetailsViaScrape();
 
-            if (!livePrograms) {
+            // ログイン誘導の表示切替。null=取得失敗のみをエラー扱いにする（0件は成功）。
+            if (this.elems.apiErrorElement) {
+                this.elems.apiErrorElement.style.display = fetched ? 'none' : 'block';
+            }
+
+            if (!fetched) {
                 // 失敗時は既存の番組数を維持
                 const container = document.getElementById('liveProgramContainer');
                 if (container && container.children.length > 0) {
@@ -461,13 +480,13 @@ export class UpdateManager {
             }
 
             // 空配列のときは既存DOMを維持
-            if (Array.isArray(livePrograms) && livePrograms.length === 0) {
+            if (fetched.length === 0) {
                 this.updateProgramCount(0);
                 return sessionId;
             }
 
-            // スクレイプ upsert 後の storage を読む（詳細が反映済み）
-            const programInfos = getProgramInfosFromStorage();
+            // 新着順の基準（放送開始が新しい順）。data-api-index はこの並びの位置を表す。
+            const livePrograms = this._orderByBeginAtDesc(fetched);
 
             const container = document.getElementById('liveProgramContainer');
             if (!container) return sessionId;
@@ -483,32 +502,30 @@ export class UpdateManager {
             let structuralChange = false;
             const orderedIds = [];         // livePrograms の並び順（API順）で有効な id
             const newElements = new Map(); // id -> 新規作成した要素
-            livePrograms.forEach((program, apiIndex) => {
-                if (!program || !program.id) return;
+            livePrograms.forEach((data, apiIndex) => {
+                if (!data || !data.id) return;
 
                 // 1番組のカード生成で失敗しても、その番組だけスキップしてリスト全体は描画する。
-                // （詳細がスクレイプに無い番組＝ページング超過やスクレイプ失敗時に不正データを踏んでも
-                //   サイドバー全体が空にならないようにする防御）
+                // （不正データを踏んでもサイドバー全体が空にならないようにする防御）
                 try {
-                    const id = String(program.id);
-                    const data = programInfos.find((info) => info.id === `lv${program.id}`);
+                    // カードのDOM id は「lv を外した数値」。サムネ更新側が `lv${card.id}` で
+                    // 引き直す前提になっているので、この規約は変えないこと。
+                    const id = String(data.id).replace(/^lv/, '');
                     const existing = existingMap.get(id);
 
                     if (existing) {
                         // その場更新（属性・タイトル・リンク先）。カードのDOMは移動しない。
-                        existing.setAttribute('active-point', String(calculateActivePoint(data || program)));
-                        // 新着順は API順（notifybox は放送開始が新しい順で返す）を保つためのインデックス
+                        existing.setAttribute('active-point', String(calculateActivePoint(data)));
+                        // 新着順（放送開始が新しい順）での位置。sorting.js の newest がこれを昇順に並べる。
                         existing.setAttribute('data-api-index', String(apiIndex));
                         const titleEl = existing.querySelector('.program_title');
-                        if (titleEl) titleEl.textContent = (data && data.title) || (program && program.title) || 'タイトル不明';
+                        if (titleEl) titleEl.textContent = data.title || 'タイトル不明';
                         const linkEl = existing.querySelector('.program_thumbnail a');
-                        if (linkEl) linkEl.href = data && data.id ? `${watchPageBaseUrl}${data.id}` : `${watchPageBaseUrl}lv${program.id}`;
+                        if (linkEl) linkEl.href = `${watchPageBaseUrl}${data.id}`;
                         orderedIds.push(id);
                     } else {
                         // DOM要素を直接作成（構造変更）
-                        const element = data
-                            ? makeProgramElement(data, this.loadingImageURL)
-                            : makeProgramElement(program, this.loadingImageURL);
+                        const element = makeProgramElement(data, this.loadingImageURL);
                         if (element) {
                             element.setAttribute('data-api-index', String(apiIndex));
                             newElements.set(id, element);
@@ -517,7 +534,7 @@ export class UpdateManager {
                         }
                     }
                 } catch (e) {
-                    console.warn('[updateSidebar] カード生成に失敗（この番組をスキップ）:', program && program.id, e);
+                    console.warn('[updateSidebar] カード生成に失敗（この番組をスキップ）:', data && data.id, e);
                 }
             });
 

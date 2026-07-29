@@ -98,18 +98,20 @@ await bs.send('Extensions.loadUnpacked', { path: EXT.replace(/\/$/, '') })
 log('拡張を読み込みました（CDP Extensions.loadUnpacked）')
 
 const ctx = browser.contexts()[0]
-let hits = []      // notifybox の到達時刻
+let hits = []           // リスト取得（フォローAPI）の到達時刻
+let notifyboxHits = 0   // 撤去済みの notifybox が呼ばれた回数（0でなければ退行）
 let slow = false   // 応答を遅らせるか（D7用）
 
 const page = await ctx.newPage()
 await page.route('**/*', async (route) => {
     const u = route.request().url()
     if (u.includes('notifybox.content.php')) {
-        hits.push(Date.now())
-        if (slow) await sleep(6000)
+        // 2026-07-29 に撤去済み。呼ばれたら退行なので記録して不合格にする。
+        notifyboxHits++
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(NOTIFYBOX) })
     }
     if (u.includes('/front/api/pages/follow/v1/programs')) {
+        hits.push(Date.now())   // リスト取得の回数＝フォローAPIの呼び出し回数
         if (slow) await sleep(6000)
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FOLLOW) })
     }
@@ -150,7 +152,7 @@ check('D3 前提: 再読み込み後はサイドバーが閉じている', !(awa
 hits = []
 log('   閉じたまま 90秒 観測中…')
 await page.waitForTimeout(90000)
-check('D3-a 閉じている間はリスト取得をしない', hits.length === 0, `notifybox ${hits.length} 回`)
+check('D3-a 閉じている間はリスト取得をしない', hits.length === 0, `リスト取得 ${hits.length} 回`)
 
 await page.click('#sidebar_button')          // 開く
 await page.waitForTimeout(3000)
@@ -181,6 +183,9 @@ check('D7-a 取得中に閉→開してもスピナーが固着しない',
     (await page.locator('#reload_programs.loading').count()) === 0)
 const pe = await page.evaluate(() => document.getElementById('reload_programs')?.style.pointerEvents ?? '')
 check('D7-b 更新ボタンが押せる状態に戻る', pe !== 'none', `pointerEvents="${pe}"`)
+
+check('撤去済みの notifybox API が一度も呼ばれない（R-3の退行検出）', notifyboxHits === 0,
+    `notifybox 呼び出し ${notifyboxHits} 回`)
 
 await browser.close()
 try { child.kill() } catch (_) {}
