@@ -192,13 +192,18 @@ export class UpdateManager {
         // （先行側が finally で必ず張り直すので、ここは何もせず戻ってよい）
         if (this._thumbTickBusy) return;
         this._thumbTickBusy = true;
-        if (this._thumbLoopStopped) return;
+
+        // 何もできずに素通りした回か。素通り時は「いちばん早い期限まで」で再スケジュールしてはいけない。
+        // 閉じている間・背景タブの間も _thumbDueAt の期限は過去のまま残るので、
+        // _thumbNextDelayMs() が 0 を返し **0ms 再スケジュールの無限ループ**になる（実測: 2秒で180回）。
+        // 更新回数だけを数えるテストでは検出できない（更新は0回のまま暴走する）。
+        let idled = false;
         try {
             // 閉じている間は更新しない（旧実装の stopThumbnailUpdate 相当。ループは生かしたまま素通り）
-            if (!this.appState.sidebar.isOpen) return;
+            if (!this.appState.sidebar.isOpen) { idled = true; return; }
             // 背景タブは rAF が止まり onSettled が来ない＝更新しても1枚も反映できない。
             // ガード40秒の空回しを避けるため素通りする。前景復帰後の一斉更新は performManualUpdate が担う。
-            if (typeof document !== 'undefined' && document.hidden) return;
+            if (typeof document !== 'undefined' && document.hidden) { idled = true; return; }
 
             this._syncThumbDueAt(); // カードの増減を期限表へ反映
 
@@ -212,6 +217,7 @@ export class UpdateManager {
 
             const container = document.getElementById('liveProgramContainer');
             const card = container ? document.getElementById(target) : null;
+            if (!container) { idled = true; return; } // コンテナごと消えている＝様子見
             if (!card || !container.contains(card)) { this._thumbDueAt.delete(target); return; }
 
             try {
@@ -228,7 +234,9 @@ export class UpdateManager {
             console.error('[thumbTick] エラー:', error);
         } finally {
             this._thumbTickBusy = false;
-            this._scheduleThumbTick(this._thumbNextDelayMs());
+            // 素通りした回は必ず1周期空ける（上の idled のコメント参照）。
+            // 処理できた回だけ「いちばん早い期限まで」で詰める＝期限切れが複数あれば連続で捌ける。
+            this._scheduleThumbTick(idled ? this._currentThumbCycleMs() : this._thumbNextDelayMs());
         }
     }
 

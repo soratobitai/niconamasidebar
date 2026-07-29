@@ -468,6 +468,70 @@ async function r3merge() {
         `${o1} / ${o2}`)
 }
 
+/**
+ * R-1 追加: 素通りする回でも tick が暴走しないこと。
+ *
+ * サイドバーを閉じている／背景タブの間、_thumbDueAt の期限は過去のまま残る。
+ * 素通り後の再スケジュールを「いちばん早い期限まで」で計算すると 0ms になり、
+ * **0ms 再スケジュールの無限ループ**になってCPUを焼く（R-1 実装時に実際に作り込んだ）。
+ * 更新回数だけを数えるテストでは検出できない（更新は0回のまま暴走する）ので、
+ * ここでは tick の発火回数そのものを数える。
+ */
+async function r1NoSpin() {
+    const cycleSec = 1
+    const { appState, um } = build(60, 0)
+    um.options.updateThumbnailInterval = cycleSec
+    appState.sidebar.isOpen = true
+
+    const container = { id: 'liveProgramContainer', children: [], contains: (el) => container.children.includes(el) }
+    const els = [{ id: '2001' }, { id: '2002' }]
+    container.children = els
+    globalThis.document.getElementById = (q) =>
+        q === 'liveProgramContainer' ? container : (els.find((e) => e.id === q) || null)
+
+    let ticks = 0
+    um._fetchLiveThumbIfPendingYoung = async () => {}
+    um._updateOneThumbnailAndWait = async () => { await sleep(50) }
+    const orig = um._thumbTick.bind(um)
+    um._thumbTick = async () => { ticks++; return orig() }
+
+    um.startThumbnailLoop()
+    await sleep(cycleSec * 1000 * 2.5)      // 期限が過ぎるまで動かす
+
+    // --- 閉じている間 ---
+    appState.sidebar.isOpen = false
+    ticks = 0
+    await sleep(2000)
+    const closedTicks = ticks
+    check('R-1 閉じている間に tick が暴走しない', closedTicks <= 6,
+        `2秒間の tick 発火 ${closedTicks} 回（1秒周期なので数回が正常。数百〜数千なら0ms暴走）`)
+
+    // --- 背景タブの間 ---
+    appState.sidebar.isOpen = true
+    globalThis.document.hidden = true
+    await sleep(cycleSec * 1000 * 1.5)
+    ticks = 0
+    await sleep(2000)
+    const hiddenTicks = ticks
+    globalThis.document.hidden = false
+    check('R-1 背景タブの間に tick が暴走しない', hiddenTicks <= 6,
+        `2秒間の tick 発火 ${hiddenTicks} 回`)
+
+    // --- 停止判定で busy が立ちっぱなしにならないか ---
+    um.destroyThumbnailLoop()
+    check('R-1 破棄後に再入ガードが立ちっぱなしにならない', um._thumbTickBusy !== true,
+        `_thumbTickBusy=${um._thumbTickBusy}`)
+
+    // 破棄後に開き直して復活できること（busy が残っていると復活しない）
+    appState.sidebar.isOpen = true
+    let updated = 0
+    um._updateOneThumbnailAndWait = async () => { updated++; await sleep(20) }
+    um.startThumbnailLoop()
+    await sleep(cycleSec * 1000 * 2.5 + 300)
+    um.destroyThumbnailLoop()
+    check('R-1 破棄→開き直しでサムネ更新が復活する', updated >= 1, `復活後 ${updated} 回`)
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -493,6 +557,8 @@ if (real) {
     await r1()
     console.log('')
     await r3merge()
+    console.log('')
+    await r1NoSpin()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)
