@@ -100,7 +100,7 @@
 - `api.js` は `fetchLivePrograms`（notifyboxリスト）と `fetchProgramInfo`（詳細・サムネ補完専用）の**両方**を export する。
 
 ## 🟢 O. 「開いた瞬間の描画」と「定期タイマー初回」は別物
-- `startSidebarUpdate` の初回実行も `updateProgramsInterval`（既定120秒）後。開いた直後の即描画は `performManualUpdate` が担う（初回ロード・更新ボタン・タブ復帰・再オープン共通）。二層構造を混同しないこと。
+- 常設ループ（`_sidebarTick`）が実際に取得するのも、開いてから `updateProgramsInterval`（既定120秒）後が最初。開いた直後の即描画は `performManualUpdate` が担う（初回ロード・更新ボタン・タブ復帰・再オープン共通）。二層構造を混同しないこと。
 
 ## 🟢 P. `options` オブジェクトの参照整合（現状はOK）
 - 現状は `onChanged` が in-place 更新するため整合が取れている。**以後 `options` を再代入しないこと**（Manager 側の参照とズレる）。
@@ -190,7 +190,7 @@
 - **🔴 初回位相の均等配置（2026-07-26 追加・これが無いとドリフトが原理的に成立しない）**: `_syncThumbTimers` が全カードに**同じ** delay を張ると初回が完全同時になる。全画像が HTTP/2 の同一接続で多重化されて帯域を分け合うため、**どの番組も「同じ時間」で完了**してしまい、作業時間が共通化＝全番組が同じ瞬間に次を張り直す。「作業時間ぶん自然にドリフトする」という前提が崩れ、一斉状態がそのまま自己維持される（実測: 16番組で作業15.1秒→周期35.1秒。20秒間隔が守れずコマを取りこぼす）。→ 初回を `cycleMs + cycleMs*(i+1)/cards.length` で周期内へ均等配置。**必ず基準間隔ぶん「後ろへ」倒してから分散させること**（前倒しすると `performManualUpdate` の force 一斉更新の最中に発火し、新規カードは `dataset.lastSuccessAt/key` 未設定で TTL ガードが素通り＝同じ `<img>` に2本目の取得が走る）。
 - **実測による確認（2026-07-26 / 14番組・4分連続観測）**: 自己周期 **20.0秒**（20.0〜20.1）、位相の散らばり **18.1〜18.5秒**、1サイクルの作業時間 **0.0秒**、2×間隔ガード到達 **0/153回**、**同時に走ったサイクルは常に1本**。同一画像を fetch / crossOrigin付き`<img>` / 素の`<img>` / `fetchPriority=high` で同時取得する比較も4ラウンドとも全て 0.0秒で同着＝**`<img>` の優先度スターベーションは原因ではない**。キャッシュバスター有無の比較も 0.1秒/0.0秒（7KB・HTTP 200）で、**`?cache=` もサーバも回線も無罪**。→ 詳細は [10-verification-playbook](./10-verification-playbook.md)
 - **既知の据え置き（低・別件）**:
-  - 起動1秒の間に `startSidebarUpdate` が2回呼ばれる（実測 0.6秒・1.6秒）のは**仕様どおり**。開いた瞬間にタイマー開始 → `performManualUpdate` 完了後に `restartSidebarUpdate` で周期を数え直す（`UpdateManager.js` の「定期タイマーをリセット」）。1本目は未発火のうちに clearTimeout されるので無害。ただし**この再起動が「チェーンが await 中」に重なると項目 AB の二重化を踏む**。
+  - 起動直後に位相リセットが2回走る（実測 0.6秒・1.6秒）のは**仕様どおり**。開いた瞬間の `resetSidebarSchedule` → `performManualUpdate` 完了後にもう一度、という設計。※この実測は世代トークン時代（`startSidebarUpdate` が2回呼ばれていた）のもの。**常設ループ化後は「期限を置き直すだけ」でタイマーの生成/破棄が起きないため、ここが二重化の入り口になることはもう無い**（項目 AB-2）。
   - A1が入れたライブスクショURLが、フォローAPIの listingThumbnail 非反映番組では各スクレイプ周期で一旦空へ戻り得る（`fillMissingDetails` が同周期で再補完するので実質一過性）。恒久化したければ upsertProgramInfos で「既存が有効ライブスクショ かつ 新規が空」なら保持マージする。
   - per-program 更新は毎サイクル localStorage 全体を `JSON.parse` する（旧一斉のN倍）。絶対コストは小（~数ms/秒）で据え置き。必要なら単一番組の高速updateパスで最適化可。
 - 対象: `src/managers/UpdateManager.js`・`src/render/sidebar.js`（`updateThumbnailsFromStorage` の `onSettled`）・`src/services/storage.js`（`patchProgramThumbnail`）・`src/main.js`（`cleanup`/`stopAllTimers`）・`src/config/constants.js`（`newProgramFastPollMs`）。→ [03-module-reference](./03-module-reference.md)・[04-data-flow](./04-data-flow.md)
@@ -246,16 +246,16 @@
 - 対象: `src/managers/UpdateManager.js`（`startSidebarLoop`・`destroySidebarLoop`・`resetSidebarSchedule`・`_sidebarTick`）、`src/managers/LoadingManager.js`（IDスコープ）、`src/main.js`（`stopAllTimers`・`cleanup`・`updateSidebar` ラッパー）、`src/core/AppState.js`（`timers` から sidebar 削除）。
 - **検証は自動化済み**: `npm run verify:loop`（`scripts/verify-sidebar-loop.mjs`）。実コードをそのまま Node で動かすので実機・ログイン不要。手作業が残るのは doc/10 の D6・D7 だけ。
 
-## ⏸ AC. 常設ループ化の調査中に見つけた既存バグ（今回は意図的に未着手・2026-07-29）
+## ✅ AC. 常設ループ化の調査中に見つけた既存バグ（同日中に修正済み・2026-07-29）
 
-AB-2 の事前調査で**このリファクタとは無関係の既存バグ**が見つかった。切り分けを濁らせないため今回は触らないと判断した。**いずれも実在をコードで確認済み**（推測ではない）。
+AB-2 の事前調査で**このリファクタとは無関係の既存バグ**が見つかった。切り分けを濁らせないため一度は据え置いたが、常設ループ化を push して切り分けが済んだ後、同日中に AC-1／AC-2 を修正した。**回帰テストは `npm run verify:loop` に入れてある。**
 
-1. 🔴 **裏タブで `performManualUpdate` が無期限にハングする**
+1. ✅ **裏タブで `performManualUpdate` が無期限にハングする** → **修正済み**
    `await new Promise(resolve => this.updateThumbnail(true, resolve))`（`UpdateManager.js`）は `updateThumbnailsFromStorage` の **rAF 駆動**（`render/sidebar.js` の `requestAnimationFrame(tick)` → `checkComplete` → `onComplete`）に完全依存している。裏タブでは rAF が来ないので `onComplete` が永久に呼ばれない。
    到達経路は実在する: (a) バックグラウンドで watch ページを開いた時（`main.js` の起動300ms後）、(b) 他タブがサイドバーを開いて `storage.onChanged` 経由で `handleSidebarOpenStateChange(true)` が走った時。どちらも `main.js` の「rAFが実行されない場合のフォールバック」コメントが明示的に想定しているケース。
    結果 `isPerformingManualUpdate` が立ちっぱなしになり、ローディングは60秒タイムアウトで閉じられて**更新ボタンだけ有効化される＝押せるのに無反応**。可視復帰の契機は 655df9c で撤去済みなので、そのタブを見に行くまで解けない。
 
-2. 🟡 **設定を1つ変えるだけで「サイドバーの開閉状態」が全タブへ伝播する**
+2. ✅ **設定を1つ変えるだけで「サイドバーの開閉状態」が全タブへ伝播する** → **修正済み**
    `optionsHandler.saveOptions` → `storage.js` の `chrome.storage.local.set(options)` が **options 全キー**を書く。`options` には `isOpenSidebar` が含まれる（`main.js` の開閉時に代入される）。`getOptions` も merged 全キーを set する。
    害: 自動オープンのタブでテーマや並び順を変えると `isOpenSidebar` が false→true に変わり、`storage.onChanged` が全タブで発火。**サイドバーを閉じている別タブが「開いた」と誤認**して幅0のまま取得を始める。「閉じたタブでは取得しない」という不変条件が、更新間隔以外の設定変更で破れる。
 
@@ -263,7 +263,13 @@ AB-2 の事前調査で**このリファクタとは無関係の既存バグ**�
 
 4. ✅ **自動移動が作る孤児ローディングセッション** → AB-2 で**修正済み**。`main.js` の `updateSidebar` ラッパーが `startSession` するのに finish していなかった。旧実装では定期チェーンの無条件 finish が偶然の回収役になっていたが、それは「tick の await 中に発生した場合」しか届かない。ラッパー自身が閉じるようにして根本解決。
 
-> **AC-1 と AC-2 は、次に「裏タブ」「マルチタブ」まわりを触る時にまとめて片付けるのがよい。** 単独で直すと確認手順がそれぞれ重い（裏タブ再現・複数タブ同時操作）。
+**AC-1 の修正（2層）**
+1. `updateThumbnail` の入口で `document.hidden` なら即 `onComplete`/`onSettled` を呼んで返す。背景では rAF が来ない＝実行しても1枚も更新できないので、待たせる意味がない。`_runThumbCycle` が同じ判定で見送るのと揃えた。**この判定は `getProgramInfos`（localStorage 依存）より手前に置くこと**（順序を入れ替えると検証が例外で落ちるようにしてある）。
+2. それだけでは「待っている最中に背景へ回る」経路を塞げない（rAF が途中で止まる）。`performManualUpdate` のサムネ待ちに上限 `manualThumbWaitMaxMs`(30秒) を設けた。実測の force 一斉更新は15秒級なので十分上回り、`loadingSessionTimeoutMs`(60秒) より手前で切れる。検証用に `_manualThumbWaitMs` で短縮できる。
+
+**AC-2 の修正**: `saveOptions` が `isOpenSidebar`／`sidebarWidth` を書かないようにした（`UI_STATE_KEYS` で除外）。この2つは「設定」ではなく各タブのUI状態で、`setIsOpenSidebar`／`setSidebarWidth` が持ち主。呼び出し側（`optionsHandler`）は `getOptions` のマージ結果をそのまま渡してくるため、storage 層で弾くのが確実。
+
+> **据え置いた AC-3（`isSidebarLoading()` の死にコード）は未着手のまま。** 実害が無く、消すこと自体が「実在しない挙動を保存対象と誤認する」注意喚起として役立っているため。
 
 ---
 

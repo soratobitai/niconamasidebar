@@ -19,6 +19,13 @@ export const thumbnailRetryMaxMs = 60000; // エラー時の再試行最大間�
 
 // ローディングセッションのタイムアウト（ミリ秒）
 export const loadingSessionTimeoutMs = 60000; // 60秒
+// 手動更新が「サムネ反映の完了通知」を待つ上限。
+// 反映は requestAnimationFrame 駆動なので、待っている間にタブが背景へ回ると tick が止まり
+// onComplete が永久に来ない。上限が無いと isPerformingManualUpdate が立ちっぱなしになり、
+// そのタブでは手動更新が二度と通らなくなる（doc/09 項目AC-1）。
+// 実測の force 一斉更新は15秒級なので、それを十分に上回りつつ
+// loadingSessionTimeoutMs(60秒)より手前で打ち切れる値にする。
+export const manualThumbWaitMaxMs = 30000; // 30秒
 
 // 動くサムネ（ホバー中のみ）関連
 export const animatedThumbnailFrameCount = 5;            // 保持する直近フレーム数（リングバッファ）

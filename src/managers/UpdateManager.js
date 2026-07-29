@@ -4,7 +4,7 @@ import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patc
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -29,6 +29,9 @@ export class UpdateManager {
 
         // 重複実行防止フラグ
         this.isPerformingManualUpdate = false;
+        // 手動更新がサムネ反映の完了通知を待つ上限（doc/09 項目AC-1）。
+        // フィールドに持たせてあるのは検証用に短縮できるようにするため（scripts/verify-sidebar-loop.mjs）。
+        this._manualThumbWaitMs = manualThumbWaitMaxMs;
         // 番組ごとの自己連鎖サムネタイマー（id -> timeoutId）と稼働フラグ。
         this._thumbTimers = new Map();
         this._thumbRunning = false;
@@ -360,9 +363,20 @@ export class UpdateManager {
         try {
             await this.updateSidebar();
 
-            // サムネイル更新
+            // サムネイル更新。
+            // 完了通知は待つが、上限を切って必ず前へ進める（doc/09 項目AC-1）。
+            // updateThumbnail の入口で背景タブは弾いているが、それだけでは
+            // 「待っている最中にタブが背景へ回る」経路を塞げない（rAF が途中で止まり
+            // onComplete が来なくなる）。ここで固まると isPerformingManualUpdate が
+            // 立ちっぱなしになり、そのタブでは手動更新が二度と通らなくなる。
             await new Promise(resolve => {
-                this.updateThumbnail(true, resolve);
+                let settled = false;
+                const finish = () => { if (!settled) { settled = true; resolve(); } };
+                const guard = setTimeout(() => {
+                    console.warn('[手動更新] サムネ反映の完了通知が来ないため打ち切りました（背景タブへの切替など）');
+                    finish();
+                }, this._manualThumbWaitMs);
+                this.updateThumbnail(true, () => { clearTimeout(guard); finish(); });
             });
 
             // 最低1秒のローディング時間を確保して終了
@@ -581,6 +595,20 @@ export class UpdateManager {
     updateThumbnail(force, onComplete, onlyIds, onSettled) {
         // DOM操作中は実行しない
         if (this.appState.update.isInserting) {
+            if (onComplete) onComplete();
+            if (onSettled) onSettled();
+            return;
+        }
+
+        // 背景タブでは何もせず「完了」として返す（doc/09 項目AC-1）。
+        // updateThumbnailsFromStorage は requestAnimationFrame で始まるため、背景タブでは
+        // tick が一度も走らず onComplete/onSettled が永久に発火しない。待っている
+        // performManualUpdate がそこで固まり、isPerformingManualUpdate が立ちっぱなしになって
+        // 以後そのタブでは手動更新が二度と通らなくなる（ローディングは60秒で解除されるので
+        // 更新ボタンは有効に見えるのに押しても無反応）。
+        // そもそも背景では rAF が来ない＝実行しても1枚も更新できないので、待たせる意味がない。
+        // 前景に戻れば番組ごとの20秒サイクルが通常どおり反映する（_runThumbCycle も同じ判定で見送る）。
+        if (typeof document !== 'undefined' && document.hidden) {
             if (onComplete) onComplete();
             if (onSettled) onSettled();
             return;

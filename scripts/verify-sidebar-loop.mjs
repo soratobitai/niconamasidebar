@@ -271,6 +271,68 @@ async function d6Static() {
         listeners.length ? `混入: ${listeners.join(', ')}` : '0件')
 }
 
+/**
+ * 項目AC-1: 背景タブで手動更新が固まらないこと。
+ *
+ * updateThumbnailsFromStorage は requestAnimationFrame で始まるため、背景タブでは
+ * tick が一度も走らず onComplete が永久に来ない。待っている performManualUpdate が固まり、
+ * isPerformingManualUpdate が立ちっぱなしで「押せるのに無反応」になっていた。
+ */
+async function ac1() {
+    const { appState, um } = build(3, 200)
+
+    // 背景タブでは即座に完了扱いになること。
+    // ※この判定は getProgramInfos（localStorage 依存＝Node には無い）より手前に無いといけない。
+    //   下へ移すとここで例外になるので、順序の入れ替えもこのテストが検出する。
+    globalThis.document.hidden = true
+    let completed = false, settled = false
+    um.updateThumbnail(true, () => { completed = true }, undefined, () => { settled = true })
+    globalThis.document.hidden = false
+    check('AC-1 背景タブでは updateThumbnail が即座に完了通知を返す（固まらない）',
+        completed && settled, `onComplete=${completed} / onSettled=${settled}`)
+
+    // 待ち上限が定義され、ローディングのタイムアウトより手前で切れること
+    const c = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const ok = Number.isFinite(c.manualThumbWaitMaxMs)
+        && c.manualThumbWaitMaxMs > 0
+        && c.manualThumbWaitMaxMs < c.loadingSessionTimeoutMs
+    check('AC-1 サムネ待ちの上限がローディングのタイムアウトより手前にある', ok,
+        `manualThumbWaitMaxMs=${c.manualThumbWaitMaxMs} / loadingSessionTimeoutMs=${c.loadingSessionTimeoutMs}`)
+
+    // 手動更新が「待ちっぱなし」にならないこと。
+    // 完了通知が一切来ない状況（＝待っている最中にタブが背景へ回り rAF が止まった状態）を作る。
+    // 上限は実運用30秒なので、検証用に 600ms へ短縮して打ち切りが効くことを確かめる。
+    um._manualThumbWaitMs = 600
+    um.updateSidebar = async () => null                // ネットワークは出さない
+    um.updateThumbnail = () => { /* 完了通知を一切呼ばない */ }
+    const t0 = Date.now()
+    const p = um.performManualUpdate()
+    const raced = await Promise.race([p.then(() => 'done'), sleep(4000).then(() => 'hang')])
+    const elapsed = Date.now() - t0
+    check('AC-1 完了通知が来なくても手動更新が上限で打ち切られる', raced === 'done',
+        raced === 'done' ? `${elapsed}ms で完了（上限600msで打ち切られた）` : '4秒待っても抜けない＝固まっている')
+    check('AC-1 手動更新の多重防止フラグが残らない（次回以降も押せる）',
+        um.isPerformingManualUpdate === false, `isPerformingManualUpdate=${um.isPerformingManualUpdate}`)
+    appState.sidebar.isOpen = false
+}
+
+/** 項目AC-2: 設定の保存が「サイドバーの開閉状態・幅」を書き込まないこと */
+async function ac2() {
+    const { saveOptions } = await import(new URL('../src/services/storage.js', import.meta.url).href)
+    let written = null
+    globalThis.chrome.storage.local.set = (obj, cb) => { written = obj; if (cb) cb() }
+    await saveOptions({
+        updateProgramsInterval: '60', programsSort: 'active', sidebarTheme: 'dark',
+        isOpenSidebar: true, sidebarWidth: 480,
+    })
+    const keys = Object.keys(written || {})
+    check('AC-2 設定保存が isOpenSidebar を書き込まない', !keys.includes('isOpenSidebar'),
+        `書き込まれたキー: ${keys.join(', ')}`)
+    check('AC-2 設定保存が sidebarWidth を書き込まない', !keys.includes('sidebarWidth'))
+    check('AC-2 本来の設定はちゃんと書き込まれる',
+        keys.includes('updateProgramsInterval') && keys.includes('sidebarTheme'))
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -289,6 +351,9 @@ if (real) {
     await noDouble()
     await sessionOnClose()
     await d6Static()
+    console.log('')
+    await ac1()
+    await ac2()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

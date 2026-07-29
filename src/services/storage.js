@@ -38,13 +38,28 @@ export async function getOptions(defaultOptions = {}) {
 }
 
 /**
- * Persist options to chrome.storage.local.
+ * 設定フォームの内容を chrome.storage.local へ保存する。
+ *
+ * **サイドバーの開閉状態(`isOpenSidebar`)と幅(`sidebarWidth`)は書かない**（doc/09 項目AC-2）。
+ * この2つは「設定」ではなく各タブのUI状態で、専用の setIsOpenSidebar / setSidebarWidth が
+ * 持ち主。呼び出し側（optionsHandler）は getOptions のマージ結果をそのまま渡してくるため、
+ * 素直に全キーを set すると自タブのUI状態まで storage へ書き込まれ、chrome.storage.onChanged で
+ * 全タブへ配信されてしまう。
+ * 実害: オートオープンで開いたタブ（storage は false のまま options.isOpenSidebar=true）で
+ * テーマや並び順を変えると isOpenSidebar が false→true に変化し、**サイドバーを閉じている
+ * 別タブが「開いた」と誤認して**幅0のまま notifybox＋フォローAPI の取得を始める。
+ * 「閉じているタブでは取得しない」という不変条件が、更新間隔以外の設定変更で破れていた。
+ *
  * @param {Record<string, any>} options
  * @returns {Promise<void>}
  */
+const UI_STATE_KEYS = ['isOpenSidebar', 'sidebarWidth']
+
 export async function saveOptions(options) {
+    const toSave = { ...options }
+    for (const k of UI_STATE_KEYS) delete toSave[k]
     return new Promise((resolve, reject) => {
-        chrome.storage.local.set(options, () => {
+        chrome.storage.local.set(toSave, () => {
             if (chrome.runtime.lastError) {
                 const error = new Error(chrome.runtime.lastError.message || 'Storage save failed')
                 handleError(error, { function: 'saveOptions', storage: 'chrome.storage.local' })
