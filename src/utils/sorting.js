@@ -1,4 +1,5 @@
 import { sortProgramsByActivePoint } from '../render/sidebar.js';
+import { compareByApiIndex } from './programOrder.js';
 
 /**
  * 番組リストをソート
@@ -15,15 +16,10 @@ export function sortPrograms(container, sortType) {
         // 新着順：data-api-index 昇順を保つ。この属性は updateSidebar が「beginAt 降順」で
         // 並べた位置を書き込んだもの（＝放送開始が新しい順）。
         // ※lv番号(ID)は予約/作成順で放送開始順とズレる（予約枠など）ため、番号では並べない。
+        // 比較器は utils/programOrder.js が唯一の定義。ここに書き直さないこと
+        // （_sortOrderChanged と食い違うと、毎周期 replaceChildren＋FLIP が走る）。
         const programs = Array.from(container.children);
-        programs.sort((a, b) => {
-            const ia = a.dataset.apiIndex !== undefined ? (parseInt(a.dataset.apiIndex, 10) || 0) : Infinity;
-            const ib = b.dataset.apiIndex !== undefined ? (parseInt(b.dataset.apiIndex, 10) || 0) : Infinity;
-            if (ia !== ib) return ia - ib; // API順（＝放送開始が新しい順）を保つ
-            const idA = parseInt(a.id, 10) || 0;
-            const idB = parseInt(b.id, 10) || 0;
-            return idB - idA;
-        });
+        programs.sort(compareByApiIndex);
         programs.forEach((program) => container.appendChild(program));
     }
 }

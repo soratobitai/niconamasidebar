@@ -4,6 +4,7 @@ import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patc
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
+import { orderComparator } from '../utils/programOrder.js';
 import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
 
 /**
@@ -816,17 +817,13 @@ export class UpdateManager {
     _sortOrderChanged(container) {
         const els = Array.from(container.children);
         if (els.length < 2) return false;
+        // 🔴 比較器を**ここに書き直さないこと**。utils/programOrder.js が唯一の定義。
+        //    ここが実際の並べ替え（sorting.js / sortProgramsByActivePoint）と食い違うと、
+        //    「並べ替えが要る」と言い続けるのに並べ替えてもその順序にならない
+        //    ＝毎周期 replaceChildren が走り、**全カードが毎回スライドする**（FLIP が効いている今は特に目立つ）。
+        //    逆向きに食い違えば、必要な並べ替えが永久にスキップされる。
         const sorted = els.slice();
-        if (this.options.programsSort === 'active') {
-            sorted.sort((a, b) => parseFloat(b.getAttribute('active-point')) - parseFloat(a.getAttribute('active-point')));
-        } else {
-            sorted.sort((a, b) => {
-                const ia = a.dataset.apiIndex !== undefined ? (parseInt(a.dataset.apiIndex, 10) || 0) : Infinity;
-                const ib = b.dataset.apiIndex !== undefined ? (parseInt(b.dataset.apiIndex, 10) || 0) : Infinity;
-                if (ia !== ib) return ia - ib;
-                return (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0);
-            });
-        }
+        sorted.sort(orderComparator(this.options.programsSort));
         for (let i = 0; i < els.length; i++) {
             if (els[i] !== sorted[i]) return true;
         }

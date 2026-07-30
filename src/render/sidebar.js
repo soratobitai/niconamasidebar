@@ -1,4 +1,5 @@
 import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl } from '../config/constants.js'
+import { compareByActivePoint } from '../utils/programOrder.js'
 
 /**
  * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
@@ -495,11 +496,8 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
 export function sortProgramsByActivePoint(container) {
     const programs = Array.from(container.getElementsByClassName('program_container'))
-    programs.sort((a, b) => {
-        const activeA = parseFloat(a.getAttribute('active-point'))
-        const activeB = parseFloat(b.getAttribute('active-point'))
-        return activeB - activeA
-    })
+    // 比較器は utils/programOrder.js が唯一の定義。ここに書き直さないこと。
+    programs.sort(compareByActivePoint)
     programs.forEach((program) => container.appendChild(program))
 }
 
