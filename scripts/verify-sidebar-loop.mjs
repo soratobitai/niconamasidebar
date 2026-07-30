@@ -1108,6 +1108,77 @@ async function render() {
 }
 
 /**
+ * 項目AS: 「番組の増減が無く、順位だけが入れ替わる周期」でも FLIP が効くこと。
+ *
+ * render() が確かめているのは「新番組が挿入された時」の経路。こちらは
+ * `_sortOrderChanged` → structuralChange という**別経路**で、人気順の定期更新がこれに当たる。
+ * ソート設定によって発火頻度が全く違うので、両モードを固定しておく。
+ */
+async function flipOnReorder() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    const T = Date.now() - 600000
+    const moved = (h) => h.dom.container.children.filter((c) => /translate\(/.test(c.style.transform || '')).length
+
+    console.log('=== AS 番組の増減が無く順位だけ入れ替わる周期の FLIP ===')
+
+    // --- 人気順: active-point が動くので順位が入れ替わる ---
+    {
+        const h = buildRenderHarness({ programsSort: 'active' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        const mk = (v100) => [
+            apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: v100 }),
+            apiProgram({ id: 'lv200', beginAtMs: T + 2000, viewers: 200 }),
+            apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 300 }),
+        ]
+        h.state.followPrograms = mk(100)
+        await run()
+        check('AS 前提: 人気順に並ぶ', h.dom.ids().join(',') === '300,200,100', h.dom.ids().join(','))
+        const els = h.dom.container.children.slice()
+
+        h.state.followPrograms = mk(99999)   // 番組の増減は無し。lv100 が1位へ
+        await run()
+        check('AS 人気順: 増減が無くても順位が入れ替わる', h.dom.ids().join(',') === '100,300,200', h.dom.ids().join(','))
+        check('AS 人気順: 入れ替わった全カードに FLIP が入る', moved(h) === 3, `${moved(h)} / 3 枚`)
+        check('AS 人気順: カードは作り直されない（動くサムネの状態が消えない）',
+            els.every((e) => h.dom.container.children.includes(e)))
+        await sleep(30)
+        check('AS 人気順: 次フレームで transform が外れる', moved(h) === 0)
+
+        await run()   // 何も変わらない周期
+        check('AS 人気順: 順位が変わらない周期はアニメを出さない', moved(h) === 0, `${moved(h)} 枚`)
+        h.restore()
+    }
+
+    // --- 新着順（既定）: data-api-index は beginAt 順なので、増減が無ければ順位も動かない ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [
+            apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 1 }),
+            apiProgram({ id: 'lv200', beginAtMs: T + 2000, viewers: 1 }),
+        ]
+        await run()
+        h.state.followPrograms = [   // 視聴者数だけ激変させても新着順は動かない
+            apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 1 }),
+            apiProgram({ id: 'lv200', beginAtMs: T + 2000, viewers: 99999 }),
+        ]
+        await run()
+        check('AS 新着順: 視聴者数が変わっても順位は動かない（＝アニメも出ない）',
+            h.dom.ids().join(',') === '100,200' && moved(h) === 0, `${h.dom.ids().join(',')} / 動いた ${moved(h)} 枚`)
+
+        h.state.followPrograms.unshift(apiProgram({ id: 'lv400', beginAtMs: T + 9000 }))
+        await run()
+        check('AS 新着順: 番組が増えた時はアニメが出る', h.dom.ids().join(',') === '400,100,200' && moved(h) === 2,
+            `${h.dom.ids().join(',')} / 動いた ${moved(h)} 枚`)
+        h.restore()
+    }
+}
+
+/**
  * 項目AP: 遅れて着地した古い取得結果が、新しい描画を巻き戻さないこと。
  *
  * updateSidebar は3経路から呼ばれるが、AutoNext 経路（main.js）だけ _isUpdateInFlight() ガードが
@@ -1208,6 +1279,8 @@ if (real) {
     console.log('')
     // 最後に置く。モックDOMを globalThis へ差し込むので、他のグループの最小スタブと混ぜない。
     await render()
+    console.log('')
+    await flipOnReorder()
     console.log('')
     await raceRender()
 }
