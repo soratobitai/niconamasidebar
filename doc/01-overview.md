@@ -39,7 +39,7 @@ DOMContentLoaded で setup()
         │
         ▼
 サイドバーが開いている間、2系統のタイマーが回る（＋自動移動の監視）
-        ├─ sidebar  : updateProgramsInterval 秒ごとに「リスト＋詳細」を再取得（既定120秒。非表示タブ時はスキップ）
+        ├─ sidebar  : updateProgramsInterval 秒ごとに「リスト＋詳細」を再取得（既定120秒。⚠️ **裏タブでも取得を続ける**＝655df9c の意図的決定）
         └─ thumbnail: 番組ごとの独立・自己連鎖タイマー。各カードが「自分の <img> を1件更新→画像読み込み完了を待って→updateThumbnailInterval(既定20秒)後に次サイクル」を回す。周期＝20秒＋その回の作業時間なので少しずつ自然にズレる（一斉切替を避けるドリフト）。非表示タブ中は画像更新を行わずタイマーだけ回す（可視で再開）
         │
         ▼
@@ -53,7 +53,7 @@ DOMContentLoaded で setup()
 - `updateSidebar` は上の2つを **`Promise.all` で並列取得** → 取得結果を `localStorage` へ upsert → その `localStorage` を読んで**詳細込みでカードを生成**し、`programsSort` で並べる。詳細がリストと同時に揃うため、**初回描画からソートが確定**する（「詳細が揃うまで新着順で待つ」整列確定機構は不要）。
 - 従来の「1番組=1詳細API×N＋レート制限キュー」は**廃止**し、フロントAPIの一括取得に置換した。取得に失敗した周は詳細が古い/欠けるだけで、旧詳細APIへの**フォールバックはしない**（意図的）。
 
-> **サムネの補完（選択的フォールバック）**: フロントAPIは `listingThumbnail` 1枠しか返さず、配信者が固定画像を設定していると（放送直後で未生成のときも）ライブスクショが取れない。ライブスクショ以外は表示しない方針（`isLiveScreenshotUrl` フィルタ）なので、そうした番組は `thumbnailUrl=''` になる。空になった番組**だけ**、`fillMissingLiveThumbnails` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する。空は通常0〜少数で、1サイクルあたり `MAX_DETAIL_FALLBACK=30` 件を上限とする（旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める）。`updateSidebar` の番組ごと try/catch と `makeProgramElement` の ID 文字列化でクラッシュはしない。
+> **サムネの補完（選択的フォールバック）**: フロントAPIは `listingThumbnail` 1枠しか返さず、配信者が固定画像を設定していると（放送直後で未生成のときも）ライブスクショが取れない。ライブスクショ以外は表示しない方針（`isLiveScreenshotUrl` フィルタ）なので、そうした番組は `thumbnailUrl=''` になる。空になった番組**だけ**、`fillMissingDetails` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する（channel/official の配信者名・アイコンもここで補う）。空は通常0〜少数で、1サイクルあたり `MAX_DETAIL_FALLBACK=30` 件を上限とする（旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める）。`updateSidebar` の番組ごと try/catch と `makeProgramElement` の ID 文字列化でクラッシュはしない。
 
 ## 1.4 ディレクトリ構成
 
@@ -63,7 +63,11 @@ app/
 ├── vite.config.js         # ビルド設定（IIFE出力 + アセットコピー）
 ├── package.json           # scripts（dev/build/watch 等）
 ├── scripts/
-│   └── remove-maps.js     # ビルド後に dist の *.map を削除（postbuild）
+│   ├── remove-maps.js     # ビルド後に dist の *.map を削除（postbuild）
+│   ├── verify-sidebar-loop.mjs # ★論理検証＋ソース検査＋描画経路検証（npm run verify:loop）
+│   ├── verify-e2e.mjs     # ★実ブラウザ検証（npm run verify:e2e）
+│   ├── mock-dom.mjs       # 最小のDOM実装（本物の updateSidebar を Node で走らせる土台）
+│   └── render-harness.mjs # fetch を差し替えて updateSidebar を回すハーネス
 ├── icons/                 # 拡張アイコン 16/48/128
 ├── images/                # loading.gif / reload.png / options.png（web_accessible_resources）
 ├── src/
@@ -102,7 +106,7 @@ app/
 | watch ページ | ニコ生の番組視聴ページ (`/watch/lvXXXXXXXX`)。拡張が動く唯一の場所 |
 | フォロー中の番組 | ログインユーザーがフォローしているユーザー/チャンネルの放送中番組 |
 | ライブサムネ | 配信中の実映像から生成されるスクリーンショット画像（時間経過で変化） |
-| 番組ID(lvID) | `lv` + 数字。数字が大きいほど新しい番組（新着順ソートに利用） |
+| 番組ID(lvID) | `lv` + 数字。⚠️ **番号順＝放送開始順ではない**（予約枠があるとズレる）。新着順の基準は `beginAt` 降順で、lv番号は同時刻のタイブレークにしか使わない |
 | providerType | 配信主体の種別。`user`（ユーザー生放送）/ `channel`（チャンネル生放送） |
 | フォロー中ページのフロントAPI | `follow?status=onair` が「もっと見る」で叩く公開フロントAPI（`front/api/pages/follow/v1/programs`）をページングして全番組詳細を一括入手する方式（`followPageSource`） |
 | ローディングセッション | 一連の更新処理をまとめて「読み込み中」表示する単位（`LoadingManager`） |

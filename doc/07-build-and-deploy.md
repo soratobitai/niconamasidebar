@@ -11,8 +11,14 @@
 | `npm run preview` | `vite preview` | ビルド結果のプレビュー |
 | `npm run clean` | `rimraf dist` | `dist/` 削除 |
 | `npm run clean:maps` | `node scripts/remove-maps.js` | map ファイルのみ削除 |
+| `npm run verify:loop` | `node scripts/verify-sidebar-loop.mjs` | **論理検証＋ソース検査＋描画経路検証**（約1分）。ログイン不要・実サーバ不要 |
+| `npm run verify:e2e` | `node scripts/verify-e2e.mjs` | **実ブラウザ検証**（約5分）。本物の Chrome に `dist/` を CDP で読ませる |
 
-- devDependencies: `vite@^5`, `glob@^11`, `rimraf@^5` のみ。**実行時ランタイム依存なし**。
+- devDependencies: `vite@^5`, `glob@^11`, `rimraf@^5`, `playwright-core@^1.49`（e2e検証用）。**実行時ランタイム依存なし**。
+
+> 🔴 **`dist/` は .gitignore。** pull 後も `npm run build` しないと「直したのに直っていない」状態になる。
+> **さらに build だけでは足りない。** Chrome は `dist/` を書き換えても自動では読み直さない。`chrome://extensions` の再読み込み → ページを F5 まで必要。
+> これを忘れて「修正が効いていない」と誤診した実績がある。
 
 ## 7.2 Vite 設定（`vite.config.js`）
 
@@ -99,7 +105,7 @@ dist/
    - `#api_error`（ログイン導線）が表示されていないか＝一覧API失敗（未ログイン等）
 
 ## 7.6 バージョン管理・リリース手順
-- 表示・審査上のバージョンは **`manifest.json`**（現 `1.10.7`）。**リリース時は `package.json` と必ず揃える**（現 `1.10.7`）。
+- 表示・審査上のバージョンは **`manifest.json`**（現 `1.10.8`）。**リリース時は `package.json` と必ず揃える**（現 `1.10.8`）。
 - コミットメッセージのバージョン付与規約: `<version>　<説明>`（バージョンと説明の間は**全角スペース U+3000**）。feature/fix はブランチで作業し `--no-ff` でマージ、マージコミットにバージョンを付ける（feature側コミットはプレーンな説明）。
 
 ### リリース手順

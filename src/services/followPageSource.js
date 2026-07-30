@@ -175,7 +175,7 @@ async function fillMissingDetails(programs) {
 
 /**
  * 放送中フォロー番組を、内部 programInfo 形の配列で返す（ページングして全件）。
- * ライブサムネが無い番組は詳細APIで補完する（fillMissingLiveThumbnails）。
+ * ライブサムネが無い番組・名前やアイコンが無い番組は詳細APIで補完する（fillMissingDetails）。
  * @returns {Promise<Array<object>|null>} 失敗時 null（フォールバックはしない）
  */
 export async function fetchFollowedProgramsViaPage() {

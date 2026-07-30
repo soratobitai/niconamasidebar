@@ -3,7 +3,7 @@
 `src/styles/main.css`（652行）の全セレクタと役割。DOM構造は `render/sidebar.js`・`AutoNextManager.js` が生成する。
 
 - テーマ: 既定**ライト**／**ダーク**対応。**CSSカスタムプロパティ `--sb-*`** を `body`（ダーク既定値）と **`body.nicosidebar-light`**（ライト）で切替。主要ルールは `var(--sb-bg/-fg/-header-fg/-arrow/-spinner/-spinner-track/-thumb-bg/-icon-filter/-icon-filter-hover/-popup-border/-accent/-segment-bg/-switch-*)` を使用（未使用だった `--sb-popup-bg/-fg/-heading/-input-border` は 2026-07-11 整理で削除）。JSは `applyTheme` が body クラスをトグル。
-- テーマ切替トグル: **オプション設定内・`#optionForm` 末尾**の `#theme_toggle .theme_switch/.theme_switch_knob`。**ダーク=ON（ノブ右・青トラック `--sb-switch-track:#2a6fd8`）／ライト=OFF（ノブ左・グレー `#c9ccd2`）**、ラベルは左「ライト」右「ダーク」。左端ライン/開閉ボタンは `--sb-line`（ライトで着色）。既定テーマは**ライト**（`main.js` の `defaultOptions.sidebarTheme:'light'`、`applyTheme` はサイドバー挿入前に実行しちらつき回避）。
+- テーマ切替: **オプション設定内・`#optionForm` 末尾**のセグメント（`input[name="sidebarTheme"]`＝`#sidebarThemeLight` / `#sidebarThemeDark`）。他の設定項目と同じ `.opt-segment` 形式。左端ライン/開閉ボタンは `--sb-line`（ライトで着色）。既定テーマは**ライト**（`main.js` の `defaultOptions.sidebarTheme:'light'`、`applyTheme` はサイドバー挿入前に実行しちらつき回避）。
 - サイドバーは `position: sticky; top:0; height:100vh`。開閉は**幅(width)を 0 ⇔ 実幅** に変え、`transition: all .5s` でアニメ。
 
 ## 8.1 サイドバー枠・開閉
@@ -50,7 +50,7 @@
 
 ## 8.4 設定パネル（`#optionContainer`・サイドバー内）
 
-生成元: `buildSidebarShell` の `optionHtml`。**ポップアップではなくサイドバー内（`.sidebar_body`）に配置**し、番組リストと入れ替え表示（`.sidebar_body.show-settings` で `#liveProgramContainer`/`#api_error` を隠し `#optionContainer` を表示）。各項目は**セグメント型 `.opt-segment`**（ラジオ非表示＋ラベルボタン、選択は `--sb-accent`）、ヘッダー `.settings_header`＋`.settings_close`、テーマは `#theme_toggle` トグル。
+生成元: `buildSidebarShell` の `optionHtml`。**ポップアップではなくサイドバー内（`.sidebar_body`）に配置**し、番組リストと入れ替え表示（`.sidebar_body.show-settings` で `#liveProgramContainer`/`#api_error` を隠し `#optionContainer` を表示）。各項目は**セグメント型 `.opt-segment`**（ラジオ非表示＋ラベルボタン、選択は `--sb-accent`）、ヘッダー `.settings_header`＋`.settings_close`、テーマも同じセグメント形式（`name="sidebarTheme"`）。
 
 | セレクタ | 役割 |
 |---------|------|
@@ -63,7 +63,7 @@
 | `.opt-segment` / `.opt-segment input[type=radio]` / `.opt-segment label` | **セグメント型選択**。ラジオは `display:none`、隣接ラベルをボタン化、`input:checked + label` を `--sb-accent` で反転（name/value は従来どおりで保存ロジック無改修） |
 | `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプ（hover/focus 表示）。ツールチップは**見出し行(`position:relative`)基準・`width:100%`** でサイドバー幅内に収める（`.help-wrap` に position を付けない） |
 | `.opt-beta-badge` | 🧪 見出し横の「β版」バッジ（動くサムネ設定用の黄色い小バッジ） |
-| `.theme_toggle_row` / `#theme_toggle` | テーマ切替トグル（`#optionForm` **末尾**）。ダーク=ON（ノブ右）／ライト=OFF（ノブ左） |
+| `input[name="sidebarTheme"]`（`.opt-segment`） | テーマ切替セグメント（`#optionForm` **末尾**） |
 | `#optionContainer input[type="radio"]` | ラジオの余白/カーソル（実際は `.opt-segment` 側で `display:none`） |
 
 ## 8.5 自動移動モーダル（`#auto_next_modal`）

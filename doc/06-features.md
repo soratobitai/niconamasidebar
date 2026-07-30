@@ -22,8 +22,8 @@
 | 動くサムネ（β版） | `animatedThumbnail` | `on`/`off` | `animatedThumbnail` | `'off'` | sidebar.js | onChanged→`setAnimatedThumbnailEnabled` |
 | サイドバー幅 | （フォーム外・ドラッグ） | — | `sidebarWidth` | `360` | — | onChanged |
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
-| ライト/ダーク | （設定画面**末尾**のトグル。ON=ダーク） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `#theme_toggle`） | onChanged→`applyTheme` |
-| サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。番組ごと自己連鎖の基準間隔） | — | — |
+| ライト/ダーク | （設定画面**末尾**のセグメント） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `input[name="sidebarTheme"]`） | onChanged→`applyTheme` |
+| サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。常設ループが更新完了後に置き直す基準間隔） | — | — |
 
 ---
 
@@ -45,9 +45,9 @@
 
 ## 4. ライブサムネイル表示・遅延更新
 - カード初期src: `makeProgramElement`（user=スクショ`?cache=`、channel=大サイズ）。
-- 定期更新: `UpdateManager.startThumbnailUpdate`（**番組ごとの独立・自己連鎖タイマー方式**）。各カードが自前のタイマー（`_thumbTimers` Map: id→timeoutId）を持ち、`_runThumbCycle` が「その番組の `<img>` を1件更新→画像の読み込み完了(`updateThumbnailsFromStorage` の **`onSettled`**)を待って→`updateThumbnailInterval`(**20秒**)後に次サイクル」を回す。周期＝20秒＋その回の作業時間なので、読み込み時に一斉に始まっても少しずつ自然にズレる（**ドリフト**＝「リストが一斉に切り替わるのが気持ち悪い」というUX要望に沿ったもの）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。新規/削除カードは `_syncThumbTimers`（`updateSidebar` 末尾）が各番組タイマーを生成/破棄して追従。読み込み時の一斉更新は `performManualUpdate` が担う（定期 `updateSidebarInterval` の全件 `updateThumbnail()` 呼び出しは撤去）。
+- 定期更新: `UpdateManager.startThumbnailLoop`（**常設ループ1本＋番組ごとの期限表**）。`_thumbDueAt` Map（id→次に更新してよい時刻）が唯一の正で、`_thumbTick` が「期限の来た1件の `<img>` を更新→画像の読み込み完了(`updateThumbnailsFromStorage` の **`onSettled`**)を待って→**完了してから** `updateThumbnailInterval`(**20秒**)先へ期限を置き直す」を回す。周期＝20秒＋その回の作業時間なので、読み込み時に一斉に始まっても少しずつ自然にズレる（**ドリフト**＝「リストが一斉に切り替わるのが気持ち悪い」というUX要望に沿ったもの）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。新規/削除カードは `_refreshThumbSchedule`→`_syncThumbDueAt`（`updateSidebar` 末尾）が期限表を追従させる。読み込み時の一斉更新は `performManualUpdate` が担う（定期 `updateSidebarInterval` の全件 `updateThumbnail()` 呼び出しは撤去）。
 - **ネットワーク詳細取得は最小限**: このループは storage に保存済みの**安定したライブサムネURL＋キャッシュバスター**で `<img>` を更新するだけ。例外として、ライブサムネ空かつ放送開始から `newProgramFastPollMs`=3分以内の若い user 番組だけ各サイクルで詳細API(`fetchProgramInfo`)を1回追撃する（`_fetchLiveThumbIfPendingYoung`。旧A1の別建てバッチ `_retryPendingLiveThumbnails`／`THUMB_RETRY_MAX_ATTEMPTS`/`PER_CYCLE` は撤去し各サイクルに統合）。3分超の空番組はスクレイプ `fillMissingDetails`（60〜180秒）に委譲。プリロード成功画像は動くサムネ②へも給餌される（§15）。
-- **背景（非表示）タブ**: `_runThumbCycle` は `document.hidden` の間は画像更新を行わず軽く次サイクルだけ張る（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う。停止は `stopThumbnailUpdate`（`stopAllTimers`＝サイドバー閉／`cleanup`＝ページ離脱の両方から）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
+- **背景（非表示）タブ**: `_thumbTick` は `document.hidden` の間は画像更新を行わず次の期限だけ置き直す（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う。停止は `destroyThumbnailLoop`（`cleanup`＝ページ離脱**のみ**。サイドバーを閉じても止めない）。⚠️ **リスト更新側は背景タブを見ない**（意図的な非対称。doc/09 項目AH のポリシー表）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
 - 対応設定: **直接のUI項目なし**（フォームのヘルプに「サムネは設定と無関係に20〜60秒で自動更新」と明記）。`updateThumbnailInterval` 保存キーは既定に無く実質固定20秒。
 
 ## 5. 定期自動更新（番組リスト＋詳細）
@@ -59,16 +59,35 @@
 - 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢60/120/180）。変更時、開いていれば `resetSidebarSchedule`。
 
 ## 6. ソート（表示順序）
-- 実体: `utils/sorting.js` `sortPrograms`。`active`=`active-point`降順（人気順）、`newest`=**notifybox API の並び順を保持**（新着順）。
-- ✅ 2026-07-11修正: notifybox API は既に**放送開始が新しい順**で番組を返す（実機確認済み）。旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` が各カードに `data-api-index`（API配列の位置）を付与し、`newest` はそれを昇順に並べて**API順をそのまま保つ**（詳細取得に非依存・全番組に付与されるのでフォールバック沈みも無し）。同時刻/欠落時のみ lv番号降順フォールバック。
+- 実体: `utils/sorting.js` `sortPrograms`（比較器は `utils/programOrder.js`）。`active`=`active-point`降順（人気順）、`newest`=**`beginAt` 降順**（新着順。`data-api-index` 昇順として実装）。
+- 旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` の `_orderByBeginAtDesc` が **`beginAt` 降順**で並べ、その位置を各カードの `data-api-index` に書く。`newest` はそれを昇順に並べる。同時刻/欠落時のみ lv番号降順フォールバック。
 - 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。カード生成時に `active-point` 属性へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
 - ✅ **初回描画から順位確定（整列確定機構は不要に）**: 詳細（視聴者数/コメント）が**リストと同時にフロントAPIで storage へ載る**ため、
   カード生成時点で人気度が確定している。よって**最初のペイントから正しい順序で表示**され、
-  「詳細が揃うまで新着順で待って出揃ったら人気順へ並べ替える」settling／FLIP 機構は撤去した
+  「詳細が揃うまで新着順で待って出揃ったら人気順へ並べ替える」**整列確定（settling）機構は撤去した**
   （旧 `AppState.update.settling` / `settlingNeedsNewest` / `getEffectiveSortType` / `performInitialLoad` などは全て廃止）。
-  新着順は notifybox のAPI順（`data-api-index` 昇順）を保つため、こちらも並べ替えは起きない。詳細は [04-data-flow](./04-data-flow.md)。
+  新着順は `beginAt` 降順（`data-api-index` 昇順）で、同じ番組集合なら常に同じ順序になる。詳細は [04-data-flow](./04-data-flow.md)。
+
+> 🔴 **「FLIP は撤去した」と読まないこと。** ここで撤去したのは上の**整列確定機構**であって、
+> **並べ替えを目で追えるようにする FLIP アニメーションは 2026-07-29 に別途導入されている**（下記）。
+
+### 並べ替えのアニメーション（FLIP・2026-07-29 導入 / 07-30 修正）
+
+定期更新で順位が入れ替わったとき、カードは瞬間移動せず**旧位置から新位置へスライド**する（既定300ms＝`reorderFlipDurationMs`）。
+位置が変わったカードだけが動き、新規カードは動かない（元位置が無いため）。
+
+| ソート設定 | 定期更新で順位が動くか | アニメが出る場面 |
+|---|---|---|
+| `active`（人気順） | **動く**。スコアの分母（経過分）が番組ごとに違う速さで増えるため | ほぼ毎周期 |
+| `newest`（新着順・既定） | **動かない**。同じ番組集合なら `beginAt` 降順は常に同じ | 番組が**増減した時だけ** |
+
+入れ替わり自体はアニメの有無に関係なく起きている。アニメは動きを足すのではなく、**既に起きている瞬間移動を目で追える形にする**もの。
+設定でユーザー自身が並び順を変えた時は**通さない**（瞬時に切り替わる方がよい）。
+
+> ⚠️ 2026-07-29 の初回配線では**一度も動いていなかった**（フラグメントを `flipReorder` の外で組んでいたため、
+> 位置の実測時にコンテナが空だった）。例外もログも出ない壊れ方だったので、詳細は [09 項目AM](./09-gotchas-and-techdebt.md) を必ず読むこと。
 
 ## 7. オートオープン（自動でサイドバーを開く）
 - 初期判定: `setup()` の `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`。
@@ -86,7 +105,8 @@
 ## 9. 手動更新ボタン（リロード）
 - `#reload_programs` click → `isLoading()` なら無視 → **`performManualUpdate()`**（初回ロード・タブ復帰・サイドバー再オープンと共通の入口）:
   `updateSidebar()`（リスト＝notifybox＋詳細＝フロントAPIを並列取得して再描画・ソート）→ **サムネを強制更新**（`updateThumbnail(true)`＝10秒TTL・エラーバックオフをバイパス、コンテナ内全サムネ対象）→ 最低1秒ローディング → 定期タイマー再起動。
-  詳細は毎回フロントAPIで**全件更新**されるため、TTL無視の `forceRefetch` や「新着順への一時退避」「人気順へのFLIP整列」は不要になった（撤去済み）。
+  詳細は毎回フロントAPIで**全件更新**されるため、TTL無視の `forceRefetch` や「新着順への一時退避」「人気順への整列確定」は不要になった（撤去済み）。
+  ※ここで言う「整列確定」は旧 settling 機構のこと。**並べ替えを見せる FLIP アニメーションとは別物**で、そちらは現役（上の6章を参照）。
 - ローディング表示: `LoadingManager` が `.loading` ＋ `pointer-events:none`（60秒タイムアウト）。
 - 対応設定: なし（機能ボタン）。
 
@@ -98,7 +118,7 @@
 - 対応設定: フォーム内の6項目（表示順序/自動更新/オートオープン/自動移動/動くサムネ/テーマ）。`sidebarWidth`/`isOpenSidebar` はフォーム外。データ取得方式トグル（旧・実験：API/ページ取得/自動）は撤去済み（詳細取得はフロントAPIに一本化＝§14）。
 
 ## 11. API失敗表示（ログイン誘導）
-- `#api_error`（ログインリンク付き）。`getLivePrograms` 成功で `none`、失敗で `block`。
+- `#api_error`（ログインリンク付き）。**notifybox とフォローAPIの両方**に失敗した時だけ `block`、片方でも成功すれば `none`。
 - 対応設定: なし。
 
 ## 12. 別窓くん連携 / ポップアップ抑止
@@ -107,7 +127,7 @@
 
 ## 15b. ライト/ダークモード（テーマ切替）
 - サイドバーは既定**ライト**。**ダークモード**にも対応。
-- 切替UI: **設定パネル内の「テーマ」トグルスイッチ**（`#theme_toggle`、`#optionForm` の**末尾**）。**ダーク=ON（ノブ右・青トラック）／ライト=OFF（ノブ左・グレー）**、ラベルは左「ライト」右「ダーク」。クリックで即切替。`applyTheme` はサイドバー挿入前に実行しちらつきを回避。
+- 切替UI: **設定パネル内の「テーマ」セグメント**（`input[name="sidebarTheme"]`＝`#sidebarThemeLight` / `#sidebarThemeDark`、`#optionForm` の**末尾**）。クリックで即切替。`applyTheme` はサイドバー挿入前に実行しちらつきを回避。
 - 実装: CSSカスタムプロパティ（`--sb-*`）を `body`（ダーク既定）と **`body.nicosidebar-light`**（ライト）で切替。`main.js` の `applyTheme(theme)` が body クラスをトグル、`storage.js` の `setSidebarTheme` で `chrome.storage.local` に保存、`onChanged` で他タブにも反映。
 - ✅ ライト時、本サイト背景が白でも境目が分かるよう、**サイドバー左端のライン/開閉ボタン(`#sidebar_line`/`#sidebar_button`)に色**（`--sb-line`=ダーク`#111`/ライト`#d5d9df`（薄め））。
 - 対応設定: **`sidebarTheme`**（既定 **`'light'`**）。設定パネル内のトグルで保存。
@@ -148,7 +168,7 @@
 - 各 `programs[]` 要素を `mapApiProgramToInfo()` が内部 programInfo 形へ変換（`beginAt`（msエポック）→`onAirTime.beginAt` ISO、`watchCount`→viewers、`commentCount`→comments、`providerType` `community`→`'user'` など）。従来の詳細APIと同じshapeなので `makeProgramElement` / `resolveLiveThumbnailBaseUrl` / `calculateActivePoint` がそのまま読める。
 - ✅ **ページング対応済み**: `fetchFollowedProgramsViaPage()` が `offset`=0,1,2,… とページ番号を進め（ページNは `items[N*100 .. N*100+100)`）、id重複を除きつつ `total` 件に達するまで取得する（安全上限 `MAX_PAGES=5`＝最大500件）。`limit=100` なので同時放送中フォローが100件未満なら通常**1リクエスト**で完了し、100件超でも全番組の詳細が揃う（旧・約70件で頭打ちの制約は解消）。
 - 常に**ライブスクショ**（時間変化する実サムネ）を優先し、配信者設定の固定画像は使わない。フロントAPIは `listingThumbnail` の1枠しか返さず、固定画像配信者ではそこに固定画像が入るため、`isLiveScreenshotUrl` でライブスクショ形のときだけ採用し、それ以外は `thumbnailUrl=''`（表示しない）。
-- ✅ **固定画像配信者のサムネ補完（選択的フォールバック）**: ライブサムネが空の番組（固定画像配信者／放送直後で未生成）だけ、`fillMissingLiveThumbnails()` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する。**空の番組だけ**が対象（通常0〜数件）で上限 `MAX_DETAIL_FALLBACK=30`／サイクル。旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める。
+- ✅ **固定画像配信者のサムネ補完（選択的フォールバック）**: ライブサムネが空の番組（固定画像配信者／放送直後で未生成）だけ、`fillMissingDetails()` が番組ごと詳細API（`fetchProgramInfo`）を叩いて `liveScreenshotThumbnailUrls` を補完する。**空の番組だけ**が対象（通常0〜数件）で上限 `MAX_DETAIL_FALLBACK=30`／サイクル。旧方式の「全番組×詳細API」の重さは避けたまま穴だけ埋める。
 - ✅ **旧・詳細APIキュー方式は撤去**: 「1番組=詳細API×N＋4件/秒レート制限キュー（`ProgramInfoQueue`）＋直近60秒スキップの独立TTL（`programInfoTtlMs`）」は全廃。詳細は毎周期フロントAPIで**全件フルレコード**が書き戻されるため、番組ごとの再取得判定（TTL）も `forceRefetch` も不要。詳細API（`fetchProgramInfo` / `liveInfoAPI`）は上記のサムネ補完でのみ限定利用する。
 - **フォールバックなし**: フロントAPI取得が失敗した周期は、その周のみ詳細が古い/欠落する（意図的）。旧・全件を詳細APIで取り直す方式には戻さない。番組ごとの `updateSidebar` try/catch と `makeProgramElement` の `String(id)` 変換でクラッシュは防御。
 - 対応設定: なし（内部の取得方式）。関連: [04-data-flow](./04-data-flow.md)、[05-external-api](./05-external-api.md)。

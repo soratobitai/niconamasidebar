@@ -85,7 +85,7 @@
 
 ## 🟢 I. `AppState` のデッドフィールド / レガシー
 - ✅ 2026-07-11 整理で `queues.programInfo`（実キューは別クラス）・`loading.operations`＋`startLoading()/finishLoading()`（ローディング判定は `updateSession` ベースに一本化済み）・`getObserver()`（未使用）を削除。
-- 残置: `observers.thumbnail`（実体は sidebar.js のモジュール変数）は未使用/レガシーだが害はないため残置。
+- ~~残置: `observers.thumbnail`~~ → **項目AF で削除済み**（読み手ゼロのフィールド6件の1つ）。現在の `observers` は `{ resizeWatchPage, resizeSidebar }` のみ。
 
 ## 🟢 K. リスナ/タイマーのライフサイクル非対称
 - `#optionForm` change、各ボタン click、`document` 全体 click（resize強制）などは cleanup で明示解除されない。単一ページ寿命では問題になりにくい。SPA的な再setup対応や厳密なリーク対策をするなら要整理。
@@ -96,7 +96,7 @@
 
 ## 🟢 N. データ取得の credentials（リスト・フォローAPIとも `include`／詳細APIのみ Cookie なし）
 - 番組リストの notifybox（`fetchLivePrograms`）も、詳細のフォロー中フロントAPI（`fetchFollowedProgramsViaPage`）も `credentials:'include'` で取得する。両方ともログイン Cookie 依存（未ログインだとリスト失敗／フォローAPIは放送中番組ゼロ）。
-- 例外: サムネ補完用の**詳細API `fetchProgramInfo`**（`liveInfoAPI = api.cas.nicovideo.jp/.../lv{id}`）は `credentials` 指定なし＝**Cookie を送らない**。公開情報のライブスクショURLだけを拾う用途で、固定画像配信者などライブサムネ欠落番組の補完に**選択的にのみ**呼ばれる（項目V参照）。
+- 例外: サムネ補完用の**詳細API `fetchProgramInfo`**（`liveInfoAPI = api.cas.nicovideo.jp/.../lv{id}`）は `credentials` 指定なし＝**Cookie を送らない**。公開情報だけを拾う用途で、**選択的にのみ**呼ばれる（項目V参照）。補完する内容は2つ: ①user のライブサムネ欠落（固定画像配信者・放送直後）②**channel/official の配信者名・アイコン（`contentOwner`）** — フォローAPIは `programProvider` を返さないため（項目AK）。
 - `api.js` は `fetchLivePrograms`（notifyboxリスト）と `fetchProgramInfo`（詳細・サムネ補完専用）の**両方**を export する。
 
 ## 🟢 O. 「開いた瞬間の描画」と「定期タイマー初回」は別物
@@ -109,10 +109,10 @@
 - ✅ **実施済み（デッドコード削除・敵対的検証済み）**: 旧オプションポップアップ由来の未使用CSS（`#optionContainer p/ul/li/.flex/.setbox/.inputbox/label/input[type=text]/a`・`.sidebar_display_none`）、未使用CSS変数（`--sb-popup-bg/-fg/-heading`）、未使用の委譲ラッパー関数（`ensure/showAutoNextModal`・`scheduleAutoNextNavigation`・`performInitialLoad`/`updateThumbnail`/`updateProgramCount`/`updateLoadingState`/`finishLoadingSessionWithMinDuration`）、`AppState` レガシー（`queues`・`loading.operations`・`startLoading/finishLoading`・`getObserver`）、`UpdateManager.stopAllTimers`（未使用。main.js 版が実体）、未使用 export の内部化（`ErrorType/ErrorLevel/ErrorManager`・`setProgramInfos`）、未使用 import/引数/デッド変数（main.js の `saveOptionsToStorage`・`computeNext` の `parentId`・`getLivePrograms` の `callId`）、空 no-op コールバック（`onProcessStart`/`onQueueEmpty`）。
 - ✅ **実施済み②（低〜中リスクのリファクタ・挙動等価を敵対的検証済み）**:
   - `watch/` 視聴ページURLを `constants.watchPageBaseUrl` に定数化（`sidebar.makeProgramElement`・`UpdateManager` の計3箇所）。
-  - ライブサムネのベースURL選定を純関数 `sidebar.resolveLiveThumbnailBaseUrl(info)` に集約し `sidebar.computeNext`・`animatedThumbnail.getScreenshotUrl` で共用（`makeProgramElement` は初期src用に `?cache` 付与・`||''` フォールバック等の固有ロジックがあるため据え置き）。
+  - ライブサムネのベースURL選定を純関数 `sidebar.resolveLiveThumbnailBaseUrl(info)` に集約し `sidebar.computeNext` で使用（※当時共用していた `animatedThumbnail` 側の自前取得経路は、①からの給餌方式に一本化された際に撤去済み）（`makeProgramElement` は初期src用に `?cache` 付与・`||''` フォールバック等の固有ロジックがあるため据え置き）。
   - AutoNext のカウントダウンタイマー後始末を `AutoNextManager._clearAutoNextTimer()` に集約（開始/キャンセル/interval×2/stopWatcher の5箇所）。
 - ✅ **実施済み③（低リスク整理・挙動等価を敵対的検証済み）**:
-  - API呼び出し頻度フィルタの窓 `60000` を `constants.apiRateWindowMs` に定数化（`apiStats`×2・`UpdateManager`×1）。
+  - ~~API呼び出し頻度フィルタの窓 `60000` を `constants.apiRateWindowMs` に定数化~~ → **API監視（`apiStats`）ごと撤去済み。`apiRateWindowMs` は現存しない。**
   - `setProgramContainerWidth` の8連ifを、ブレークポイント配列 `columnBreakpoints=[300,500,700,900,1100,1300,1500]` を走査するループに置換（全境界値で挙動等価を確認）。
 - ⏭ **残りの整理候補（未実施。低価値/高リスクのため保留）**:
   - `layout.js` の `adjustWatchPageChild` のレイアウト定数（`1024`/`1.777778`/`220.44444` 等）ベタ書き（項目G）→ 名前付き定数化（値の意味が不透明でドメイン知識が要るため保留）。
@@ -145,10 +145,10 @@
 - 対象: `src/services/followPageSource.js`（`fetchOnePage`・`PAGE_LIMIT`・`MAX_PAGES`）。→ [06-features](./06-features.md)
 
 ## 🟡 W. 固定画像配信者はJSON APIにライブサムネ枠が無く、詳細APIで選択的補完する
-- **背景**: フォローAPIの1番組はサムネフィールドを **`listingThumbnail` 1枠しか返さない**。配信者が「固定画像」を設定していると `listingThumbnail` がその固定画像になり、放送直後（ライブスクショ未生成）も同様に空扱いになる。本拡張は**ライブスクショだけを表示する方針**（`isLiveScreenshotUrl` フィルタ）なので、これらの番組は `mapApiProgramToInfo` の時点で `thumbnailUrl=''` になる。
-- **選択的フォールバック**: `fillMissingLiveThumbnails` が `thumbnailUrl` 空の番組**だけ**を対象に、番組ごと詳細API `fetchProgramInfo()` を叩いて `liveScreenshotThumbnailUrls`（ライブスクショ）を補完する。空は通常0〜数件で、`MAX_DETAIL_FALLBACK=30` で1サイクルの呼び出し数を上限。**全番組には叩かない**（旧「全番組×詳細API」の重さを意図的に回避）。
+- **背景**: フォローAPIの1番組はサムネフィールドを **`listingThumbnail` 1枠しか返さない**。配信者が「固定画像」を設定していると `listingThumbnail` がその固定画像になり、放送直後（ライブスクショ未生成）も同様に空扱いになる。**user 番組**は固定画像を表示しない方針（`isLiveScreenshotUrl` フィルタ）なので、これらは `mapApiProgramToInfo` の時点で `thumbnailUrl=''` になる。⚠️ **channel/official は別**で、`listingThumbnail` をそのまま表示用 `thumbnailUrl` に入れる（固定画像形でもイベントの正規サムネなので出す）。空になるのは user だけ（項目AA）。
+- **選択的フォールバック**: `fillMissingDetails` が `thumbnailUrl` 空の user 番組と、名前/アイコンが空の channel 番組**だけ**を対象に、番組ごと詳細API `fetchProgramInfo()` を叩いて `liveScreenshotThumbnailUrls`（ライブスクショ）を補完する。空は通常0〜数件で、`MAX_DETAIL_FALLBACK=30` で1サイクルの呼び出し数を上限。**全番組には叩かない**（旧「全番組×詳細API」の重さを意図的に回避）。
 - **注意**: 詳細API側にもライブスクショが無い番組（本当に固定画像運用）はそのまま空のまま＝サムネ非表示になる（正常）。個別の詳細API失敗は握り潰し（`try/catch`）、次サイクルで再挑戦する。ここを重くしたくないので、`MAX_DETAIL_FALLBACK` を安易に上げないこと。
-- 対象: `src/services/followPageSource.js`（`fillMissingLiveThumbnails`・`isLiveScreenshotUrl`・`MAX_DETAIL_FALLBACK`）、`src/services/api.js`（`fetchProgramInfo`）、`src/config/constants.js`（`liveInfoAPI`）。
+- 対象: `src/services/followPageSource.js`（`fillMissingDetails`・`isLiveScreenshotUrl`・`MAX_DETAIL_FALLBACK`）、`src/services/api.js`（`fetchProgramInfo`）、`src/config/constants.js`（`liveInfoAPI`）。
 
 ## 🟢 V. フォローAPI失敗時のフォールバックは無い（その周期は詳細が古い/欠落のまま）
 - `_refreshDetailsViaScrape` は `fetchFollowedProgramsViaPage` が `null`（未ログイン/仕様変更/通信エラー/HTTP非200）を返したら**何もしない**（storage を上書きしない）。フォローAPI全体を別経路に**切り戻すフォールバックは存在しない**（意図的）。
@@ -175,6 +175,10 @@
 - **棄却した仮説**（敵対的検証で不成立）: USER重複排除の閾値誤破棄・`toBlob`/hydrate競合・`currentSrc`遅延窓。捨てられるのは「中間コマ or ほぼ同一コマ」で、真の最新は blob か末尾スロットで必ず映るため最新欠落にならない。
 
 ## ✅ Z. サムネ更新を「番組ごとの独立・自己連鎖タイマー＋自然ドリフト」へ（2026-07-23）
+
+> 🔴 **この節の実装はもう存在しない。現行方式は項目AE（常設ループ1本＋期限表）。**
+> 以下に出る `_thumbTimers` / `_runThumbCycle` / `_scheduleThumbCycle` / `_thumbGen` / `_syncThumbTimers` / `stopThumbnailUpdate` は**すべて撤去済み**で、grep しても当たらない。
+> 残してあるのは**ドリフトという設計思想の出自**（一斉更新を嫌うUX要望）を伝えるため。実装の参照先としては使わないこと。
 - **背景/要望**: 旧「全番組を同時一斉更新」＋別建てA1バッチは、リストがいっぺんに切り替わる“一斉感”が気持ち悪い。各番組がバラバラのタイミングで更新され、読み込み時は一斉→以後少しずつズレてほしい（機能/軽さでなくUXの要望）。
 - **新方式（`UpdateManager`）**:
   - 各番組が自前の自己連鎖タイマー（`_thumbTimers` Map: id→timeoutId）。`_runThumbCycle` が「その番組の `<img>` を1件更新 → 画像の読み込み完了を待つ → `updateThumbnailInterval`(20秒)後に次サイクル」。周期＝20秒＋作業時間（取得/デコード）で毎回わずかに違うため**自然にドリフト**。
@@ -264,7 +268,7 @@ AB-2 の事前調査で**このリファクタとは無関係の既存バグ**�
 4. ✅ **自動移動が作る孤児ローディングセッション** → AB-2 で**修正済み**。`main.js` の `updateSidebar` ラッパーが `startSession` するのに finish していなかった。旧実装では定期チェーンの無条件 finish が偶然の回収役になっていたが、それは「tick の await 中に発生した場合」しか届かない。ラッパー自身が閉じるようにして根本解決。
 
 **AC-1 の修正（2層）**
-1. `updateThumbnail` の入口で `document.hidden` なら即 `onComplete`/`onSettled` を呼んで返す。背景では rAF が来ない＝実行しても1枚も更新できないので、待たせる意味がない。`_runThumbCycle` が同じ判定で見送るのと揃えた。**この判定は `getProgramInfos`（localStorage 依存）より手前に置くこと**（順序を入れ替えると検証が例外で落ちるようにしてある）。
+1. `updateThumbnail` の入口で `document.hidden` なら即 `onComplete`/`onSettled` を呼んで返す。背景では rAF が来ない＝実行しても1枚も更新できないので、待たせる意味がない。`_thumbTick`（当時は `_runThumbCycle`）が同じ判定で見送るのと揃えた。**この判定は `getProgramInfos`（localStorage 依存）より手前に置くこと**（順序を入れ替えると検証が例外で落ちるようにしてある）。
 2. それだけでは「待っている最中に背景へ回る」経路を塞げない（rAF が途中で止まる）。`performManualUpdate` のサムネ待ちに上限 `manualThumbWaitMaxMs`(30秒) を設けた。実測の force 一斉更新は15秒級なので十分上回り、`loadingSessionTimeoutMs`(60秒) より手前で切れる。検証用に `_manualThumbWaitMs` で短縮できる。
 
 **AC-2 の修正**: `saveOptions` が `isOpenSidebar`／`sidebarWidth` を書かないようにした（`UI_STATE_KEYS` で除外）。この2つは「設定」ではなく各タブのUI状態で、`setIsOpenSidebar`／`setSidebarWidth` が持ち主。呼び出し側（`optionsHandler`）は `getOptions` のマージ結果をそのまま渡してくるため、storage 層で弾くのが確実。
@@ -428,7 +432,7 @@ R-1 の時点で「閉じている間はサムネを更新しない」という�
 ### 付随変更
 
 - `AppState.timers` から `thumbnail` キーを削除。更新ループ2本はどちらも `UpdateManager` が内部で持つ（外部から殺されないため。理由は項目 AB-2 と同じ）
-- `stopAllTimers`（サイドバー閉）は `autoNext` のクリアだけになった
+- `stopAllTimers`（サイドバー閉）は `autoNext` の取り消しだけになった（※その後 項目AF で `clearTimer` から `cancelScheduledNavigation()` に変更。タイマーだけ止めるとフラグが残って自動移動が二度と動かなくなるため）
 - `main.js` の `startThumbnailUpdate` ラッパーと二重開始ガード `!getTimer('thumbnail')` を削除
 
 ---
@@ -601,7 +605,12 @@ R-2 の禁止事項の筆頭は「`_sortOrderChanged` をモデル同士の比�
 
 同じく「描画を非同期化するな」という禁止事項も、FLIP が **First/Last の実測のために同期実行を要求する**ため、破った瞬間にアニメが壊れて見える。
 
-> R-2 を「ユーザーから見える改善がゼロ」と評価していたが、FLIP を入れると**並び順が目に見える仕様**になり、R-2 の目的（順序をモデルで管理する）に実利の裏付けが付く。
+> ⚠️ **当初ここに「FLIP を入れれば R-2 に実利の裏付けが付く」と書いていたが、これは誤読だった。**
+> 好転したのは「**R-2 をやった場合の失敗が即バレするようになった**」ことであって、**R-2 に価値が生まれたわけではない**。
+> R-2 は最終的に「モデル化する対象が存在しない」として却下している（項目AO）。
+
+> なお上の「カナリアになる」という指摘自体は生きている。**FLIP は並び順まわりの不変条件が壊れたことを目視で知らせる**ので、
+> 比較器の三重定義を解消した（項目AR）今も、そこが再び食い違えば全カードが毎周期スライドして即わかる。
 
 ### 実装上の注意
 
@@ -783,7 +792,7 @@ R-2（描画モデル導入）を検討した結論として、**モデルは持
 | カードの増減が **`container.replaceChildren` の1箇所だけ** | 「どこかで勝手に増減している」経路ができ、DOM を読む側が信用できなくなる | AO-2 |
 
 読み取り区間は `const existingMap = new Map();` 〜 `isInserting = false;` の **5178文字**。
-項目AL は `isInserting = true` 以降しか見ておらず、**DOM を読む 665行〜差し替え直前が無防備**だった。
+項目AL は `isInserting = true` 以降しか見ておらず、**`existingMap` を組む所から差し替え直前までが無防備**だった。
 
 > 🔴 **AO を「だから updateSidebar は安全」と読んではいけない。**
 > AO が守るのは「DOM から毎周期作り直す方式の正しさ」**だけ**。
@@ -805,8 +814,8 @@ R-2（描画モデル導入）を検討した結論として、**モデルは持
 しかも「`_sortOrderChanged` をモデル同士の比較にしない」を守る限り、**モデル側から食い違いを検知する手段が無い**。
 
 審査で見つかった具体的な破綻の例（狭い範囲でやる案）:
-665行の `existingMap` 構築（その場更新の**前**）と 720行の `_sortOrderChanged`（その場更新の**後**）を1つのスナップショットで置き換えると、
-665行時点の `active-point` / `data-api-index` は**前周期の値**で、DOM順はすでにその値で整列済み。
+`existingMap` の構築（その場更新の**前**）と `_sortOrderChanged`（その場更新の**後**）を1つのスナップショットで置き換えると、
+`existingMap` 構築時点の `active-point` / `data-api-index` は**前周期の値**で、DOM順はすでにその値で整列済み。
 → `_sortOrderChanged` が常に false を返し、**並べ替えが永久にスキップされる**。
 
 **「同期化されていて、変更点が1箇所」は、モデルを置く動機ではなく、置く必要が無いことの証明だった。**
@@ -815,7 +824,7 @@ R-2（描画モデル導入）を検討した結論として、**モデルは持
 
 ## 🔴 AP. 遅れて着地した古い取得が、新番組のカードを消していた（2026-07-30 修正）
 
-`updateSidebar` は3経路から呼ばれるが、**AutoNext 経路（`main.js`）だけ `_isUpdateInFlight()` ガードが無い**（定期tickは441行で、手動更新は `isPerformingManualUpdate` で弾いている）。よって2本が重なる。
+`updateSidebar` は3経路から呼ばれるが、**AutoNext 経路（`main.js`）だけ `_isUpdateInFlight()` ガードが無い**（定期tick `_sidebarTick` は `_isUpdateInFlight()` で、手動更新は `isPerformingManualUpdate` で弾いている）。よって2本が重なる。
 
 そして `livePrograms` は**取得を始めた時刻のスナップショット**であって、着地時点の現実ではない。
 フォローAPIは1ページずつ `await` で回す逐次ページングなので、フォローが多い日は数秒かかる。
@@ -847,7 +856,7 @@ t=2.5s  A 着地 → [100,200]       ← **削除検知が lv400 を「終わっ
 
 ### ⚠️ 項目AO を「だから安全」と読んではいけない
 
-AO は「DOM を**読んで**から差し替えるまでが同期」を守っている。だが本件で古かったのは **DOM の読み取りではなく取得結果**で、それは 635行の `await Promise.all` より**前**に確定している。AO の区間外である。
+AO は「DOM を**読んで**から差し替えるまでが同期」を守っている。だが本件で古かったのは **DOM の読み取りではなく取得結果**で、それは `await Promise.all([fetchLivePrograms, _refreshDetailsViaScrape])` より**前**に確定している。AO の区間外である。
 
 **AO が守るのは「DOM から作り直す方式の正しさ」だけ。「updateSidebar 全体が安全」ではない。**
 この区別を反証担当が指摘するまで、私は AO を後者の意味で書きかけていた。

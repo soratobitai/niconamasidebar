@@ -628,7 +628,7 @@ export class UpdateManager {
         // 🔴 **セッションの相乗りは描画の排他にはならない。** startSession が null を返すのは
         //    「スピナーの持ち主は別にいる」という意味だけで、取得も描画も普通に進む。
         //    updateSidebar は3経路から呼ばれ、うち **AutoNext 経路（main.js）だけ
-        //    `_isUpdateInFlight()` ガードが無い**（定期tickは441行、手動更新は
+        //    `_isUpdateInFlight()` ガードが無い**（定期tick `_sidebarTick` と手動更新は
         //    isPerformingManualUpdate で弾いている）。よって重なりうる。
         const myGen = ++this._renderGen;
 

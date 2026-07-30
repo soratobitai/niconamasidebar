@@ -12,19 +12,21 @@
 
 | 定数 | 値 | 意味 |
 |------|----|------|
-| `notifyboxAPI` | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php` | フォロー中の放送中番組リストAPI（並び順の元） |
+| `notifyboxAPI` | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php` | フォロー中の放送中番組リストAPI。**新着検知の速さ担当**（user番組はフォローAPIより20〜101秒速い）。⚠️ 並び順の元では**ない**（並びは `beginAt` 降順） |
 | `liveInfoAPI` | `https://api.cas.nicovideo.jp/v1/services/live/programs` | 番組**詳細**API（末尾に `/lv{id}`）。フォローAPIがライブサムネを返さない番組（配信者が固定画像を設定／放送直後で未生成）だけに叩く**選択的フォールバック専用**。全番組には使わない（旧方式の重さ回避） |
 | `watchPageBaseUrl` | `https://live.nicovideo.jp/watch/` | 視聴ページのベースURL（末尾に lv 番号 or 数値ID） |
 | `sidebarMinWidth` | `180` | サイドバー最小幅(px) |
 | `maxSaveProgramInfos` | `200` | localStorage `programInfos` の最大件数 |
-| `updateThumbnailInterval` | `20`（秒） | サムネ更新の基準間隔（番組ごと自己連鎖タイマーが、更新完了後にこの時間だけ待って次サイクルを張る。延ばさない方針） |
+| `updateThumbnailInterval` | `20`（秒） | サムネ更新の基準間隔（常設ループが、更新完了後にこの時間だけ先へ期限を置き直す。**延ばさない方針**＝ニコ生側の実更新が最速20秒のため） |
 | `newProgramFastPollMs` | `180000`（3分） | 空サムネ番組のライブサムネ追撃（詳細API）を「放送開始からこの時間内の若い番組」だけに限定するゲート。過ぎたら追撃せずスクレイプ `fillMissingDetails`（60〜180秒）に委譲。旧A1「8回打ち切り」の代替 |
 | `thumbnailTtlMs` | `10000` | サムネ成功後この時間は再取得しない（フリッカ抑制） |
 | `thumbnailRetryBaseMs` | `2000` | サムネ失敗時の再試行ベース間隔（指数バックオフの基数） |
 | `thumbnailRetryMaxMs` | `60000` | サムネ再試行の最大間隔 |
 | `loadingSessionTimeoutMs` | `60000` | ローディングセッションの強制終了タイムアウト |
+| `manualThumbWaitMaxMs` | `30000` | 手動更新がサムネ反映の完了通知を待つ上限（背景タブへ回ると rAF が止まり通知が永久に来ないため。doc/09 AC-1） |
+| `reorderFlipDurationMs` | `300` | 並べ替え FLIP アニメの時間(ms)。**0 にすれば実質無効** |
 | `animatedThumbnailFrameCount` | `5` | 🧪実験(branch)。動くサムネのリングバッファ保持枚数 |
-| `animatedThumbnailCaptureIntervalMs` | `20000` | 🧪実験。動くサムネのフレーム取得（重複排除）間隔（可視カードのみ） |
+| `animatedThumbnailCaptureIntervalMs` | `20000` | 🧪実験。⚠️ **フレーム取得の間隔ではない**（取得は①からの給餌に一本化済み）。消えた番組のバッファを解放する**定期メンテ**の周期 |
 | `animatedThumbnailPlayIntervalMs` | `700` | 🧪実験。ホバー時の1コマ表示時間(ms) |
 | `animatedThumbnailPersistTtlMs` | `1800000` | 🧪実験。保存フレームの復元TTL(30分, updatedAt基準)。超過は復元せず削除。静止番組が誤削除されないよう長め |
 | `animatedThumbnailPersistMaxEntries` | `300` | 🧪実験。保存する番組レコード数の上限（古い順に掃除） |
@@ -41,7 +43,7 @@
 ### メソッド
 | メソッド | 説明 |
 |---------|------|
-| `setTimer(name, timer)` / `getTimer(name)` | タイマー登録/取得。`name` は `timers` のキー（`thumbnail`/`sidebar`/`autoNext`）のみ有効 |
+| `setTimer(name, timer)` / `getTimer(name)` | タイマー登録/取得。`name` は `timers` のキー（現在は **`autoNext` のみ**）。更新ループ2本は `UpdateManager` が内部で持ち、ここには載せない（外部から殺されないため） |
 | `clearTimer(name)` | 値が数値なら `clearTimeout`＋`clearInterval` 両方呼び null化 |
 | `clearAllTimers()` | 全タイマークリア |
 | `setObserver/disconnectObserver/disconnectAllObservers` | ResizeObserver 等の管理。`disconnect()` を安全に呼ぶ |
@@ -60,7 +62,7 @@
 | 関数 | シグネチャ | 説明 |
 |------|-----------|------|
 | `fetchLivePrograms` | `(rows=100) => Promise<false \| Array>` | `notifyboxAPI?rows=100` を `credentials:'include'` で取得。`meta.status===200` かつ `data.notifybox_content` があれば**その配列を返す**。失敗時 `false`。`liveProgramsInFlight`(Map) で `rows` をキーに重複排除 |
-| `fetchProgramInfo` | `(liveId) => Promise<any \| undefined>` | 1番組の**詳細**を `liveInfoAPI/lv{liveId}`（`lv` 無しのID）で取得。`meta.status===200` かつ `data` があれば `data` を返す。失敗時 `undefined`。`programInfoInFlight`(Map) で `liveId` をキーに重複排除。⚠️ **用途限定**：フォローAPIがライブサムネを返さない番組の補完（[followPageSource.js](#servicesfollowpagesourcejs-) の `fillMissingLiveThumbnails`）だけが呼ぶ。全番組には叩かない |
+| `fetchProgramInfo` | `(liveId) => Promise<any \| undefined>` | 1番組の**詳細**を `liveInfoAPI/lv{liveId}`（`lv` 無しのID）で取得。`meta.status===200` かつ `data` があれば `data` を返す。失敗時 `undefined`。`programInfoInFlight`(Map) で `liveId` をキーに重複排除。⚠️ **用途限定**：フォローAPIがライブサムネを返さない番組の補完（[followPageSource.js](#servicesfollowpagesourcejs-) の `fillMissingDetails`）だけが呼ぶ。全番組には叩かない |
 
 - 失敗は `handleError` に記録し、例外は投げず false / undefined を返す方針。
 - 番組**詳細を一括取得**する経路（並びと突き合わせる本流）はフロントAPI方式（[followPageSource.js](#servicesfollowpagesourcejs-)）。`fetchProgramInfo` はそこから漏れた「ライブサムネが空の番組」だけを埋める補助であり、旧「全番組×詳細API」ではない。
@@ -78,22 +80,22 @@
 `{ id:"lv...", title, listingThumbnail, watchPageUrl, providerType:"community"|"channel"|"official",
 liveCycle, beginAt(ミリ秒エポック), endAt, isFollowerOnly, isPayProgram, programProvider:{id,name,icon,iconSmall},
 statistics:{watchCount,commentCount}, timeshift }`。watchページと同一オリジンなので content script から取得できる。
-リスト（並び順）は従来どおり notifybox、詳細のみをここで賄う。
+⚠️ リストは notifybox と**和集合**にする。並び順は notifybox 由来ではなく、ここが返す `beginAt` の降順で決める。
 
 | エクスポート | 説明 |
 |-------------|------|
-| `fetchFollowedProgramsViaPage()` ★ | 放送中フォロー番組の詳細を**ページングして全件**取得し、内部 programInfo 形の**配列**で返す。`fetchOnePage(offset)` を offset=0,1,2… と回し、`id` で重複排除しつつ `total` に達するまで蓄積（安全上限 `MAX_PAGES`）。集めた各番組を `mapApiProgramToInfo` で変換 → ライブサムネが空の番組を `fillMissingLiveThumbnails` で補完 → 返す。失敗（未ログイン/仕様変更/通信エラー、`res.ok` 偽含む）時は `null`。`UpdateManager._refreshDetailsViaScrape` が結果を `upsertProgramInfos` で storage へ一括投入する |
+| `fetchFollowedProgramsViaPage()` ★ | 放送中フォロー番組の詳細を**ページングして全件**取得し、内部 programInfo 形の**配列**で返す。`fetchOnePage(offset)` を offset=0,1,2… と回し、`id` で重複排除しつつ `total` に達するまで蓄積（安全上限 `MAX_PAGES`）。集めた各番組を `mapApiProgramToInfo` で変換 → 穴のある番組を `fillMissingDetails` で補完 → 返す。失敗（未ログイン/仕様変更/通信エラー、`res.ok` 偽含む）時は `null`。`UpdateManager._refreshDetailsViaScrape` が結果を `upsertProgramInfos` で storage へ一括投入する |
 | `mapApiProgramToInfo(p)` | フロントAPIの1番組を、詳細API相当の内部 programInfo 形（`id="lv..."`, `title`, `providerType`, `contentOwner`, `viewers`(watchCount), `comments`(commentCount), `isMemberOnly`(isFollowerOnly), `onAirTime.beginAt`(beginAt(ms)→ISO), サムネURL群, `status`, `watchPageUrl`, `_source:'followApi'`）へ変換。`makeProgramElement`/`resolveLiveThumbnailBaseUrl`/`calculateActivePoint` がそのまま読めるshape。`p.id` が無ければ `null` |
 | `fetchOnePage(offset)`（内部） | 1ページ取得。`?status=onair&offset=<0始まりページ番号>&limit=PAGE_LIMIT` を `credentials:'include'` で fetch し、`{ programs, total }` を返す。`res.ok` が偽なら throw（→ `fetchFollowedProgramsViaPage` の catch で `null`） |
-| `fillMissingLiveThumbnails(programs)`（内部） | **選択的フォールバック**。map済み配列のうち `thumbnailUrl` が空の番組（配信者が固定画像を設定／放送直後で未生成）だけ、`fetchProgramInfo`（詳細API）を叩いて `liveScreenshotThumbnailUrls` を**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦） |
+| `fillMissingDetails(programs)`（内部） | **選択的フォールバック**。①`thumbnailUrl` が空の **user** 番組（固定画像設定／放送直後で未生成）→ライブサムネを補完 ②**channel/official** で名前かアイコンが空→`contentOwner` を補完（フォローAPIは `programProvider` を返さないため）。`fetchProgramInfo`（詳細API）を叩いて**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦） |
 | `mapProviderType(pt)`（内部） | `'channel'`/`'official'`→`'channel'`、それ以外(`community`/`user`/未知)→`'user'` |
-| `isLiveScreenshotUrl(u)`（内部） | ライブスクショURLかどうか（配信者設定の**固定画像**と区別）。`/screenshot/` を含む or `dlive.nicovideo.jp` 形なら true。`mapApiProgramToInfo`（listingThumbnail採否）と `fillMissingLiveThumbnails`（補完候補の採否）で使う |
+| `isLiveScreenshotUrl(u)`（内部） | ライブスクショURLかどうか（配信者設定の**固定画像**と区別）。`/screenshot/` を含む or `dlive.nicovideo.jp` 形なら true。`mapApiProgramToInfo`（listingThumbnail採否）と `fillMissingDetails`（補完候補の採否）で使う |
 | `followApiUrl` | `https://live.nicovideo.jp/front/api/pages/follow/v1/programs` |
 | （グローバル）`window.__testFollowScrape()` | 実ページのConsoleから取得結果を件数＋表(`console.table`)で確認するデバッグ用（`debugTestFollowScrape`。現在はAPI経路を叩く） |
 
 - **定数（モジュール内）**：`PAGE_LIMIT=100`（1リクエストあたり件数。notifybox の rows=100 に対応）、`MAX_PAGES=5`（ページング安全上限＝最大500件）、`MAX_DETAIL_FALLBACK=30`（1サイクルで詳細APIを呼ぶ上限）。
 - **ページング実装済み**：`offset` は「0始まりのページ番号」（ページNは items[N×limit .. N×limit+limit)）。通常は1リクエストで済む（limit=100 が放送中フォロー100件未満をカバー）。同時放送中のフォローが**100件を超えても**offsetを進めて全件の詳細を取得する。
-- サムネは JSON API の `listingThumbnail` 1枠のみ。ライブスクショ形のときだけ採用し、固定画像は空にして表示しない（`isLiveScreenshotUrl` フィルタ）。空になった番組は上記 `fillMissingLiveThumbnails` の詳細APIで補完する。
+- サムネは JSON API の `listingThumbnail` 1枠のみ。ライブスクショ形のときだけ採用し、固定画像は空にして表示しない（`isLiveScreenshotUrl` フィルタ）。空になった番組は上記 `fillMissingDetails` の詳細APIで補完する。
 - 失敗時は `handleError` に記録して `null` を返すのみ。**本流の一括取得に失敗した周は詳細が古い/欠けるだけ**（意図的。全体フォールバックは無い）。
 
 ---
@@ -140,31 +142,35 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 コンストラクタ: `(appState, loadingManager, options, elems, loadingImageURL)`。
 
 **データ取得の役割分担**:
-- リスト（並び順の元）: notifybox（`getLivePrograms`）
-- 詳細（視聴者数/コメント/ライブサムネURL/配信者/会員限定/開始時刻）: フォロー中ページのスクレイプ**1回**（`_refreshDetailsViaScrape`）で全番組ぶんを storage へ一括 upsert
-- サムネ画像の再取得: 番組ごとの独立・自己連鎖タイマー（`startThumbnailUpdate`→`_syncThumbTimers`→`_runThumbCycle`）が、各カードの `<img>` を保存済みURL＋キャッシュバスターで更新
+- リスト: notifybox（`fetchLivePrograms`）とフォローAPIの**和集合**（`_mergeSources`）。notifybox は新着検知が速く、フォローAPIは詳細・並び順・100件超を担う
+- 並び順: `_orderByBeginAtDesc` が **`beginAt` 降順**で決める（`data-api-index` はその位置）
+- 詳細（視聴者数/コメント/ライブサムネURL/配信者/会員限定/開始時刻）: フォロー中ページのフロントJSON API **1回**（`_refreshDetailsViaScrape`）で全番組ぶんを storage へ一括 upsert
+- サムネ画像の再取得: **常設ループ1本**（`startThumbnailLoop`→`_thumbTick`）＋番組ごとの期限表（`_thumbDueAt`）が、各カードの `<img>` を保存済みURL＋キャッシュバスターで更新
 
 詳細はリストと**同時**（`updateSidebar` 内で `Promise.all` 並列）に storage へ載るため、カード生成時点で人気度（active-point）が確定している。よって旧「詳細が揃うまで新着順で待つ」整列確定機構（settling 等）は**不要**になり撤去された。
 
 | メソッド | 説明 |
 |---------|------|
-| `startThumbnailUpdate()` | **番組ごとの独立・自己連鎖タイマー方式**を起動する。二重開始防止（冪等）フラグ＋世代カウンタを進め、`appState.timers.thumbnail` にはセンチネル `true` だけを立てて（停止フック/二重開始ガード用。実タイマーは `_thumbTimers` Map）、`_syncThumbTimers()` を呼ぶ。読み込み時の一斉更新は `performManualUpdate` が担うので、ここは以後の更新だけを受け持つ |
-| `stopThumbnailUpdate()` | サムネ更新を停止し、全番組の `_thumbTimers`・安全ガード（`_pendingGuards`）を片付ける。`main.js` の `stopAllTimers`（サイドバー閉）と `cleanup`（ページ離脱）の両方から呼ぶ |
-| `_syncThumbTimers()`（内部） | 現在のカードと `_thumbTimers` を突き合わせ、新規カードにサイクルを開始・消えたカードのタイマーを破棄。`startThumbnailUpdate` 開始時と `updateSidebar` 末尾（新規/削除カードの後）で呼ぶ。初回サイクルは基準間隔後に張る（読み込み直後の一斉更新は `performManualUpdate` が担うため） |
-| `_runThumbCycle(id)`（内部） | 1番組の1サイクル。空＆若い番組なら詳細API追撃（`_fetchLiveThumbIfPendingYoung`）→その番組の `<img>` を1件更新し画像読み込み完了を待つ（`_updateOneThumbnailAndWait`）→ `updateThumbnailInterval`(20秒)後に次サイクルを張る自己連鎖。周期が毎回わずかに違うため自然にドリフトする。`document.hidden` 中は更新せず軽く次サイクルだけ張る（rAF停止で `onSettled` が来ないため）。世代不一致（stop/再開跨ぎ）の古いサイクルは張り直さない |
+| `startThumbnailLoop()` | サムネ更新の**常設ループ**を開始（setup から1回だけ）。以後**作り直さない**ので孤児化・二重化が構造上起こらない。冪等（`_thumbLoopRunning` で判定。`_thumbLoopTimer` は tick 実行中 null になるため使わない） |
+| `destroyThumbnailLoop()` | 常設ループを止める（`cleanup` ＝ページ離脱時のみ）。**「閉じたら止める」には使わない**（閉じている間は `_thumbTick` が素通りする）。`_refreshThumbSchedule` から再武装できる |
+| `_syncThumbDueAt()`（内部） | 現在のカードと期限表 `_thumbDueAt` を突き合わせ、新規カードに初回期限を配り、消えたカードの期限を捨てる。**初回位相を周期内へ均等配置**する（同時起動だとドリフトが原理的に成立しないため）。⚠️ **この関数はタイマーを張らない**（tick から呼ばれるので張ると二重実行になる） |
+| `_refreshThumbSchedule()`（内部） | `_syncThumbDueAt()` ＋ 目覚ましの張り直し。ループの**外**からの呼び出し用（`updateSidebar` 末尾・サイドバーを開いた時） |
+| `_thumbTick()`（内部） | ループ1回ぶん。`isOpen` → **背景タブ** → 期限の来た最古の1件、の順で判定。空＆若い番組なら詳細API追撃（`_fetchLiveThumbIfPendingYoung`）→ `<img>` を1件更新して読み込み完了を待つ（`_updateOneThumbnailAndWait`）→ **完了してから** `now + 20秒` へ期限を置き直す＝周期20秒＋作業時間で自然ドリフト。`finally` で必ず次を張る。⚠️ 素通りした周は基準間隔ぶん待つこと（期限が過去のままだと0ms再帰で**2秒間に180回**回る。項目AE） |
 | `_updateOneThumbnailAndWait(id)`（内部） | その番組の `<img>` を1件更新し、画像の読み込み（全プリロード）が settle するまで待つ Promise。`updateThumbnailsFromStorage` の `onSettled` で検知。画像がハングしても基準間隔の2倍で安全にタイムアウトして前進 |
 | `_fetchLiveThumbIfPendingYoung(id)`（内部）★A1統合 | 「user・非会員・ライブサムネ空」かつ `onAirTime.beginAt` が `newProgramFastPollMs`(3分)以内の若い番組だけ、詳細API `fetchProgramInfo` で1回追撃し、取れたら `patchProgramThumbnail` でサムネ欄だけをマージ更新（await 跨ぎの lost update 回避）。3分超の空番組は追撃せずスクレイプ `fillMissingDetails` に委譲。旧「別建てA1バッチ `_retryPendingLiveThumbnails`／8回打ち切り／10件/回上限」は撤去済み |
 | `startSidebarLoop()` | 常設ループを開始（`main.js` の setup から1回だけ）。以後**作り直さない**ので孤児化・二重化が構造上起こらない。冪等（`_sidebarLoopRunning` で判定。`_sidebarLoopTimer` は tick 実行中 null になるため使わない） |
 | `destroySidebarLoop()` | 常設ループを止める（`cleanup` ＝ページ離脱時のみ）。**「閉じたら止める」には使わない**。完全な片道にはせず `resetSidebarSchedule` から再武装できる（bfcache 復帰・遷移キャンセルでページが生き残る場合があるため） |
 | `resetSidebarSchedule()` | 次回取得の期限を「今から1周期後」に置き直すだけ（旧 `restartSidebarUpdate` 相当）。ループは作らない。呼ばれるのは**サイドバーを開いた時／手動更新の完了後／更新間隔の変更時**の3箇所で、いずれも `isOpen` ガード付き |
-| `_sidebarTick()` | ループ1回ぶん。毎回 `isOpen` → 期限（`_sidebarNextDueAt`） → `isLoading()` の順で判定して素通りする。**裏タブ判定は無い**（655df9c の意図的決定。`document.hidden` を見るのはサムネ側だけ）。取得したら**自分が始めたセッションだけ**を `finishSessionWithMinDuration(1000, sessionId)` で閉じる。`finally` で必ず次を張るのでループが死ぬ経路は destroy だけ。周期は「この回が終わった時点＋1周期」＝旧の自己再帰と同じく **interval＋作業時間**。**サムネの全件同時更新は呼ばない**（一斉感を無くすため。反映は各番組の自己連鎖サイクル任せ。新規/削除カードは `updateSidebar` 末尾の `_syncThumbTimers` が拾う） |
+| `_sidebarTick()` | ループ1回ぶん。毎回 `isOpen` → 期限（`_sidebarNextDueAt`） → `isLoading()` の順で判定して素通りする。**裏タブ判定は無い**（655df9c の意図的決定。`document.hidden` を見るのはサムネ側だけ）。取得したら**自分が始めたセッションだけ**を `finishSessionWithMinDuration(1000, sessionId)` で閉じる。`finally` で必ず次を張るのでループが死ぬ経路は destroy だけ。周期は「この回が終わった時点＋1周期」＝旧の自己再帰と同じく **interval＋作業時間**。**サムネの全件同時更新は呼ばない**（一斉感を無くすため。反映は各番組の自己連鎖サイクル任せ。新規/削除カードは `updateSidebar` 末尾の `_refreshThumbSchedule` が拾う） |
 | `performManualUpdate()` ★ | 手動更新（初回ロード・更新ボタン・タブ復帰・再オープン**共通**）。`updateSidebar()`→`updateThumbnail(true)`→最低1秒ローディング→（開いていれば）`resetSidebarSchedule()`。詳細は毎回スクレイプで全件更新されるためTTLや「軽量/しっかり」の区別は無い。**多重防止**：冒頭 `isPerformingManualUpdate` in-flight ガードで、開閉/タブ復帰/自動移動が重なった時の二重取得を直列化 |
 | `updateSidebar()` | リスト＋詳細を取得して描画。**開始したローディングセッションIDを返す**（呼び出し元が自分のぶんだけ閉じられるように）。既に別のセッションが動いている時は**新しく立てず相乗りし `null` を返す** — `startSession` は前セッションを finish せず上書きするため、素直に立てると持ち主からロックを奪い、それを閉じると持ち主がまだ走っているのに `isLoading()` が false へ落ちる |
-| `getLivePrograms(rows=100)` | `fetchLivePrograms` ラッパ。失敗時は `#api_error` を表示（ログイン促し） |
-| `_refreshDetailsViaScrape()` | `fetchFollowedProgramsViaPage()`（スクレイプ）→ 成功時のみ `upsertProgramInfos` で storage へ全件書き戻し。失敗時は何もしない＝その周は詳細が古いまま（**フォールバック無し**） |
-| `updateSidebar()` ★★ | ローディングセッション開始→ `Promise.all([getLivePrograms(100), _refreshDetailsViaScrape()])` で**リストと詳細を並列取得**→ スクレイプ upsert 後の `getProgramInfos()` を読む→ 一覧を回して**既存DOMは軽量更新**（active-point/title/link/`data-api-index`）、**新規は`makeProgramElement`で生成**（詳細が無い番組は notifybox の生データで生成＝タイトルのみ）→ `replaceChildren(frag)`→ソート（`options.programsSort` で最初から確定）→カラム幅→番組数更新→**末尾で `_syncThumbTimers()`**（新規/削除カードに合わせて番組ごとの自己連鎖サムネタイマーを生成/破棄）。番組ごとに try/catch で1件失敗しても全体は描画。失敗/空配列時は既存DOM維持 |
-| `updateThumbnail(force, onComplete, onlyIds, onSettled)` | 挿入中(`isInserting`)なら何もしない→ `getProgramInfos()`→ `updateThumbnailsFromStorage` に委譲。`onlyIds` 指定時はその番組だけ更新（番組ごと自己連鎖サイクル）、未指定なら全件（読み込み時の一斉更新）。`onSettled` は画像の読み込み完了(settle)で発火し、各番組サイクルが「作業完了後に次の20秒を張る」ために使う |
+| `_refreshDetailsViaScrape()` | `fetchFollowedProgramsViaPage()`（メソッド名は据え置き。実体はスクレイプではなくJSON API）→ 成功時のみ `upsertProgramInfos` で storage へ全件書き戻し。失敗時は何もしない＝その周は詳細が古いまま（**フォールバック無し**） |
+| `updateSidebar()` ★★ | ①セッション開始（動いていれば相乗り）②**描画世代を採番**（`++_renderGen`）③`Promise.all([fetchLivePrograms(100), _refreshDetailsViaScrape()])` ④**世代チェック** — 後発の取得が既に描画済みなら**ここで降りる**（項目AP）⑤`_mergeSources` で和集合 → `_orderByBeginAtDesc` で `beginAt` 降順 ⑥既存カードは**その場更新**（`applyProgramInfoToCard`＝タイトル/リンク/配信者名/アイコン/`data-src`＋`active-point`/`data-api-index`）、新規は `makeProgramElement` ⑦**構造が変わった時だけ**（追加・削除・`_sortOrderChanged`）`flipReorder` のコールバック内でフラグメントを組んで `replaceChildren` →ソート ⑧カラム幅→番組数→`_refreshThumbSchedule()`。番組ごとに try/catch で1件失敗しても全体は描画。**両方**失敗時と和集合が空の時は既存DOM維持 |
+| `updateThumbnail(force, onComplete, onlyIds, onSettled)` | 挿入中(`isInserting`)なら**1回だけ警告を出して**即完了扱い（🔴 現状**到達不能**。差し替え区間は同期なので観測できない。到達したら描画が非同期化された印＝項目AL）→ `getProgramInfos()`→ `updateThumbnailsFromStorage` に委譲。`onlyIds` 指定時はその番組だけ更新（常設ループの1件更新）、未指定なら全件（読み込み時の一斉更新）。`onSettled` は画像の読み込み完了(settle)で発火し、各番組サイクルが「作業完了後に次の20秒を張る」ために使う |
 | `sortProgramsInContainer(container)` | `sortPrograms(container, options.programsSort)`（詳細が揃っているので設定どおりのソートを最初から適用） |
+| `_sortOrderChanged(container)`（内部） | 今のDOM順が、あるべき順と食い違うか（＝並べ替えが要るか）を**DOMを触らずに**判定。比較器は `utils/programOrder.js` の `orderComparator` を使う。🔴 **ここに比較器を書き直さないこと**（実際の並べ替えと食い違うと、全カードが毎周期スライドするか、必要な並べ替えが永久にスキップされる） |
+| `_mergeSources(notifyList, fetched)`（内部） | 2つの取得元の**和集合**。フォローAPIの結果を優先し、notifybox にしか無い番組は storage のキャッシュ、無ければ最小限の仮データでカード化する |
+| `_orderByBeginAtDesc(programs)`（内部） | `beginAt` 降順（同時刻は lv番号降順）。この位置が `data-api-index` になる |
 | `updateProgramCount(count)` | `#program_count` の数字更新 |
 | `_currentUpdateIntervalMs()`（内部） | `Number(options.updateProgramsInterval) * 1000`。リスト＋詳細サイクルの周期 |
 
@@ -220,8 +226,12 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `calculateActivePoint(data)` | 人気度スコア = `(viewers+1 + comments+1) / max(1, 経過分)`。`onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete,onlyIds,onSettled})` ★★ | localStorageの番組情報を元に各サムネを更新。既定は**コンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`onlyIds` 指定時はその id 集合の番組だけ更新（番組ごと自己連鎖サイクルで使う）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。**`onSettled`** は全プリロードが settle したら1回だけ発火し、`_updateOneThumbnailAndWait` がこれを待って次サイクルを張る（＝作業時間ぶん自然にドリフトする） |
-| `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体） |
-| `flipReorder(container, reorderFn, duration=300)` | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。⚠️ 旧「人気順の初回最終ソート」で使っていたが整列確定機構の撤去で**現状どこからも呼ばれていない**（export のみ残置） |
+| `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体）。比較器は `utils/programOrder.js` の `compareByActivePoint` |
+| `resolveLiveThumbnailBaseUrl(info)` | ライブサムネのベースURLを provider 別に選ぶ純関数（user=`liveScreenshotThumbnailUrls.middle` / channel=`large1280x720ThumbnailUrl`） |
+| `deriveCardFields(data)` | 番組データ→カードに書く値一式（id/リンク/コミュ名/サムネURL/アイコン/タイトル）を導出する純関数。`makeProgramElement` と `applyProgramInfoToCard` の**共通の土台** |
+| `applyProgramInfoToCard(card, data)` ★ | **既存カードを作り直さずにその場で更新**（タイトル/リンク先/配信者名/アイコン/`data-src`）。⚠️ `img.src` は**触らない**（サムネ更新ループの担当。触ると動くサムネの状態が壊れる）。項目AK の修正本体 |
+| `setAnimThumbnailFeed(feed)` | 動くサムネ(②)への給餌フックを注入。①が `crossOrigin` で読んだ画像を②へ渡し、**②の自前取得＝二重通信を止める** |
+| `flipReorder(container, reorderFn, duration=300)` | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。**`UpdateManager.updateSidebar` から現役で呼ばれている**（定期更新の並べ替えアニメ本体）。🔴 `reorderFn` の中でフラグメントを組むこと。外で組むと既存カードが親から外れた状態で First を測ることになり、**毎回空振りする**（項目AM） |
 | `buildSidebarShell({reloadImageURL, optionsImageURL})` ★ | サイドバー枠HTML(`sidebarHtml`)・境界線(`sidebarLine`)・オプションフォーム(`optionHtml`)の文字列を返す。`main.js` が body に挿入。オプションフォームの全ラジオ(表示順序/自動更新/オートオープン/自動移動)はここに定義 |
 
 > データキー: サムネURLの `key` は user=`u|{base}`, channel=`c|{base}`。ユーザー配信のみ `?cache={now}` を付与してキャッシュ回避。
@@ -271,11 +281,29 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 ---
 
+## utils/programOrder.js ★
+
+**並び順の比較器の唯一の定義**（2026-07-30 新設）。
+
+| 関数 | 説明 |
+|------|------|
+| `compareByActivePoint(a, b)` | 人気順（`active-point` 降順）。**tie-break 無し**＝同点は現状順を保つ（`parseFloat` の NaN との比較が常に false になることと `sort` の安定性による） |
+| `compareByApiIndex(a, b)` | 新着順（`data-api-index` 昇順＝放送開始が新しい順）。第2キーは lv番号降順だが、`data-api-index` はカード間で常に一意なので**実際には効いていない**（属性欠けの保険） |
+| `orderComparator(sortType)` | 設定値から比較器を選ぶ。`'active'` なら人気順、それ以外は新着順 |
+
+> 🔴 **比較器をここ以外に書かないこと。** 従来は3箇所（`sorting.js`／`sortProgramsByActivePoint`／`UpdateManager._sortOrderChanged`）に重複しており、
+> 「実際に並べ替える処理」と「並べ替えが要るかの判定」が食い違うと、**毎周期 `replaceChildren` が走って全カードが毎回スライドする**か、
+> 逆に**必要な並べ替えが永久にスキップされる**。詳細は [09 項目AR](./09-gotchas-and-techdebt.md)。
+
+> ⚠️ tie-break を「改善」しないこと。見た目が変わる。
+
+---
+
 ## utils/sorting.js
 
 | 関数 | 説明 |
 |------|------|
-| `sortPrograms(container, sortType)` | `sortType==='active'` → `sortProgramsByActivePoint`（人気順）。それ以外(=`newest`) → **notifybox API の並び順(=放送開始が新しい順)を保持**。`updateSidebar` が各カードに付ける `data-api-index`（API配列の位置）の**昇順**に並べる（lv番号は予約/作成順で放送開始順とズレるため不採用）。同時刻/欠落時のみ lv番号降順フォールバック |
+| `sortPrograms(container, sortType)` | `sortType==='active'` → `sortProgramsByActivePoint`（人気順）。それ以外(=`newest`) → `compareByApiIndex`（`utils/programOrder.js`）で `data-api-index` 昇順に並べる。この属性は `updateSidebar` が **`beginAt` 降順**で並べた位置を書き込んだもの（lv番号は予約/作成順で放送開始順とズレるため主キーには不採用） |
 
 ---
 
@@ -358,18 +386,17 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 |------|------|
 | `setElems()` | ニコ生ページの各要素を `elems` に収集（`[class*="..."]` 部分一致でハッシュ付きクラスに対応） |
 | `DOMContentLoaded` ハンドラ | `?popup=on` なら終了。`getOptions()`→`appState` へ反映→`setElems()`→`#root` 無ければ終了→**`setup()`（1回のみ）** |
-| `setup()` ★ | サイドバー挿入→`reflectOptions()`→**3 Manager（Loading/AutoNext/Update）生成**→レイアウト調整→resize/ResizeObserver/theaterボタン/更新ボタン/オプションポップアップ/サイドバーボタン/境界線ドラッグを配線→**初期開閉状態を適用**→`autoNextProgram==='on'` なら watcher 開始→`beforeunload/pagehide`で`cleanup`→**visibilitychange** 監視 |
-| `cleanup()` | `appState.cleanup()`＋`UpdateManager.stopThumbnailUpdate()`（番組ごとの自己連鎖タイマーを全停止）＋サムネ監視破棄＋onResize解除＋モーダル閉じ |
-| `stopAllTimers()` | `UpdateManager.stopThumbnailUpdate()`（番組ごとの自己連鎖サムネタイマーを全停止）＋sidebar/autoNext をクリア |
-| `handleSidebarOpenStateChange(open)` ★ | 開: thumbnail/sidebarタイマー開始＋`performManualUpdate()` を RAF/フォールバックで実行。閉: 全タイマー停止 |
-| `startThumbnailUpdate` | UpdateManager へ委譲。thumbnail の停止は `stopAllTimers`（サイドバー閉）と `cleanup`（ページ離脱）の両方から `UpdateManager.stopThumbnailUpdate()` を呼ぶ |
+| `setup()` ★ | サイドバー挿入→`reflectOptions()`→**3 Manager（Loading/AutoNext/Update）生成**→レイアウト調整→resize/ResizeObserver/theaterボタン/更新ボタン/オプションポップアップ/サイドバーボタン/境界線ドラッグを配線→**初期開閉状態を適用**→`autoNextProgram==='on'` なら watcher 開始→`beforeunload/pagehide`で`cleanup`（⚠️ `visibilitychange` の監視は**していない**＝655df9c で撤去） |
+| `cleanup()` | `appState.cleanup()`＋`UpdateManager.destroyThumbnailLoop()`＋`destroySidebarLoop()`（更新ループ2本を停止）＋onResize解除＋モーダル閉じ |
+| `stopAllTimers()` | **自動移動のカウントダウンを取り消すだけ**（`autoNextManager.cancelScheduledNavigation()`）。更新ループ2本には触らない。⚠️ `clearTimer('autoNext')` だけで済ませないこと — タイマーは止まっても `scheduled` フラグが残り、以後そのページで自動移動が二度と動かなくなる（doc/09 項目AF） |
+| `handleSidebarOpenStateChange(open)` ★ | 開: `resetSidebarSchedule()` → `_refreshThumbSchedule()` → `performManualUpdate()` を RAF/フォールバックで実行。**ループの起動はしない**（setup で起動済み）。閉: `stopAllTimers()`＝自動移動のキャンセルのみ |
 | `updateSidebar`（ラッパー） | AutoNextManager へ注入される番組終了時のリスト更新。`updateManager.updateSidebar()` の戻り値が非 null の時だけ、**自分が始めたセッションを自分で閉じる**（旧実装では誰も閉じず、定期チェーンの無条件 finish が偶然の回収役になっていた） |
 | `hideAutoNextModal`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲（`ensure/showModal`・`scheduleNavigation` は AutoNextManager が内部で直接呼ぶため main.js ラッパーは 2026-07-11 整理で削除） |
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |
 | `resetSidebarSchedule` | UpdateManager へ委譲（次回取得の期限を置き直すだけ。ループは作らない） |
 | `getOptions()` | `storage.getOptions(defaultOptions)` |
 | `insertSidebar()` ★ | `buildSidebarShell` の結果を `body` 先頭に挿入、`#optionContainer` に設定HTMLを挿入（**body直下へは移動しない＝サイドバー内に保持**）、`elems.sidebar` 等を確定、body を `display:flex` に、`#root` を `flexGrow:1` に |
-| `applyTheme(theme)` ✅新規 | `document.body` に `nicosidebar-light` クラスをトグル（`theme==='light'`）。CSS変数(`--sb-*`)が切り替わる。setup時＋onChangedで適用。`#theme_toggle` クリックで `dark`⇄`light`、`setSidebarTheme` で保存 |
+| `applyTheme(theme)` ✅新規 | `document.body` に `nicosidebar-light` クラスをトグル（`theme==='light'`）。CSS変数(`--sb-*`)が切り替わる。setup時＋onChangedで適用。`input[name="sidebarTheme"]` のラジオで `dark`⇄`light`、`setSidebarTheme` で保存 |
 | `finishLoadingSession`, `performManualUpdate`, `updateSidebar` | 各 Manager への委譲ラッパー（実処理は各 Manager のメソッドが担う） |
 | `sortPrograms(container)` | `sortProgramsUtil(container, options.programsSort)` |
 | `reflectOptions()` | `setupOptionsHandler(options, sortPrograms)` |

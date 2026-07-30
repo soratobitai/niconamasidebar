@@ -20,7 +20,7 @@
 - **リクエスト**: `GET ${notifyboxAPI}?rows=100`、**`credentials:'include'`（Cookie送信）**。ログイン状態でフォロー番組を取得するためCookieが必要。
 - **重複排除**: `liveProgramsInFlight`(Map, key=`rows`) でin-flight共有、`finally`で削除。
 - **成功判定**: `meta.status===200 && data.notifybox_content`。**戻り値は `data.notifybox_content`（配列）**。失敗時 `false`。
-- **失敗時UI**: `getLivePrograms` が `#api_error` を `block`（ログイン誘導）表示。
+- **失敗時UI**: `updateSidebar` が **notifybox とフォローAPIの両方**に失敗した時だけ `#api_error` を `block`（ログイン誘導）表示。片方でも取れていれば描画するので出さない。
 - **リスト要素で参照するフィールド**: `program.id`（**lvなし数値**）、`program.title`。
   - 詳細はフロントAPI由来（`lv`付きで格納）を `programInfos.find(info.id==='lv'+program.id)` で突合。突合できない番組（フロントAPI取得失敗など）はリスト要素そのまま `makeProgramElement` に渡り、タイトルのみの暫定描画になる。ページングで全件取得するため、放送中フォローが100件を超えても詳細が付く（→ §1-2）。
 
@@ -53,12 +53,12 @@
 | `watchPageUrl` | `watchPageUrl` | 視聴ページURL |
 
 - **サムネURLの選定**: フロントAPIは `listingThumbnail` の**1枠のみ**を返す。`isLiveScreenshotUrl`（`/screenshot/` を含む・`dlive.nicovideo.jp` 由来）で**ライブスクショ形のときだけ採用**。配信者設定の固定画像（`listing-thumbnail...thumbnail_{ts}.png` 形）はライブ形でないため空文字にする（→ **常にライブスクショ**というユーザー要件）。空になった番組は次項の補完対象。
-- **ライブサムネの選択的補完**（`fillMissingLiveThumbnails`）: `thumbnailUrl` が空の番組（**固定画像配信者**／**放送直後で未生成**）だけ、番組ごとの詳細API `fetchProgramInfo()`（`liveInfoAPI`）を叩いて `liveScreenshotThumbnailUrls` を回収する。空の番組は通常0〜数件で、上限 `MAX_DETAIL_FALLBACK=30`／サイクル。**全番組×詳細API**の旧方式の重さは避けたまま穴だけ埋める。個別失敗は空のまま（次サイクルで再挑戦）。
+- **穴の選択的補完**（`fillMissingDetails`）: `thumbnailUrl` が空の番組（**固定画像配信者**／**放送直後で未生成**）だけ、番組ごとの詳細API `fetchProgramInfo()`（`liveInfoAPI`）を叩いて `liveScreenshotThumbnailUrls` を回収する。空の番組は通常0〜数件で、上限 `MAX_DETAIL_FALLBACK=30`／サイクル。**全番組×詳細API**の旧方式の重さは避けたまま穴だけ埋める。個別失敗は空のまま（次サイクルで再挑戦）。
 
 ### 1-3. 呼び出し制御
-- **リスト＋詳細を毎サイクル同時取得**: `updateSidebar` が `Promise.all([getLivePrograms(), _refreshDetailsViaScrape()])` を実行。前者は notifybox（`data.notifybox_content`）、後者はフォロー中ページ・フロントAPI（`_refreshDetailsViaScrape` 内で `fetchFollowedProgramsViaPage` を呼ぶ）→ `upsertProgramInfos` で storage へ全件一括 upsert。
-- **周期**: `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新（初回ロード・更新ボタン・タブ復帰・サイドバー再オープン）。**非表示タブでは1周期スキップ**（可視復帰時に `visibilitychange` ハンドラが即取り直す）。
-- **キュー廃止**: 詳細はキューを使わずフロントAPIのページングで全件取得するため、レート制限・`processInterval`・`maxRequestsPerSecond`・新番組の30秒先行スキャンは**いずれも撤去済み**。API監視デバッグ（`window.apiCallCounter` / `window.showApiStats`）も撤去。番組ごとの詳細API呼び出しは**固定画像番組のサムネ補完**（`fillMissingLiveThumbnails`、上限30/サイクル）に限定して残る。
+- **リスト＋詳細を毎サイクル同時取得**: `updateSidebar` が `Promise.all([fetchLivePrograms(100), _refreshDetailsViaScrape()])` を実行。取得結果は**和集合**にする（`_mergeSources`）。前者は notifybox（`data.notifybox_content`）、後者はフォロー中ページ・フロントAPI（`_refreshDetailsViaScrape` 内で `fetchFollowedProgramsViaPage` を呼ぶ）→ `upsertProgramInfos` で storage へ全件一括 upsert。
+- **周期**: `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新（初回ロード・更新ボタン・タブ復帰・サイドバー再オープン）。⚠️ **裏タブでもスキップしない**（`visibilitychange` ハンドラは存在しない。655df9c で撤去済み）。
+- **キュー廃止**: 詳細はキューを使わずフロントAPIのページングで全件取得するため、レート制限・`processInterval`・`maxRequestsPerSecond`・新番組の30秒先行スキャンは**いずれも撤去済み**。API監視デバッグ（`window.apiCallCounter` / `window.showApiStats`）も撤去。番組ごとの詳細API呼び出しは**穴の補完**（`fillMissingDetails`、上限30/サイクル）に限定して残る。
 
 ---
 
