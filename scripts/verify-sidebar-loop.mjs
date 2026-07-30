@@ -985,7 +985,11 @@ async function listSrcFiles() {
  */
 async function render() {
     const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
-    const T = 1800000000000
+    // ⚠️ 必ず**過去**の時刻を基準にすること。calculateActivePoint は
+    //    `Math.max(1, Math.floor((now - beginAt) / 60000))` で経過分を出すので、未来時刻だと
+    //    全番組が 1 に潰れて active-point が視聴者数だけの関数になり、人気順の検証が骨抜きになる。
+    //    固定の未来エポックを書くと、その日付が来た瞬間に挙動が変わって間欠NGになる。
+    const T = Date.now() - 600000
     const h = buildRenderHarness({ intervalSec: 60, programsSort: 'newest' })
     const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
 
@@ -1103,6 +1107,63 @@ async function render() {
     h.restore()
 }
 
+/**
+ * 項目AP: 遅れて着地した古い取得結果が、新しい描画を巻き戻さないこと。
+ *
+ * updateSidebar は3経路から呼ばれるが、AutoNext 経路（main.js）だけ _isUpdateInFlight() ガードが
+ * 無いので、定期tickの取得中に別の updateSidebar が始まりうる。取得は「始めた時刻のスナップショット」
+ * なので、遅い方が後から着地すると、その数秒間に始まった新番組を削除検知が「終わった番組」と
+ * 誤判定して消す。
+ */
+async function raceRender() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    const h = buildRenderHarness({})
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    // active-point が「放送開始からの経過分」を使うので、必ず**過去**の時刻にする。
+    // 未来時刻だと Math.max(1, ...) に潰れて人気順の検証が骨抜きになる。
+    const T = Date.now() - 600000
+
+    // フォローAPI応答に遅延を足す。呼ばれた瞬間の一覧をスナップショットしてから遅延させる
+    // ＝実物の「取得に数秒かかる間に世界が進む」の再現。
+    const base = globalThis.fetch
+    let latency = 0
+    globalThis.fetch = async (url) => {
+        if (!String(url).includes('/front/api/pages/follow/')) return base(url)
+        const snap = h.state.followPrograms.slice()
+        await sleep(latency)
+        const saved = h.state.followPrograms
+        h.state.followPrograms = snap
+        try { return await base(url) } finally { h.state.followPrograms = saved }
+    }
+
+    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+    h.state.notifyRows = []
+    h.state.followPrograms = [apiProgram({ id: 'lv100', beginAtMs: T + 2000 }), apiProgram({ id: 'lv200', beginAtMs: T + 1000 })]
+    await run()
+
+    console.log('=== AP 遅れて着地した古い取得が新しい描画を巻き戻さないか ===')
+    check('AP 前提: 初期描画ができている', h.dom.ids().join(',') === '100,200', h.dom.ids().join(','))
+
+    latency = 300
+    const A = run()                       // 遅い方（lv400 を知らない）
+    await sleep(40)
+    h.state.followPrograms = [apiProgram({ id: 'lv400', beginAtMs: T + 9000 }), ...h.state.followPrograms]
+    latency = 0
+    const B = run()                       // 速い方（lv400 を知っている）
+    await B
+    const afterB = h.dom.ids().join(',')
+    check('AP 後発の取得が新番組を描画する', afterB === '400,100,200', afterB)
+    await A
+    const afterA = h.dom.ids().join(',')
+    check('AP 先発（古い）取得が着地しても新番組が消えない', afterA === '400,100,200',
+        afterA === '100,200' ? '消えた＝世代チェックが効いていない' : afterA)
+    check('AP 件数表示も巻き戻らない', h.dom.getById('program_count').textContent === '3',
+        h.dom.getById('program_count').textContent)
+
+    globalThis.fetch = base
+    h.restore()
+}
+
 // ============================================================
 const real = process.argv.includes('--real')
 
@@ -1147,6 +1208,8 @@ if (real) {
     console.log('')
     // 最後に置く。モックDOMを globalThis へ差し込むので、他のグループの最小スタブと混ぜない。
     await render()
+    console.log('')
+    await raceRender()
 }
 
 console.log(`\n${failures === 0 ? '全項目 合格' : `${failures} 項目が不合格`}`)

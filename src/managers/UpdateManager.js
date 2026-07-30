@@ -52,6 +52,10 @@ export class UpdateManager {
         this._sidebarLoopRunning = false; // 二重開始ガード（_sidebarLoopTimer は tick 実行中 null になるため当てにしない）
         this._sidebarLoopStopped = false; // destroySidebarLoop で true。resetSidebarSchedule で復帰しうる
         this._sidebarNextDueAt = 0;      // 次に updateSidebar してよい時刻（epoch ms）
+
+        // 描画の世代。updateSidebar が入口で採番し、取得の await 明けに自分が最新かを確認する。
+        // 遅れて着地した古い取得結果で新しい描画を巻き戻さないため（doc/09 項目AP）。
+        this._renderGen = 0;
     }
 
     /**
@@ -618,6 +622,15 @@ export class UpdateManager {
         // 呼び出し側は null の時に finish しなければよい。
         const sessionId = this.loadingManager.startSession();
 
+        // 描画の世代を採番する。取得の await 明けに「自分がまだ最新か」を確認するため。
+        //
+        // 🔴 **セッションの相乗りは描画の排他にはならない。** startSession が null を返すのは
+        //    「スピナーの持ち主は別にいる」という意味だけで、取得も描画も普通に進む。
+        //    updateSidebar は3経路から呼ばれ、うち **AutoNext 経路（main.js）だけ
+        //    `_isUpdateInFlight()` ガードが無い**（定期tickは441行、手動更新は
+        //    isPerformingManualUpdate で弾いている）。よって重なりうる。
+        const myGen = ++this._renderGen;
+
         try {
             // 2つの取得元を並列に叩き、**和集合**を表示する（doc/09 項目AD）。
             //
@@ -632,6 +645,25 @@ export class UpdateManager {
                 fetchLivePrograms(100),          // 失敗時 false
                 this._refreshDetailsViaScrape(), // 失敗時 null
             ]);
+
+            // 🔴 自分より後に始まった取得が既に描画を終えていたら、ここで降りる（doc/09 項目AP）。
+            //
+            // `livePrograms` は**取得を始めた時刻のスナップショット**であって、着地時点の現実ではない。
+            // フォローAPIは1ページずつ await で回す逐次ページングなので、フォローが多い日は数秒かかる。
+            // その数秒の間に始まった新番組は、こちらのスナップショットには載っていない。
+            // 載っていないまま描画すると、削除検知（「DOMにあって新リストに無い」）が
+            // **新番組を「終わった番組」と誤判定してカードを消す**。
+            //
+            // 実測（scripts/verify-sidebar-loop.mjs の raceRender）:
+            //   B着地 → [400,100,200]（新番組が出る）→ A着地 → [100,200]（消える）
+            // 復活は次の周期なので、設定によっては最大180秒ぶん表示されない。
+            // 「新しく始まった番組をすぐ拾う」ために notifybox とフォローAPIの和集合まで
+            // 用意している（項目AD）のに、その成果をここで捨てていた。
+            //
+            // ⚠️ 判定はここ（await の直後・描画に触る前）に置くこと。これより後ろに置くと
+            //    apiErrorElement の表示や updateProgramCount を古い結果で上書きしてしまう。
+            // ⚠️ セッションは閉じさせる必要があるので sessionId は返す（呼び出し元の後始末）。
+            if (myGen !== this._renderGen) return sessionId;
 
             // ログイン誘導は「両方失敗」の時だけ出す（＝未ログイン/通信断）。
             // 片方でも取れていれば描画できるので、エラー表示はしない。
