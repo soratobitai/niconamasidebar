@@ -724,11 +724,6 @@ export class UpdateManager {
             if (structuralChange) {
                 // 構造が変わった時だけ組み替える：既存を再利用＋新規を API順に並べて置換し、ソート。
                 this.appState.update.isInserting = true;
-                const frag = document.createDocumentFragment();
-                for (const id of orderedIds) {
-                    const el = existingMap.get(id) || newElements.get(id);
-                    if (el) frag.appendChild(el);
-                }
 
                 // 定期更新で順位が入れ替わった時だけ FLIP でスライドさせる（doc/09 項目AI）。
                 //
@@ -744,7 +739,20 @@ export class UpdateManager {
                 //    flipReorder は何もせずに返る（＝初回は自動的にアニメ無し）。
                 // ⚠️ 設定で並び順を変えた時は**通さない**。ユーザー自身が起こした変化なので
                 //    瞬時に切り替わる方がよい（optionsHandler → main.js の sortPrograms 経路）。
+                //
+                // 🔴 **フラグメントの組み立ては必ずこのコールバックの中で行うこと。**
+                //    `frag.appendChild(既存カード)` は DOM 仕様上そのカードを**現在の親から取り外す**
+                //    （pre-insert → adopt → 旧親から remove）。外で組むと flipReorder が First を
+                //    測る時点で container が空になっており、firstRects が空 → moved が空 →
+                //    **FLIP が毎回何もせずに return する**（＝アニメが一度も出ない）。
+                //    2026-07-29 の初回配線で実際にこの形になっており、翌日にモックDOM検証で発覚した。
+                //    例外もログも出ないので、目視でしか気付けない類の壊れ方だった。
                 flipReorder(container, () => {
+                    const frag = document.createDocumentFragment();
+                    for (const id of orderedIds) {
+                        const el = existingMap.get(id) || newElements.get(id);
+                        if (el) frag.appendChild(el);
+                    }
                     container.replaceChildren(frag);
                     // ソート（詳細が揃っているので programsSort で確定できる）
                     this.sortProgramsInContainer(container);
