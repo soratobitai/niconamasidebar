@@ -1,14 +1,47 @@
+/**
+ * 視聴中の番組が終了したか（ニコ生の「番組終了ガイド」が出ているか）を判定する。
+ *
+ * ニコ生側の実装（2026-07-31 に `nicolib` / `pc-watch` バンドルから復元）:
+ *
+ * ```jsx
+ * <div class="…program-end-guide…">
+ *   {enquete && <UserCommunicationSatisfactionLevelEnquetePanel/>}   // これが出る時は下は出ない
+ *   {!enquete && <>
+ *     <div class="…announcement…"/>                                  // 「この番組は終了しました」＝無条件
+ *     <div class="…next-action-area…">                               // 無条件
+ *       {(l||c) && <div class="menu-area">
+ *         {c && <BroadcastRequestEnlightenmentSection/>}             // ← リクエストボタンはこの中だけ
+ *       </div>}
+ *     </div>
+ *   </>}
+ * </div>
+ * ```
+ *
+ * 🔴 **`button[class*="broadcast-request-send-button"]` を条件に戻さないこと。**
+ * その欄（`BroadcastRequestEnlightenmentSection`）の表示条件は
+ * `visualProviderTypeIsCommunity && !isBroadcaster && (!isLoggedIn || broadcasterBroadcastRequest.isEnabled)`
+ * であり、**チャンネル/公式番組では常に出ず**、ユーザー生放送でも**配信者が放送リクエストを
+ * 無効にしていれば出ない**。これを必須にしていたため、自動移動が「番組によっては毎回不発」
+ * という形で壊れていた（doc/09 項目AU）。エラーもログも出ないので気付けない。
+ *
+ * 判定は「視聴者が見る形（announcement ＋ next-action-area）」か
+ * 「配信者本人に出る満足度アンケート」のどちらかが揃っていること。ガイド枠だけで判定しないのは、
+ * 中身が組み上がる前の一瞬で誤爆しないようにするため。
+ *
+ * @returns {boolean}
+ */
 function detectProgramEndGuide() {
 	// ハッシュ付きクラスのため部分一致で検出
 	const guide = document.querySelector('[class*="program-end-guide"]')
 	if (!guide) return false
 
-	// 子要素の構造を確認（テキストは見ない）
+	// 通常（視聴者が見る形）。この2つは番組種別・配信者設定によらず無条件に描画される。
 	const hasAnnouncement = !!guide.querySelector('[class*="announcement"]')
 	const hasNextActionArea = !!guide.querySelector('[class*="next-action-area"]')
-	const hasRequestButton = !!guide.querySelector('button[class*="broadcast-request-send-button"]')
+	if (hasAnnouncement && hasNextActionArea) return true
 
-	return hasAnnouncement && hasNextActionArea && hasRequestButton
+	// 配信者本人が満足度アンケートを出された時は、上の2つの代わりにこれだけが描画される。
+	return !!guide.querySelector('[class*="satisfaction-level-enquete-panel"]')
 }
 
 // 終了ガイド表示中に onEnded を再発火してよい最小間隔（ミリ秒）。

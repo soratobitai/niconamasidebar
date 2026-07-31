@@ -71,7 +71,7 @@ const PROGRAMS = Array.from({ length: 4 }, (_, i) => ({
 }))
 // notifybox の1行は id/title だけではない（実測のキー名に合わせる）。
 // community_name / thumbnail_url は**コミュニティ廃止後もキー名だけ残っているレガシー名**で、
-// 中身は配信者名と配信者アイコン。新着カードはこれで名前・アイコンを出す（doc/09 項目AM）。
+// 中身は配信者名と配信者アイコン。新着カードはこれで名前・アイコンを出す（doc/09 項目AT）。
 const NOTIFYBOX = {
     meta: { status: 200 },
     data: {
@@ -198,6 +198,69 @@ check('D7-b 更新ボタンが押せる状態に戻る', pe !== 'none', `pointer
 
 check('notifybox とフォローAPIの両方を叩いている（和集合方式）', notifyboxHits > 0 && hits.length > 0,
     `notifybox ${notifyboxHits} 回 / フォローAPI ${hits.length} 回`)
+
+// ============================================================
+// AU: 終了ガイドの「形」が違っても自動移動が発火するか
+//
+// 旧実装は `broadcast-request-send-button` を必須にしていた。この欄はニコ生側で
+// 「ユーザー生放送 かつ 配信者が放送リクエストを有効」の時しか描画されないため、
+// チャンネル/公式番組や、リクエストを無効にしている配信者では**毎回不発**だった。
+// 番組終了を待たずに検証できるよう、実測のクラス名で終了ガイドをDOMへ流し込む。
+// ============================================================
+log('\n=== AU: 終了ガイドの形が違っても自動移動が発火するか ===')
+
+await page.click('#setting_options'); await page.waitForTimeout(500)
+await page.click('label[for="autoNextProgramOn"]'); await page.waitForTimeout(500)
+await page.click('#settings_close'); await page.waitForTimeout(500)
+check('AU 前提: 自動移動をONにできた',
+    await page.evaluate(() => !!document.querySelector('#autoNextProgramOn')?.checked))
+
+// クラス名は 2026-07-31 に nicolive のバンドルから採取した実物（ハッシュ付き）。
+// 部分一致セレクタで拾えるかまで含めて検証するため、実物の形のまま使う。
+const GUIDE = {
+    // 視聴者が見る通常の形。リクエスト欄が無い＝旧実装が落ちていたケース
+    viewer: '<div class="___announcement___m1Lwh"></div>'
+        + '<div class="___next-action-area___BviiO"></div>',
+    // リクエスト欄まで出る形（ユーザー生放送＋リクエスト有効）。旧実装でも通っていたケース
+    withRequest: '<div class="___announcement___m1Lwh"></div>'
+        + '<div class="___next-action-area___BviiO"><div class="___menu-area___RvqMA">'
+        + '<section class="___broadcast-request-enlightenment-section___pMG8b ga-ns-broadcast-request-enlightenment-section">'
+        + '<button class="___broadcast-request-send-button___pO4YE"></button></section></div></div>',
+    // 配信者本人に出る満足度アンケート。この時 announcement / next-action-area は描画されない
+    enquete: '<div class="___user-communication-satisfaction-level-enquete-panel___ThZVv '
+        + 'ga-ns-user-communication-satisfaction-level-enquete-panel"></div>',
+    // 中身が組み上がる前の一瞬。ここで発火すると「まだ終わっていないのに移動する」誤爆になる
+    partial: '<div class="___announcement___m1Lwh"></div>',
+}
+
+async function endGuideCase(label, inner, expected) {
+    // 毎回リロードしてから試す（scheduled / selectingNext / カウントダウンをまっさらに戻す）
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('#sidebar', { state: 'attached', timeout: 20000 })
+    if (!(await isOpen())) { await page.click('#sidebar_button') }
+    await page.waitForTimeout(3000)   // カードが描画されるまで（移動先が無いと発火しない）
+    await page.evaluate((html) => {
+        const g = document.createElement('div')
+        g.className = '___program-end-guide___vJfD8'
+        g.innerHTML = html
+        document.body.appendChild(g)
+    }, inner)
+
+    let shown = false
+    const deadline = Date.now() + (expected ? 8000 : 5000)
+    while (Date.now() < deadline) {
+        if ((await page.locator('#auto_next_modal.show').count()) === 1) { shown = true; break }
+        await page.waitForTimeout(250)
+    }
+    check(label, shown === expected, `モーダル ${shown ? '出た' : '出ない'}（期待 ${expected ? '出る' : '出ない'}）`)
+    // カウントダウン(10秒)で実際に遷移してしまう前に止める
+    if (shown) { try { await page.click('#auto_next_cancel', { timeout: 2000 }) } catch (_) {} }
+}
+
+await endGuideCase('AU 🔴 リクエストボタンが無い終了ガイドでも発火する（本命の回帰テスト）', GUIDE.viewer, true)
+await endGuideCase('AU リクエストボタンがある従来の形でも発火する', GUIDE.withRequest, true)
+await endGuideCase('AU 配信者本人の満足度アンケート表示でも発火する', GUIDE.enquete, true)
+await endGuideCase('AU 中身が揃っていないガイドでは発火しない（誤爆防止）', GUIDE.partial, false)
 
 await browser.close()
 try { child.kill() } catch (_) {}

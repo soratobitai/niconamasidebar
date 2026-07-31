@@ -26,6 +26,12 @@ export const loadingSessionTimeoutMs = 60000; // 60秒
 // 実測の force 一斉更新は15秒級なので、それを十分に上回りつつ
 // loadingSessionTimeoutMs(60秒)より手前で打ち切れる値にする。
 export const manualThumbWaitMaxMs = 30000; // 30秒
+// 自動移動が「番組終了を検知してから最新リストを待つ」上限。
+// リスト取得の fetch にはタイムアウトが無く、応答が返らないと await が返らない。そこで宙吊りに
+// なると selectingNext が true のまま残り、**以後そのページでは自動移動が二度と動かない**
+// （doc/09 項目AU）。待つのは「より新しいリストで選びたい」からであって、待てないなら
+// 今DOMにあるカードから選べばよいので、待ちは打ち切ってよい。
+export const autoNextListWaitMaxMs = 15000; // 15秒
 
 // 動くサムネ（ホバー中のみ）関連
 export const animatedThumbnailFrameCount = 5;            // 保持する直近フレーム数（リングバッファ）

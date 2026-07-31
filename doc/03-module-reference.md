@@ -108,7 +108,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | 関数 | 説明 |
 |------|------|
-| `detectProgramEndGuide()`（内部） | `[class*="program-end-guide"]` を探し、子に `announcement` / `next-action-area` / `broadcast-request-send-button` が**全て揃う**時のみ true（ハッシュ付きクラス名に部分一致、テキストは見ない） |
+| `detectProgramEndGuide()`（内部） | `[class*="program-end-guide"]` を探し、その中に **`announcement` ＋ `next-action-area` が揃う**（視聴者が見る通常の形）か、**満足度アンケートパネル**（配信者本人にだけ出る形）があれば true。ハッシュ付きクラス名に部分一致、テキストは見ない。🔴 **`broadcast-request-send-button` を条件に戻さないこと**（チャンネル/公式番組や、放送リクエストを無効にしている配信者では出ないため、自動移動が番組によって毎回不発になる。→ [09 項目AU](./09-gotchas-and-techdebt.md)） |
 | `observeProgramEnd(onEnded)` ★ export | `document.body` を `MutationObserver`（childList/subtree/attributes[class]）で監視し、終了ガイド表示中に `onEnded()`。即時チェックも実施。✅ **スロットル(2026-07-11)**：`onEnded`→`updateSidebar` の `replaceChildren` が変異を撒き「変異→onEnded→更新→変異」の自己駆動ループ（getLivePrograms 暴走）になるのを防ぐため、ガイド表示中は最小 `PROGRAM_END_RECHECK_MIN_INTERVAL_MS`(20秒) 間隔でのみ再発火し、ガイド消滅で再武装（次番組ジャンプの初回1発は保証）。返り値は**停止関数**（`AppState.autoNext.liveStatusStopper` に保持される） |
 
 ⚠️ ニコ生のDOM/クラス名変更に弱い（部分一致で緩和はしている）。

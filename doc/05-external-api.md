@@ -106,9 +106,16 @@
 | `html[data-browser-fullscreen]` | フルスクリーン判定 |
 
 ### 3-2. 番組終了ガイド検出（自動移動トリガ）
-`src/services/status.js`。以下が**全て揃う**時に終了と判定（MutationObserver を `document.body` に `{childList,subtree,attributes:['class']}` で attach）:
+`src/services/status.js`。MutationObserver を `document.body` に `{childList,subtree,attributes:['class']}` で attach し、以下のどちらかが揃った時に終了と判定する:
 - 親: `[class*="program-end-guide"]`
-- 子: `[class*="announcement"]` ＋ `[class*="next-action-area"]` ＋ `button[class*="broadcast-request-send-button"]`
+- 子: `[class*="announcement"]` ＋ `[class*="next-action-area"]`（**視聴者が見る通常の形**。番組種別・配信者設定によらず無条件に描画される）
+- または `[class*="satisfaction-level-enquete-panel"]`（**配信者本人**に満足度アンケートが出た形。この時 announcement / next-action-area は描画されない）
+
+> 🔴 **`button[class*="broadcast-request-send-button"]` を条件に加えないこと。** ニコ生側の表示条件は
+> `visualProviderTypeIsCommunity && !isBroadcaster && (!isLoggedIn || broadcasterBroadcastRequest.isEnabled)`
+> （2026-07-31 に `nicolib` バンドルから確認）。**チャンネル/公式番組では常に出ず**、ユーザー生放送でも
+> 配信者がリクエストを無効にしていれば出ない。旧実装はこれを必須にしていたため、自動移動が
+> 「番組によっては毎回不発」という形で壊れていた（→ [09 項目AU](./09-gotchas-and-techdebt.md)）。
 
 ### 3-3. 自前挿入UIのセレクタ
 `buildSidebarShell` が `body` afterbegin に注入（`#optionContainer` は body直下へ移動）。
@@ -189,7 +196,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 | **ライブサムネ** | 放送中の実映像サムネ。user=スクショ、channel=大サイズ画像 | user:`liveScreenshotThumbnailUrls.middle` / channel:`large1280x720ThumbnailUrl` |
 | **メンバー限定(isMemberOnly)** | 会員限定番組。サムネ更新対象外 | `computeNext` で `key:'member'` |
 | **人気度 / active-point** | 独自指標 `(viewers+1 + comments+1) / 経過分`。人気順ソートのキー | `calculateActivePoint`、DOM属性 `active-point` |
-| **番組終了ガイド** | 番組終了時にニコ生が出す案内UI。自動移動トリガ | `program-end-guide` 配下3要素で判定 |
+| **番組終了ガイド** | 番組終了時にニコ生が出す案内UI。自動移動トリガ | `program-end-guide` 配下の構成で判定（§3-2） |
 | **自動移動（自動次番組）** | 終了後にサイドバー先頭の別番組へ10秒後に遷移 | `AutoNextManager` / `location.assign` |
 | **シアターモード** | プレイヤー拡大表示 | `_theater-button_` click で再計算 |
 | **画面サイズ 自動/固定** | プレイヤー表示サイズモード | `LeoPlayer_ScreenSizeStore_kind` |

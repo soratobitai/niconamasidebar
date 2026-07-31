@@ -1,4 +1,5 @@
 import { observeProgramEnd } from '../services/status.js';
+import { autoNextListWaitMaxMs } from '../config/constants.js';
 
 /**
  * 自動次番組機能の管理
@@ -241,8 +242,21 @@ export class AutoNextManager {
             
             try {
                 // 最新の番組リストを取得（循環依存回避のため main.js から関数を注入）
+                //
+                // 🔴 **無制限に待たないこと。** リスト取得の fetch にタイムアウトは無く、
+                // 応答が返らなければこの await は返らない。返らなければ下の finally にも到達せず、
+                // `selectingNext` が true のまま残る。このフラグはコールバック先頭の多重進入ガードに
+                // 使われているので、**以後そのページでは自動移動が二度と動かない**（doc/09 項目AU。
+                // 項目AF の「フラグが残ると二度と動かない」と同型の欠陥）。
+                //
+                // 待つ目的は「より新しいリストから選ぶ」ことであって、待てないなら今DOMにある
+                // カードから選べばよい。取得自体は裏で走り続けるので、次の周期で反映される。
                 if (typeof updateSidebarFn === 'function') {
-                    await updateSidebarFn();
+                    await Promise.race([
+                        // updateSidebar は内部で catch 済みだが、経路が増えても未処理拒否にならないようにする
+                        Promise.resolve(updateSidebarFn()).catch(() => {}),
+                        new Promise((resolve) => setTimeout(resolve, autoNextListWaitMaxMs)),
+                    ]);
                 }
                 const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
                 const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);

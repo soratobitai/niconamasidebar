@@ -1008,3 +1008,88 @@ channel の `socialGroup` アイコン）。`render-harness` の `apiProgram()` 
 notifybox の `elapsed_time`（放送開始からの経過秒）は使っていない。新着順の基準は従来どおり
 「notifybox の返却順を保つ擬似 beginAt」のまま。使えば実際の開始時刻で並べられるが、
 並び順と `_fetchLiveThumbIfPendingYoung` の若さ判定の挙動が変わるため、別件として保留した。
+
+## ✅ AU. 自動移動が「番組によっては毎回不発」だった（2026-07-31 修正）
+
+利用者からの指摘:「自動枠移動が機能しなかったことがある。毎回ではない」。
+
+### 原因: 終了判定が「出ないことがあるボタン」を必須にしていた
+
+旧 `detectProgramEndGuide()` は3つを **AND** で要求していた。
+
+```js
+hasAnnouncement && hasNextActionArea && hasRequestButton   // ← 3つ目
+```
+
+ニコ生の `ProgramEndGuide` コンポーネント（2026-07-31 に `nicolib` / `pc-watch` バンドルから復元）:
+
+```jsx
+<div class="…program-end-guide…">
+  {enquete && <UserCommunicationSatisfactionLevelEnquetePanel/>}   // これが出る時は下は出ない
+  {!enquete && <>
+    <div class="…announcement…"/>                                  // 「この番組は終了しました」＝無条件
+    <div class="…next-action-area…">                               // 無条件
+      {(l||c) && <div class="menu-area">
+        {c && <BroadcastRequestEnlightenmentSection/>}             // ← リクエストボタンはこの中だけ
+      </div>}
+    </div>
+  </>}
+</div>
+```
+
+そのリクエスト欄の表示条件（同バンドル）:
+
+```js
+get shouldShow() {
+  return !!stores.program.visualProviderTypeIsCommunity      // ① ユーザー生放送のみ
+      && !stores.user.state.isBroadcaster                    // ② 自分が配信者でない
+      && (!stores.user.state.isLoggedIn
+          || !!stores.broadcasterBroadcastRequest.isEnabled) // ③ 配信者がリクエストを有効にしている
+}
+```
+
+つまり **チャンネル/公式番組では常に出ず**（①）、ユーザー生放送でも **配信者がリクエストを無効に
+していれば出ない**（③。ログイン済み視聴者はこの分岐）。「毎回ではない」の正体はこれで、
+**番組の種類と配信者の設定で決まる**ため、同じ配信者では毎回失敗し別の配信者では毎回成功する、
+という出方をしていた。エラーもログも出ないので気付けない。
+
+### 修正
+
+判定を「**`announcement` ＋ `next-action-area`（視聴者が見る形）**」または
+「**満足度アンケートパネル**（配信者本人の形）」に変更。前2つは番組種別・配信者設定によらず
+無条件に描画されるので、これで種別に依存しなくなる。
+
+> 🔴 **リクエストボタンを条件に戻さないこと。** 逆に「ガイド枠があるだけで true」にもしないこと
+> （中身が組み上がる前の一瞬で誤爆する）。誤爆防止の負のテストを検証に入れてある。
+
+### 併せて修正: 待ちがハングすると自動移動が二度と動かなくなる欠陥
+
+`startWatcher` のコールバックは `selectingNext = true` にしてから `await updateSidebarFn()` する。
+リスト取得の `fetch` にタイムアウトは無いので、応答が返らなければこの await は返らず、
+**`finally` に到達せずフラグが立ったまま残る**。このフラグはコールバック先頭の多重進入ガードなので、
+以後そのページでは自動移動が二度と動かない（項目AF と同型）。
+`Promise.race` で `autoNextListWaitMaxMs`(15秒) を上限にし、打ち切ったら今DOMにあるカードから選ぶ。
+
+### 検証（実ブラウザ・番組終了を待たずに再現できる）
+
+`verify:e2e` に4項目を追加。実測のクラス名そのままで終了ガイドをDOMへ流し込み、モーダルが出るかを見る。
+
+| ケース | 期待 |
+|---|---|
+| リクエストボタン**無し**（＝チャンネル番組・リクエスト無効の配信者） | 出る |
+| リクエストボタン**有り**（従来通り） | 出る |
+| 満足度アンケートのみ（配信者本人） | 出る |
+| `announcement` だけ（組み上がる前の一瞬） | **出ない** |
+
+**旧実装に戻して実行し、1番目と3番目が NG になることを確認済み**（テストが本当に噛むことの確認）。
+この4ケースは番組の終了を待つ必要がないので、以後の改修でも常に回せる。
+
+### 未着手（利用者と合意のうえ保留）
+
+1. **裏タブでカウントダウンが伸びる**: `setInterval(…,1000)` で10回数える方式のため、5分以上隠れて
+   無音のタブでは Chrome のタイマー間引き（1分に1回）で10秒が最大10分に化ける。
+   `Date.now()` の期限で持てば遅延は最大1分程度に縮む。
+2. **別タブでサイドバーを閉じるとカウントダウンが取り消される**: `chrome.storage.onChanged` の
+   `isOpenSidebar` → `handleSidebarOpenStateChange(false)` → `stopAllTimers()` →
+   `cancelScheduledNavigation()`。視聴中のタブは何も操作していないのに中止される。
+   「閉じたら止まる」という既存の約束（SPECIFICATION F-12）を崩すかどうかの判断が要る。
