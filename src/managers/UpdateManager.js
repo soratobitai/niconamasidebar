@@ -1,12 +1,12 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, resolveLiveThumbnailBaseUrl, getThumbProbeStats } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, resolveLiveThumbnailBaseUrl, getThumbProbeStats, setLoopStats } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
 import { totalEngagement } from '../utils/momentum.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, newCardFirstThumbSpreadMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -28,6 +28,8 @@ export class UpdateManager {
         this.options = options;
         this.elems = elems;
         this.loadingImageURL = loadingImageURL;
+        // 🧪診断（確認後に撤去）: 新着カードの記録にループの稼働状況を添えるための配線
+        try { setLoopStats(() => ({ fire: 0, done: 0, idleBg: 0, idleClosed: 0, noTarget: 0, busy: 0, ...(this._loopCounts || {}) })); } catch (_e) { /* noop */ }
 
         // 重複実行防止フラグ
         this.isPerformingManualUpdate = false;
@@ -42,7 +44,9 @@ export class UpdateManager {
         this._thumbLoopTimer = null;    // 常に高々1本。clear してから set する
         this._thumbLoopRunning = false; // 二重開始ガード（tick 実行中は _thumbLoopTimer が null になる）
         this._thumbLoopStopped = false; // destroyThumbnailLoop で true。開き直しで復帰しうる
-        this._thumbDueAt = new Map();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
+        this._thumbDueAt = new Map();
+        // 取得中の番組（完了を待たずに次へ進むので、同じ番組を二重に走らせないための印）
+        this._thumbInFlight = new Set();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
         // _updateOneThumbnailAndWait の安全ガードタイマー（破棄時に一括clearするため追跡）。
         this._pendingGuards = new Set();
 
@@ -90,6 +94,7 @@ export class UpdateManager {
             this._thumbLoopTimer = null;
         }
         this._thumbDueAt.clear();
+        this._thumbInFlight.clear();
         if (this._pendingGuards) {
             // 各待機を finish() で解決（ガードclear＋Promise resolve）＝await で宙吊りのフレーム
             // （detachedカード参照ごと）を解放する。単に clearTimeout だけだと未resolveでリークする。
@@ -166,31 +171,21 @@ export class UpdateManager {
             if (!id) return;
             present.add(id);
             if (!this._thumbDueAt.has(id)) {
-                // 初回サイクルを周期内へ均等配置する（＝位相をずらす）。
-                // 全カードに同じ delay を張ると初回が完全同時になり、全画像が HTTP/2 の同一接続で
-                // 多重化されて帯域を分け合う＝どの番組も「同じ時間」で完了してしまう。作業時間が
-                // 共通化すると全番組が同じ瞬間に次を張り直すため、「作業時間ぶん自然にドリフトする」
-                // という自己連鎖の前提が原理的に成立せず、一斉状態がそのまま自己維持される。
-                // さらに周期が「基準間隔＋一斉取得にかかる時間」まで伸びる
-                // （実測: 16番組で作業15.1秒→周期35.1秒。20秒間隔が守れずコマを取りこぼす）。
-                // 位相を分散させれば同時取得が減って作業時間が短くなり、周期も基準へ戻る。
+                // 期限の配り方は2通りだけ。**機械的な位相分散はしない**（利用者判断・2026-08-01）。
                 //
-                // ただし基準間隔ぶん「後ろへ」倒してから分散させること。前倒しすると
-                // performManualUpdate の force 一斉更新（実測15秒級）の最中に発火する。その時点では
-                // 新規カードの dataset.lastSuccessAt/key が未設定（makeProgramElement は src を入れる
-                // だけで、これらを書くのは applySuccess＝プリロード完了後）なので TTL ガードが素通りし、
-                // 同じ <img> に2本目の取得が走る＝減らしたい同時接続を起動直後に増やしてしまう。
+                //   ・読み込み直後の一斉配布 / 手動更新中 → `今 + 20秒`
+                //     この2つの場面では performManualUpdate が全カードをまとめて取得済み。
+                //     ここで「今すぐ」を配ると、同じ <img> に2本目の取得が重なる（新規カードは
+                //     dataset.lastSuccessAt/key が未設定なので TTL ガードが素通りする）。
+                //   ・途中で増えた新着カード → `今すぐ`
+                //     一斉取得は走っていないので待つ理由が無い。他の番組の期限は未来なので、
+                //     新着が「いちばん古い期限」になり次の起床で真っ先に処理される。
                 //
-                // 🔴 **ただし、途中で増えた新着カードは前倒しする。** 後ろへ倒す理由は上のとおり
-                // 「読み込み直後の force 一斉更新と衝突させない」ことだけであり、その一斉更新が
-                // 無い場面まで待たせる理由が無い。待たせると、notifybox 先行で立った新着カード
-                // （まだライブサムネURLを持たない）が**アイコンのまま20〜40秒**放置される。
-                // 追撃 _fetchLiveThumbIfPendingYoung もこのループの順番が来て初めて走るので、
-                // 「URLを取りにいく」こと自体がその時間ぶん遅れていた（doc/09 項目BB）。
-                const fast = !initialAssignment && !this.isPerformingManualUpdate;
-                const base = fast ? now : now + cycleMs;
-                const spreadMs = fast ? newCardFirstThumbSpreadMs : cycleMs;
-                this._thumbDueAt.set(id, base + Math.round((spreadMs * (i + 1)) / cards.length));
+                // 以前は周期内へ均等配置していたが、それは「同時に取ると帯域を分け合って遅くなる」
+                // という前提の細工だった。実際の重さは回線ではなく相手の応答待ちで、重ねても問題ない
+                // （doc/09 項目BD）。ズレは「各番組の取得が終わってから20秒」で自然に生まれる。
+                const deferred = initialAssignment || this.isPerformingManualUpdate;
+                this._thumbDueAt.set(id, deferred ? now + cycleMs : now);
             }
         });
         // 消えた番組の期限を解放
@@ -233,10 +228,12 @@ export class UpdateManager {
      */
     _thumbNextDelayMs() {
         const cycleMs = this._currentThumbCycleMs();
-        if (this._thumbDueAt.size === 0) return cycleMs;
         const now = Date.now();
         let min = Infinity;
-        for (const t of this._thumbDueAt.values()) if (t < min) min = t;
+        // 🔴 **取得中の番組を数に入れないこと。** 期限切れなのに選べない番組が残っていると
+        // 「0ms で起きる → 選べない → また 0ms」の無限ループになる（doc/09 R-1 で踏んだ形）。
+        for (const [id, t] of this._thumbDueAt) { if (this._thumbInFlight.has(id)) continue; if (t < min) min = t; }
+        if (!Number.isFinite(min)) return cycleMs;
         const remain = min - now;
         if (!(remain > 0)) return 0;          // 既に期限切れ＝すぐ処理する
         return Math.min(remain, cycleMs);     // 異常に先の期限でも1周期以内には見に来る
@@ -280,6 +277,7 @@ export class UpdateManager {
             const now = Date.now();
             let target = null, oldest = Infinity;
             for (const [id, due] of this._thumbDueAt) {
+                if (this._thumbInFlight.has(id)) continue; // 取得中の番組は選ばない
                 if (due <= now && due < oldest) { oldest = due; target = id; }
             }
             if (target === null) { this._probeLoop('no-target'); return; }
@@ -289,20 +287,45 @@ export class UpdateManager {
             if (!container) { idled = true; return; } // コンテナごと消えている＝様子見
             if (!card || !container.contains(card)) { this._thumbDueAt.delete(target); return; }
 
+            // 🧪診断（確認後に撤去）: このカードにループが到達した時刻。
+            // 「追撃が走らなかった」時に、ループが選んでいないのか・選んだ上で弾かれたのかを分ける。
             try {
-                const _tc = Date.now(); // 🧪診断
-                await this._fetchLiveThumbIfPendingYoung(target); // A1統合（空＆若い番組だけ詳細API追撃）
-                const _tu = Date.now(); // 🧪診断
-                await this._updateOneThumbnailAndWait(target);    // <img>更新（読み込み完了まで待つ＝ドリフト源）
-                // 🧪診断: 15秒が「追撃」なのか「画像の取得」なのか、ここでしか分けられない
-                this._probeLoop(`done id=${target} 追撃=${((_tu - _tc) / 1000).toFixed(1)}s 取得=${((Date.now() - _tu) / 1000).toFixed(1)}s`);
-            } catch (_e) { this._probeLoop(`error id=${target}`); }
+                const _im = card.querySelector && card.querySelector('.program_thumbnail_img');
+                if (_im && _im.dataset && !_im.dataset.tickAt) _im.dataset.tickAt = String(Date.now());
+            } catch (_e) { /* noop */ }
 
-            // 「完了した時点」から次の期限を数え直す＝作業時間ぶん自然にドリフトする。
-            // カードが消えていたら期限も消す（復活時は _syncThumbDueAt が配り直す）。
-            if (this._thumbDueAt.has(target)) {
-                this._thumbDueAt.set(target, Date.now() + this._currentThumbCycleMs());
-            }
+            // 🔴 **ここで完了を待たないこと。**
+            //
+            // 以前は `await` で1件の画像が届くまでループを止めていた。ドリフト（番組ごとに
+            // タイミングがばらける）を「完了してから20秒」で作るための待ちだったが、
+            // **ズレを作ることと、1件ずつ順番にやることは別**である。待った結果、
+            //   一周の時間 ＝ 番組数 × 1件あたりの所要時間
+            // となり、番組が増えるほど各番組の更新間隔が20秒から伸びていた
+            // （実測: 18番組で一周60秒以上。新着カードは行列の最後尾で62秒待たされた）。
+            // 取得の大半は「相手の返事待ち」なので、重ねれば隠せる（doc/09 項目BD）。
+            //
+            // 各番組の期限は**その番組の取得が終わった時点＋20秒**で置き直す。これはこの下の
+            // 完了ハンドラの仕事であり、ループ全体が止まる必要はない。
+            this._thumbInFlight.add(target);
+            const _tc = Date.now(); // 🧪診断
+            (async () => {
+                try {
+                    await this._fetchLiveThumbIfPendingYoung(target); // A1統合（空＆若い番組だけ詳細API追撃）
+                    const _tu = Date.now(); // 🧪診断
+                    await this._updateOneThumbnailAndWait(target);    // <img>更新（この番組の読み込み完了まで）
+                    // 🧪診断: 所要が「追撃」なのか「画像の取得」なのか、ここでしか分けられない
+                    this._probeLoop(`done id=${target} 追撃=${((_tu - _tc) / 1000).toFixed(1)}s 取得=${((Date.now() - _tu) / 1000).toFixed(1)}s`);
+                } catch (_e) { this._probeLoop(`error id=${target}`); }
+                this._thumbInFlight.delete(target);
+                // 「完了した時点」から次の期限を数え直す＝作業時間ぶん自然にドリフトする。
+                // カードが消えていたら期限も消す（復活時は _syncThumbDueAt が配り直す）。
+                if (this._thumbDueAt.has(target)) {
+                    this._thumbDueAt.set(target, Date.now() + this._currentThumbCycleMs());
+                }
+                // 飛行中は選ばれないので、終わった時点で起床予定を取り直す
+                // （寝すぎ・起きすぎのどちらも防ぐ）。
+                this._scheduleThumbTick(this._thumbNextDelayMs());
+            })();
         } catch (error) {
             console.error('[thumbTick] エラー:', error);
         } finally {
@@ -349,21 +372,35 @@ export class UpdateManager {
      * @param {string} id 番組ID（数値文字列・lvなし）
      */
     async _fetchLiveThumbIfPendingYoung(id) {
+        // 🧪診断（確認後に撤去）: 追撃が「走ったのか・弾かれたのか・当たったのか」を
+        // そのカードに残す。新着カードがアイコンのままになる時、ここが弾かれているのか
+        // 詳細APIが空を返しているのかで原因がまったく違う。
+        const mark = (v) => {
+            try {
+                const el = document.getElementById(String(id));
+                const im = el && el.querySelector ? el.querySelector('.program_thumbnail_img') : null;
+                if (im && im.dataset) im.dataset.chase = v;
+            } catch (_e) { /* noop */ }
+        };
         const infos = getProgramInfosFromStorage();
-        if (!Array.isArray(infos)) return;
+        if (!Array.isArray(infos)) { mark('skip:storage無'); return; }
         const info = infos.find((i) => i && i.id === `lv${id}`);
-        if (!info || info.providerType !== 'user' || info.isMemberOnly) return;
+        if (!info || info.providerType !== 'user' || info.isMemberOnly) { mark('skip:対象外'); return; }
         const hasLive = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle;
-        if (hasLive || info.thumbnailUrl) return; // 既にライブサムネあり＝追撃不要
+        if (hasLive || info.thumbnailUrl) { mark('skip:URL既取得'); return; } // 既にライブサムネあり＝追撃不要
         // beginAt ゲート：開始から newProgramFastPollMs 以内の若い番組だけ追撃（古い/不明は追わない）
         const beginAt = info.onAirTime && info.onAirTime.beginAt;
         const startMs = beginAt ? Date.parse(beginAt) : NaN;
-        if (!Number.isFinite(startMs) || (Date.now() - startMs) >= newProgramFastPollMs) return;
+        if (!Number.isFinite(startMs) || (Date.now() - startMs) >= newProgramFastPollMs) { mark('skip:若さゲート'); return; }
+        const _t0 = Date.now(); // 🧪診断
         try {
             const detail = await fetchProgramInfo(id);
-            if (!detail) return;
+            if (!detail) { mark(`失敗(${((Date.now() - _t0) / 1000).toFixed(1)}s)`); return; }
             const ss = detail.liveScreenshotThumbnailUrls;
             const cand = (ss && (ss.middle || ss.large || ss.small)) || '';
+            // 🧪診断: 詳細APIが「まだスクショを持っていない」のか「取れた」のかを分ける。
+            // 前者なら待つしかない（ニコ生側の都合）、後者なら以降は拡張側の問題。
+            mark(`${isLiveScreenshotUrl(cand) ? '取得' : '詳細APIも空'}(${((Date.now() - _t0) / 1000).toFixed(1)}s)`);
             if (isLiveScreenshotUrl(cand)) {
                 // await を跨いだ stale スナップショットの全置換だと、その間にスクレイプが入れた最新の
                 // 視聴者数等を巻き戻す(lost update)。サムネ欄だけを最新レコードに再read→マージする。
@@ -568,6 +605,15 @@ export class UpdateManager {
         if (!this._loopProbe) this._loopProbe = [];
         this._loopProbe.push({ t: Date.now(), event });
         if (this._loopProbe.length > 60) this._loopProbe.shift();
+        // 集計も同時に持つ。新着カードの表示が確定した瞬間に「ループがそもそも動いていたか」を
+        // 一緒に出すため（1行の記録だけで、期限の問題か素通りの問題かを分けたい）。
+        const c = this._loopCounts || (this._loopCounts = { fire: 0, done: 0, idleBg: 0, idleClosed: 0, noTarget: 0, busy: 0 });
+        if (event === 'fire') c.fire++;
+        else if (event.startsWith('done')) c.done++;
+        else if (event === 'idle:background') c.idleBg++;
+        else if (event === 'idle:closed') c.idleClosed++;
+        else if (event === 'no-target') c.noTarget++;
+        else if (event === 'skip:busy') c.busy++;
     }
 
     _dumpThumbDiagnostics(label) {

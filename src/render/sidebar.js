@@ -1,4 +1,4 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs, thumbnailFetchMaxParallel } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { initialMomentum, totalEngagement } from '../utils/momentum.js'
 
@@ -168,6 +168,7 @@ export function applyProgramInfoToCard(card, data) {
             if (!img.dataset.firstShownAt) {
                 img.dataset.firstShownAt = String(Date.now())
                 img.dataset.firstShownBy = 'direct'
+                reportNewCardLatency(img)
             }
         }
     }
@@ -286,6 +287,13 @@ export function makeProgramElement(data, loadingImageURL) {
     if (!isLiveSrc) thumbnailImg.dataset.thumbLive = '0'
     // 🧪診断（確認後に撤去）: カードが現れた時刻。「出現→初回表示」の実測に使う。
     thumbnailImg.dataset.bornAt = String(Date.now())
+    // 🧪診断: **サムネURLを持たずにアイコンで立ったカード**の印。利用者が報告している
+    // 「新着カードがアイコンのまま、かなり待つと出る」はこの種類のカードでしか起きない。
+    // ここを目印にして、そのカードだけ出現→表示の実測を1行出す。
+    if (!isLiveSrc) {
+        thumbnailImg.dataset.iconStart = '1'
+        thumbnailImg.dataset.bornSource = (data && data._source) || 'unknown'
+    }
     // 画像読み込み失敗時のフォールバック（data-src → loading.gif）を配線
     thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)
@@ -351,6 +359,41 @@ function handleThumbnailError() {
 // feed = { isEnabled(): boolean, ingest(cardId, HTMLImageElement): Promise<{url,seq}|null> }
 let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
+
+/**
+ * 🧪診断（確認後に撤去）: アイコンで立った新着カードが、実際に何秒でサムネに変わったかを1行出す。
+ *
+ * 利用者の報告は「新着カードがアイコンのまま、かなり待てば出る」。**これは新着カードでしか
+ * 起きないので、既に表示済みのカードを何件数えても再現しない**（実際にそれで「再現せず」と
+ * 誤報告した）。押す操作を要求せず、起きた時に勝手に記録が残るようにする。
+ */
+function reportNewCardLatency(img) {
+    if (!img || !img.dataset || img.dataset.iconStart !== '1') return
+    if (img.dataset.latencyReported === '1') return
+    const born = Number(img.dataset.bornAt || 0)
+    const shown = Number(img.dataset.firstShownAt || 0)
+    if (!born || !shown) return
+    img.dataset.latencyReported = '1'
+    const card = typeof img.closest === 'function' ? img.closest('.program_container') : null
+    // 「追撃が走らなかった」時に、**サムネループがそのカードに到達したのか**を分けるのが要点。
+    //   tick=未着手 → ループがこのカードを一度も選んでいない（期限/素通りの問題）
+    //   tick=N秒   → 選ばれてはいる（＝追撃の中で弾かれた）
+    const tickAt = Number(img.dataset.tickAt || 0)
+    const tick = tickAt ? `${((tickAt - born) / 1000).toFixed(1)}秒` : '未着手'
+    const loop = loopStatsFn ? loopStatsFn() : null
+    const loopText = loop
+        ? `ループ: 発火${loop.fire} 処理${loop.done} 素通り(裏${loop.idleBg}/閉${loop.idleClosed}) 対象無${loop.noTarget} 重なり${loop.busy}`
+        : 'ループ: 不明'
+    console.log(`🧪[新着サムネ] lv${(card && card.id) || '?'} アイコンで出現→表示まで `
+        + `${((shown - born) / 1000).toFixed(1)}秒`
+        + `（種=${img.dataset.bornSource || '?'} tick=${tick} 追撃=${img.dataset.chase || '未実行'} 経路=${img.dataset.firstShownBy || '?'}）`
+        + `\n            ${loopText}`)
+}
+
+// 🧪診断（確認後に撤去）: サムネループの稼働状況を取りにいくためのフック。
+// UpdateManager 側の数字を、表示が確定した瞬間に一緒に出したいだけの配線。
+let loopStatsFn = null
+export function setLoopStats(fn) { loopStatsFn = fn }
 
 // 🧪診断（確認後に撤去）: プリロードの結末を数える。
 // 「サムネが出ない」時に、取得が始まっていないのか・失敗しているのか・返ってこないのかを
@@ -472,29 +515,8 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
     let index = 0
     const CHUNK = 50
-    let pendingImages = 0 // 画像読み込み待機中の数（待機列＋飛行中の合計）
+    let pendingImages = 0 // 画像読み込み待機中の数
     let isCompleted = false // 完了コールバックが呼ばれたかどうか
-
-    // 🔴 **同時に投げすぎない。** 全カードぶんの取得を一度に開始すると、実測で
-    // 「4本が1.6秒・残り13本が15秒後にまとめて着地」という形になり、**1枚目が出るまで15秒**かかる。
-    // 総時間は同じでも体感がまったく違ううえ、その間に立った新着カードの取得も列の後ろで待たされる
-    // （doc/09 項目BC）。取得は待機列に積み、`thumbnailFetchMaxParallel` 本ずつ流す。
-    const fetchQueue = []
-    let inFlight = 0
-    const pumpFetches = () => {
-        while (inFlight < thumbnailFetchMaxParallel && fetchQueue.length > 0) {
-            const startFetch = fetchQueue.shift()
-            inFlight++
-            startFetch()
-        }
-        maybeSettled()
-    }
-    // 1本ぶんの取得が終わった（成功/失敗どちらでも）。枠を返して次を流す。
-    const releaseFetchSlot = () => {
-        inFlight--
-        pendingImages--
-        pumpFetches()
-    }
 
     function computeNext(info) {
         if (!info) return { nextUrl: null, key: '' }
@@ -613,6 +635,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 if (!img.dataset.firstShownAt) {
                     img.dataset.firstShownAt = String(Date.now())
                     img.dataset.firstShownBy = 'loop'
+                    reportNewCardLatency(img)
                 }
                 // 静止imgは「ライブサムネ」を表示中。動くサムネの末尾スロット判定に使う
                 // （error フォールバックで固定画像/loading.gif になっていない印）。
@@ -628,59 +651,53 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // 動くサムネON時は crossOrigin で読み、読めた画像を②へ給餌（②の自前取得＝二重通信を止める）。
             // CORSで読めない環境でも表示は守るため、失敗時は平文で読み直して表示だけ確保する。
             const feeding = !!(animThumbFeed && animThumbFeed.isEnabled())
-            // 🔴 ここで取得を始めないこと。待機列へ積み、pumpFetches が上限本数ずつ流す（項目BC）。
-            fetchQueue.push(() => {
-                thumbProbe.started++ // 🧪診断
-                const pre = new Image()
-                if (feeding) pre.crossOrigin = 'anonymous'
-                pre.onload = () => {
-                    releaseFetchSlot()
-                    thumbProbe.ok++ // 🧪診断
-                    if (feeding) {
-                        // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
-                        // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
-                        // 取得の枠は onload で返す（②のコマ化は通信ではないので枠を占有しない）。
-                        //
-                        // 🔴 **表示を②の完了に依存させないこと。** ②は IndexedDB を触るので、別タブとの
-                        // 競合などで応答が返らないことがありうる。返らないと applySuccess が呼ばれず、
-                        // **そのカードのサムネがページ再読込まで固まる**（更新ボタンも効かない＝doc/09 項目BA）。
-                        // 上限を切ってURL表示へ倒す。②のコマ化は裏で続くので次の周期で追いつく。
-                        let done = false
-                        const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
-                        const guard = setTimeout(() => {
-                            if (done) return
-                            thumbProbe.ingestTimeout++ // 🧪診断
-                            warnIngestStall()
-                            show(null)
-                        }, animIngestWaitMaxMs)
-                        // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
-                        Promise.resolve(animThumbFeed.ingest(card.id, pre))
-                            .then((frame) => { clearTimeout(guard); show(frame) })
-                            .catch(() => { clearTimeout(guard); show(null) })
-                    } else {
-                        applySuccess(null)
-                    }
+            const pre = new Image()
+            if (feeding) pre.crossOrigin = 'anonymous'
+            pre.onload = () => {
+                pendingImages--
+                thumbProbe.ok++ // 🧪診断
+                if (feeding) {
+                    // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
+                    // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
+                    //
+                    // 🔴 **表示を②の完了に依存させないこと。** ②は IndexedDB を触るので、別タブとの
+                    // 競合などで応答が返らないことがありうる。返らないと applySuccess が呼ばれず、
+                    // **そのカードのサムネがページ再読込まで固まる**（更新ボタンも効かない＝doc/09 項目BA）。
+                    // 上限を切ってURL表示へ倒す。②のコマ化は裏で続くので次の周期で追いつく。
+                    let done = false
+                    const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
+                    const guard = setTimeout(() => {
+                        if (done) return
+                        thumbProbe.ingestTimeout++ // 🧪診断
+                        warnIngestStall()
+                        show(null)
+                    }, animIngestWaitMaxMs)
+                    // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
+                    Promise.resolve(animThumbFeed.ingest(card.id, pre))
+                        .then((frame) => { clearTimeout(guard); show(frame) })
+                        .catch(() => { clearTimeout(guard); show(null) })
+                } else {
+                    applySuccess(null)
                 }
-                pre.onerror = () => {
-                    if (feeding) {
-                        // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。
-                        // ⚠️ 取得の枠は**平文側の決着まで返さない**（同じ1枚のための2回目の通信なので、
-                        //    ここで枠を返すと上限を超えて同時取得が走る）。
-                        thumbProbe.crossFail++ // 🧪診断
-                        const plain = new Image()
-                        plain.onload = () => { releaseFetchSlot(); thumbProbe.plainOk++; applySuccess(null) } // 🧪診断
-                        plain.onerror = () => { releaseFetchSlot(); thumbProbe.plainFail++; applyBackoff() } // 🧪診断
-                        plain.src = urlForAttempt
-                        return
-                    }
-                    releaseFetchSlot()
-                    thumbProbe.plainFail++ // 🧪診断（②OFF時はここが唯一の失敗経路）
-                    applyBackoff()
+                maybeSettled()
+            }
+            pre.onerror = () => {
+                if (feeding) {
+                    // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
+                    thumbProbe.crossFail++ // 🧪診断
+                    const plain = new Image()
+                    plain.onload = () => { pendingImages--; thumbProbe.plainOk++; applySuccess(null); maybeSettled() } // 🧪診断
+                    plain.onerror = () => { pendingImages--; thumbProbe.plainFail++; applyBackoff(); maybeSettled() } // 🧪診断
+                    plain.src = urlForAttempt
+                    return
                 }
-                pre.src = urlForAttempt
-            })
+                pendingImages--
+                thumbProbe.plainFail++ // 🧪診断（②OFF時はここが唯一の失敗経路）
+                applyBackoff()
+                maybeSettled()
+            }
+            pre.src = urlForAttempt
         }
-        pumpFetches()
         if (index < sourceImgs.length) {
             requestAnimationFrame(tick)
         } else {

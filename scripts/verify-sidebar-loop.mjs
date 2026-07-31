@@ -385,10 +385,14 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
     check('R-1 同一番組の周期が「間隔＋作業時間」（ドリフトが保たれている）', ok,
         periods.length ? `実測 ${periods.map((p) => (p / 1000).toFixed(2) + 's').join(', ')}（期待 ${(expect / 1000).toFixed(2)}s）` : '2周目まで到達せず')
 
-    // 位相がばらけているか（同時に更新されていない）
+    // ⚠️ ここには以前「初回の位相が分散している」という検査があったが、**機械的な位相分散は
+    //    撤去した**（利用者判断・2026-08-01。doc/09 項目BD）。分散は「同時に取ると帯域を分け合って
+    //    遅くなる」という誤った前提の細工で、実際の重さは相手の応答待ちなので重ねてよい。
+    //    ズレは「各番組の取得が終わってから20秒」で自然に生まれる（上の周期の検査がそれを見ている）。
+    //    初回は全員同じ期限になるのが**正しい姿**なので、分散を要求する検査は残さない。
     const firsts = [...per.values()].map((ts) => ts[0]).sort((a, b) => a - b)
     const spread = firsts.length > 1 ? firsts[firsts.length - 1] - firsts[0] : 0
-    check('R-1 初回の位相が分散している（一斉更新になっていない）', spread > cycleMs * 0.4,
+    check('R-1 初回は全番組をまとめて取りにいく（機械的な位相分散はしない）', spread < cycleMs * 0.5,
         `先頭と末尾の差 ${(spread / 1000).toFixed(2)}s（1周期 ${cycleSec}s）`)
 
     // 閉じている間は動かないこと
@@ -524,7 +528,7 @@ async function newProgramThumb() {
  */
 async function twoDisplayPaths() {
     const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl, fixedImageUrl } = await import('./render-harness.mjs')
-    const { newCardFirstThumbSpreadMs, updateThumbnailInterval, thumbnailFetchMaxParallel } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const { updateThumbnailInterval } = await import(new URL('../src/config/constants.js', import.meta.url).href)
     console.log('=== BB 表示経路の二重化と新着の初回サムネ ===')
     const T = Date.now() - 600000
 
@@ -607,9 +611,10 @@ async function twoDisplayPaths() {
         h.restore()
     }
 
-    // --- ⑦ 一斉取得の同時本数に上限があるか（項目BC） ---
-    // 全部いっぺんに投げると、実測で「4本が1.6秒・残り13本が15秒後にまとめて着地」になり、
-    // **1枚目が出るまで15秒**かかっていた。総時間ではなく「1枚目までの時間」を守る検証。
+    // --- ⑦ 一斉取得は全部まとめて投げる（利用者判断・2026-08-01。項目BD） ---
+    // 「同時に投げると帯域を分け合って遅くなる」という前提で本数を絞っていたが、実際の重さは
+    // 回線ではなく相手の応答待ちで、重ねても問題ない。絞ると逆に「4本ずつ揃って着地」して
+    // バラけなくなるので撤去した。
     {
         const h = buildRenderHarness({ programsSort: 'newest' })
         const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
@@ -617,28 +622,19 @@ async function twoDisplayPaths() {
         h.state.notifyRows = []
         h.state.followPrograms = Array.from({ length: 12 }, (_, i) => apiProgram({ id: `lv70${i}`, beginAtMs: T - i * 1000 }))
         await run()
-        // 画像を「読み込みが終わらない」状態にして、同時に何本走ったかを数える
-        let peak = 0, live = 0
+        let live = 0
         const holders = []
         const RealImage = globalThis.Image
         globalThis.Image = class {
             constructor() { this.onload = null; this.onerror = null; this.crossOrigin = null; this._src = '' }
             get src() { return this._src }
-            set src(v) { this._src = String(v); live++; if (live > peak) peak = live; holders.push(this) }
+            set src(v) { this._src = String(v); live++; holders.push(this) }
         }
         try {
             um.updateThumbnail(true, null)
             await sleep(120)
-            check('BB ⑦ 🔴 一斉取得の同時本数に上限がある（1枚目までの時間を守る）',
-                peak <= thumbnailFetchMaxParallel, `同時 ${peak} 本（上限 ${thumbnailFetchMaxParallel}）`)
-            check('BB ⑦ 前提: 上限より多くのカードが対象になっている', holders.length >= 1 && 12 > thumbnailFetchMaxParallel,
-                `対象12件 / 起動 ${holders.length} 本`)
-            // 1本終わるたびに次が流れること（詰まらせない）
-            const before = holders.length
-            live--; holders[0].onload && holders[0].onload()
-            await sleep(50)
-            check('BB ⑦ 1本終わると次が流れる（待機列が詰まらない）', holders.length > before,
-                `${before} → ${holders.length} 本`)
+            check('BB ⑦ 🔴 一斉更新は本数を絞らずまとめて取りにいく（待ち行列を作らない）',
+                live === 12, `${live} 本（対象12件）`)
         } finally {
             globalThis.Image = RealImage
             h.restore()
@@ -675,29 +671,108 @@ async function twoDisplayPaths() {
         h.state.followPrograms = [apiProgram({ id: 'lv611', beginAtMs: T }), apiProgram({ id: 'lv612', beginAtMs: T - 1000 })]
         um.startThumbnailLoop()   // ここで初回の一斉配布が起きる
         await run()
-        const firstDue = um._thumbDueAt.get('611') - Date.now()
-        check('BB ④ 読み込み直後の一斉配布は従来どおり後ろへ倒す（force 一斉更新と衝突させない）',
-            firstDue > cycleMs * 0.9, `${(firstDue / 1000).toFixed(1)}秒後（基準間隔 ${updateThumbnailInterval}秒）`)
+        const d611 = um._thumbDueAt.get('611') - Date.now()
+        const d612 = um._thumbDueAt.get('612') - Date.now()
+        check('BB ④ 読み込み直後の一斉配布は1周期ぶん後ろへ倒す（force 一斉更新と衝突させない）',
+            d611 > cycleMs * 0.9 && d612 > cycleMs * 0.9,
+            `${(d611 / 1000).toFixed(1)}秒後 / ${(d612 / 1000).toFixed(1)}秒後（基準間隔 ${updateThumbnailInterval}秒）`)
+        check('BB ④ 🔴 機械的な位相分散はしない（全員同じ期限。ズレは「取得完了＋20秒」で自然に生む）',
+            Math.abs(d611 - d612) < 50, `2件の期限の差 ${Math.abs(d611 - d612)}ms`)
 
         // 放送が始まって新しい番組がリストに増える
         h.state.followPrograms.unshift(apiProgram({ id: 'lv613', beginAtMs: Date.now() }))
         await run()
         const newDue = um._thumbDueAt.get('613') - Date.now()
-        check('BB ③ 🔴 途中で増えた新着は初回サムネ取得を待たされない（従来は1周期＝20〜40秒後）',
-            newDue <= newCardFirstThumbSpreadMs + 200, `${(newDue / 1000).toFixed(1)}秒後（上限 ${(newCardFirstThumbSpreadMs / 1000).toFixed(1)}秒）`)
-        check('BB ③ 既存カードの期限は前倒しに巻き込まれない',
-            um._thumbDueAt.get('611') - Date.now() > newCardFirstThumbSpreadMs,
-            `${((um._thumbDueAt.get('611') - Date.now()) / 1000).toFixed(1)}秒後`)
+        check('BB ③ 🔴 途中で増えた新着は待たされない（他は未来の期限なので次の起床で真っ先に選ばれる）',
+            newDue <= 50, `${(newDue / 1000).toFixed(1)}秒後`)
 
-        // 手動更新（force 一斉更新）が動いている間は前倒ししない
+        // 手動更新（force 一斉更新）が動いている間は後ろへ倒す
         um.isPerformingManualUpdate = true
         h.state.followPrograms.unshift(apiProgram({ id: 'lv614', beginAtMs: Date.now() }))
         await run()
         const duringManual = um._thumbDueAt.get('614') - Date.now()
         um.isPerformingManualUpdate = false
-        check('BB ④ 手動更新の一斉取得中は前倒ししない（同じ<img>に2本目の取得が走るのを避ける）',
+        check('BB ④ 手動更新の一斉取得中は後ろへ倒す（同じ<img>に2本目の取得が走るのを避ける）',
             duringManual > cycleMs * 0.9, `${(duringManual / 1000).toFixed(1)}秒後`)
         um.destroyThumbnailLoop()
+        h.restore()
+    }
+}
+
+/**
+ * BD: 番組数が増えても、各番組の更新間隔が伸びないこと。
+ *
+ * 🔴 **この検証が無かったせいで1年ぶんの遅延を見逃した。**
+ * 常設ループ化（項目AE）の時に「ドリフトはタイマーの本数と無関係」と判断したが、その検証は
+ * **4カード・作業0.2秒**（一周0.8秒＝間隔2秒に余裕で収まる）でしか行っていなかった。
+ * 実際は1件の完了を `await` で待っていたため、
+ *     一周の時間 ＝ 番組数 × 1件あたりの所要時間
+ * となり、**収まらない件数になると各番組の間隔が黙って伸びる**。実測では18番組で一周60秒以上、
+ * 新着カードは行列の最後尾で62秒待たされた（doc/09 項目BD）。
+ *
+ * ここでは「1件の取得が、間隔÷件数 より長くかかる」状況を作る。**直列に待つ実装なら必ず落ちる。**
+ */
+async function loopKeepsUpWithManyCards() {
+    console.log('=== BD 番組数が増えても各番組の間隔が伸びないこと ===')
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    const N = 10
+    const cycleSec = 2          // 基準間隔2秒（短縮スケール）
+    const fetchMs = 600         // 1件の取得に0.6秒 → 直列なら一周 10×0.6=6秒（間隔2秒を大きく超える）
+    const T = Date.now() - 600000
+
+    const h = buildRenderHarness({ programsSort: 'newest' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    um.options.updateThumbnailInterval = cycleSec
+    h.state.notifyRows = []
+    h.state.followPrograms = Array.from({ length: N }, (_, i) => apiProgram({ id: `lv80${i}`, beginAtMs: T - i * 1000 }))
+    const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s)
+
+    // 画像の読み込みに fetchMs かかる状況を作る
+    const RealImage = globalThis.Image
+    globalThis.Image = class {
+        constructor() { this.onload = null; this.onerror = null; this.crossOrigin = null; this._src = '' }
+        get src() { return this._src }
+        set src(v) { this._src = String(v); setTimeout(() => { if (this.onload) this.onload() }, fetchMs) }
+    }
+    // 番組ごとの更新時刻を記録する
+    const hits = new Map()
+    const origUpdate = um._updateOneThumbnailAndWait.bind(um)
+    um._updateOneThumbnailAndWait = (id) => {
+        if (!hits.has(id)) hits.set(id, [])
+        hits.get(id).push(Date.now())
+        return origUpdate(id)
+    }
+    try {
+        um.startThumbnailLoop()
+        // 初回配布は「1周期後」なので、そこから3周期ぶん観測する
+        await sleep(cycleSec * 1000 * 4 + fetchMs * 2)
+        um.destroyThumbnailLoop()
+
+        const covered = Array.from(hits.keys()).length
+        check('BD 前提: 観測中に全番組が少なくとも1回は更新される',
+            covered === N, `${covered}/${N} 番組`)
+
+        // 各番組の「連続する更新の間隔」を集め、その最大値を見る
+        let worst = 0, worstId = ''
+        for (const [id, times] of hits) {
+            for (let i = 1; i < times.length; i++) {
+                const gap = times[i] - times[i - 1]
+                if (gap > worst) { worst = gap; worstId = id }
+            }
+        }
+        const limit = cycleSec * 1000 + fetchMs * 2 + 400   // 間隔＋取得時間ぶんの余裕
+        check('BD 🔴 番組数が増えても各番組の間隔が伸びない（直列に待つ実装なら必ず落ちる）',
+            worst > 0 && worst <= limit,
+            `最悪の間隔 ${(worst / 1000).toFixed(2)}秒（許容 ${(limit / 1000).toFixed(2)}秒 / 直列なら ${(N * fetchMs / 1000).toFixed(1)}秒級）id=${worstId}`)
+
+        // 同じ番組を二重に走らせていないこと（飛行中の番組は選ばない）
+        let dup = 0
+        for (const times of hits.values()) {
+            for (let i = 1; i < times.length; i++) if (times[i] - times[i - 1] < fetchMs * 0.8) dup++
+        }
+        check('BD 同じ番組の取得を重ねて走らせない（飛行中は選ばない）', dup === 0, `重なり ${dup} 回`)
+    } finally {
+        globalThis.Image = RealImage
         h.restore()
     }
 }
@@ -1859,6 +1934,8 @@ if (real) {
     await newProgramThumb()
     console.log('')
     await twoDisplayPaths()
+    console.log('')
+    await loopKeepsUpWithManyCards()
     console.log('')
     await momentumScore()
     console.log('')
