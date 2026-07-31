@@ -127,10 +127,42 @@ export function applyProgramInfoToCard(card, data) {
     }
 
     // 静止サムネの戻り先。**空→実URL に変わった時に更新されないと復帰経路が塞がったままになる。**
-    // img.src（今表示している画像）は触らない。差し替えはサムネ更新ループの仕事。
     const img = card.querySelector('.program_thumbnail_img')
     if (img && f.thumbnail_url && img.getAttribute('data-src') !== f.thumbnail_url) {
         img.setAttribute('data-src', f.thumbnail_url)
+    }
+
+    // 🔴 **表示経路を2本にすること。**
+    //
+    // ページ再読込では makeProgramElement が storage のURLを img.src へ**直接**入れるので絵が出る。
+    // 一方その場更新は長らく img.src を触らない設計だった（「差し替えはループの仕事」）。その結果、
+    // 表示を変えられるのは**サムネ更新ループのプリロード経路ただ1本**になっていた。その1本には
+    // crossOrigin・②動くサムネへの給餌・TTL・バックオフ・期限表が直列に載っており、どこか1つ
+    // 滑ると症状は必ず「更新ボタンは無反応・ページ再読込では出る」になる。実際この形で2回踏んでいる
+    // （項目AZ = チャンネルの静止経路 / 項目BA = ②給餌の宙吊り）。穴を塞ぎ続けるのではなく、
+    // **経路を分ける**のが根治（doc/09 項目BB）。
+    //
+    // 触ってよい条件を狭く固定する:
+    //   - `thumbLive === '0'` ＝ **いまライブサムネを出せていない**カードだけ。既に出しているカードには
+    //     触らない → 「表示中の絵＝②のコマ」（項目AV）を壊さない。
+    //     ⚠️ `!== '1'` にしないこと。**未設定は「storage のライブサムネを表示中」を意味する**
+    //     （makeProgramElement は `if (!isLiveSrc)` の時だけ '0' を書く＝未設定はライブ表示中）。
+    //     `!== '1'` だと、ページ再読込直後の正常なカード全部が毎リスト周期で再代入対象になり、
+    //     ②が '1' を立てるまでの間、**カードの数だけ無駄な再取得**が走る。
+    //   - `?cache=` は付けない。同一URLなら再代入されないので無駄な再取得も起きない。
+    //     「同じURLで中身が変わる」ライブサムネの更新は従来どおりループの仕事。
+    if (img && img.dataset.thumbLive === '0') {
+        const best = resolveLiveThumbnailBaseUrl(data) || f.thumbnail_url
+        if (best && img.src !== best) {
+            img.src = best
+            img.dataset.thumbLive = '0' // ②のコマではない（最新コマのフリをさせない）
+            delete img.dataset.thumbSeq
+            // 🧪診断（確認後に撤去）: どちらの経路で最初に絵が出たか
+            if (!img.dataset.firstShownAt) {
+                img.dataset.firstShownAt = String(Date.now())
+                img.dataset.firstShownBy = 'direct'
+            }
+        }
     }
 
     const providerDiv = card.querySelector('.provider')
@@ -245,6 +277,8 @@ export function makeProgramElement(data, loadingImageURL) {
     // 繋ぎのアイコン/ローディング画像を「ライブサムネ」と誤認させない印。動くサムネの末尾スロットが
     // 最新コマのフリでこれを混ぜないようにする（サムネ更新が成功したら applySuccess が '1' に戻す）。
     if (!isLiveSrc) thumbnailImg.dataset.thumbLive = '0'
+    // 🧪診断（確認後に撤去）: カードが現れた時刻。「出現→初回表示」の実測に使う。
+    thumbnailImg.dataset.bornAt = String(Date.now())
     // 画像読み込み失敗時のフォールバック（data-src → loading.gif）を配線
     thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)
@@ -525,6 +559,11 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
+                // 🧪診断（確認後に撤去）: 初回表示の時刻。bornAt との差が「出現→サムネが出るまで」。
+                if (!img.dataset.firstShownAt) {
+                    img.dataset.firstShownAt = String(Date.now())
+                    img.dataset.firstShownBy = 'loop'
+                }
                 // 静止imgは「ライブサムネ」を表示中。動くサムネの末尾スロット判定に使う
                 // （error フォールバックで固定画像/loading.gif になっていない印）。
                 img.dataset.thumbLive = '1'

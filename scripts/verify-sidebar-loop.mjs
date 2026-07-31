@@ -446,10 +446,11 @@ async function newProgramThumb() {
         h.state.followPrograms[0].listingThumbnail = fixedImageUrl('555')
         await run()
         check('AZ ① 静止サムネが data-src に入る', img.getAttribute('data-src') === fixedImageUrl('555'), img.getAttribute('data-src'))
-        check('AZ ① この時点では img.src はまだアイコン（その場更新は src を触らない設計）',
-            img.src === 'https://icon/ch.jpg', img.src)
 
-        // サムネ更新ループが回れば表示される（ここが唯一の表示経路）
+        // サムネ更新ループが回れば表示される（項目BB で経路を2本にするまでは、ここが唯一の表示経路だった）。
+        // 直接表示の経路が先に絵を出してしまうと syncStaticThumb の検証にならないので、繋ぎ画像へ戻して試す
+        // （実際にも、読み込み失敗で handleThumbnailError が繋ぎ画像へ落とした後はこの状態になる）。
+        img.src = 'https://icon/ch.jpg'
         await new Promise((resolve) => um.updateThumbnail(false, resolve))
         check('AZ ① 🔴 ライブサムネを持たない番組でも、サムネ更新ループが静止サムネを表示する',
             img.src === fixedImageUrl('555'), img.src)
@@ -505,6 +506,132 @@ async function newProgramThumb() {
         check('AZ ② 🔴 フォローAPIを待たずにライブサムネを取得できる',
             !!after && after.thumbnailUrl === h.state.detailThumb, after ? after.thumbnailUrl : '(レコード無し)')
         check('AZ ② そのために詳細APIを1回だけ叩いた', h.state.calls.detail === 1, `${h.state.calls.detail} 回`)
+        h.restore()
+    }
+}
+
+/**
+ * BB: 表示経路の二重化と、新着の初回サムネを待たせないこと。
+ *
+ * 「更新ボタンでは出ないのにページ再読込では出る」という報告が3回続いた。原因は個別の穴ではなく
+ * **構造**だった: ページ再読込は makeProgramElement が storage のURLを img.src へ直接入れて絵を出すが、
+ * その場更新は img.src を触らない設計だったため、表示を変えられるのは**サムネ更新ループのプリロード
+ * 経路ただ1本**しか無かった。その1本には crossOrigin・②給餌・TTL・バックオフ・期限表が直列に載って
+ * いるので、どこか1つ滑れば必ずこの症状になる（項目AZ・BA はどちらもその1本の中の穴）。
+ *
+ * 加えて、本来の目的は「何も押さずに早く出ること」。新着カードの初回サムネ期限を基準間隔ぶん
+ * 後ろへ倒していたため、notifybox 先行で立った新着は**アイコンのまま20〜40秒**放置されていた。
+ */
+async function twoDisplayPaths() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl } = await import('./render-harness.mjs')
+    const { newCardFirstThumbSpreadMs, updateThumbnailInterval } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    console.log('=== BB 表示経路の二重化と新着の初回サムネ ===')
+    const T = Date.now() - 600000
+
+    // --- ① サムネ更新ループを1度も回さずに、その場更新だけで絵が出るか ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        // notifybox だけが知っている段階（サムネURL未取得）＝繋ぎはアイコン
+        h.state.followPrograms = []
+        h.state.notifyRows = [{ id: 601, title: '新着', community_name: '配信者', thumbnail_url: 'https://icon/601.png', provider_type: 'community' }]
+        await run()
+        const img = h.dom.getById('601').querySelector('.program_thumbnail_img')
+        check('BB ① 出はじめはアイコン', img.src === 'https://icon/601.png', img.src)
+        check('BB ① 繋ぎ画像のカードは thumbLive=0（＝直接表示の対象になる印）',
+            img.dataset.thumbLive === '0', String(img.dataset.thumbLive))
+
+        // フォローAPIがライブサムネ付きで返す。**updateThumbnail は一度も呼ばない**
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv601', beginAtMs: T })]
+        await run()
+        check('BB ① 🔴 サムネ更新ループを回さなくても、その場更新が既知のURLを表示する',
+            img.src === liveThumbUrl('601'), img.src)
+        // ⚠️ この2つは「直接表示が起きたこと」を条件に入れること。単に !includes('cache=') /
+        //    thumbLive==='0' だけを見ると、**機能を消してアイコンのままでも合格する**（空振り検査）。
+        check('BB ① 直接表示は ?cache= を付けない（同一URLなら再代入されない＝無駄な再取得が出ない）',
+            img.src.startsWith('https://dlive.nicovideo.jp/') && !img.src.includes('cache='), img.src)
+        check('BB ① 直接表示した絵は thumbLive=0（②の最新コマのフリをさせない）',
+            img.src === liveThumbUrl('601') && img.dataset.thumbLive === '0',
+            `src=${img.src} thumbLive=${img.dataset.thumbLive}`)
+        h.restore()
+    }
+
+    // --- ⑤ 既にライブサムネを表示中のカードを、直接表示が取り直さないこと ---
+    // ページ再読込直後の正常なカードは thumbLive **未設定**（makeProgramElement は
+    // 「ライブサムネではない」時だけ '0' を書く）。ここを `!== '1'` で判定すると、②が '1' を立てるまでの
+    // 間、正常なカード全部が毎リスト周期で再代入対象になり **カードの数だけ無駄な再取得**が走る。
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv603', beginAtMs: T })]
+        await run()
+        const img = h.dom.getById('603').querySelector('.program_thumbnail_img')
+        const atBirth = img.src
+        check('BB ⑤ 生成時からライブサムネを出しているカードは thumbLive 未設定（＝ライブ表示中の意味）',
+            img.dataset.thumbLive === undefined && atBirth.includes('cache='), `thumbLive=${img.dataset.thumbLive} src=${atBirth}`)
+        await run()
+        check('BB ⑤ 🔴 表示中のライブサムネを直接表示が取り直さない（毎周期の無駄な再取得を作らない）',
+            img.src === atBirth, `${atBirth} → ${img.src}`)
+        h.restore()
+    }
+
+    // --- ② 既にライブサムネを出しているカードには触らない（項目AV を壊さない） ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv602', beginAtMs: T })]
+        await run()
+        const img = h.dom.getById('602').querySelector('.program_thumbnail_img')
+        // ②が返したコマを表示中の状態を作る（blob URL ＋ thumbLive=1）
+        img.src = 'blob:frame-latest'
+        img.dataset.thumbLive = '1'
+        img.dataset.thumbSeq = '7'
+        await run()
+        check('BB ② 🔴 ライブサムネ表示中のカードは直接表示で上書きしない（表示中の絵＝コマ を守る）',
+            img.src === 'blob:frame-latest', img.src)
+        check('BB ② コマの通し番号も消さない', img.dataset.thumbSeq === '7', img.dataset.thumbSeq)
+        h.restore()
+    }
+
+    // --- ③ 途中で増えた新着カードは、初回サムネ取得を待たされない ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        const cycleMs = updateThumbnailInterval * 1000
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv611', beginAtMs: T }), apiProgram({ id: 'lv612', beginAtMs: T - 1000 })]
+        um.startThumbnailLoop()   // ここで初回の一斉配布が起きる
+        await run()
+        const firstDue = um._thumbDueAt.get('611') - Date.now()
+        check('BB ④ 読み込み直後の一斉配布は従来どおり後ろへ倒す（force 一斉更新と衝突させない）',
+            firstDue > cycleMs * 0.9, `${(firstDue / 1000).toFixed(1)}秒後（基準間隔 ${updateThumbnailInterval}秒）`)
+
+        // 放送が始まって新しい番組がリストに増える
+        h.state.followPrograms.unshift(apiProgram({ id: 'lv613', beginAtMs: Date.now() }))
+        await run()
+        const newDue = um._thumbDueAt.get('613') - Date.now()
+        check('BB ③ 🔴 途中で増えた新着は初回サムネ取得を待たされない（従来は1周期＝20〜40秒後）',
+            newDue <= newCardFirstThumbSpreadMs + 200, `${(newDue / 1000).toFixed(1)}秒後（上限 ${(newCardFirstThumbSpreadMs / 1000).toFixed(1)}秒）`)
+        check('BB ③ 既存カードの期限は前倒しに巻き込まれない',
+            um._thumbDueAt.get('611') - Date.now() > newCardFirstThumbSpreadMs,
+            `${((um._thumbDueAt.get('611') - Date.now()) / 1000).toFixed(1)}秒後`)
+
+        // 手動更新（force 一斉更新）が動いている間は前倒ししない
+        um.isPerformingManualUpdate = true
+        h.state.followPrograms.unshift(apiProgram({ id: 'lv614', beginAtMs: Date.now() }))
+        await run()
+        const duringManual = um._thumbDueAt.get('614') - Date.now()
+        um.isPerformingManualUpdate = false
+        check('BB ④ 手動更新の一斉取得中は前倒ししない（同じ<img>に2本目の取得が走るのを避ける）',
+            duringManual > cycleMs * 0.9, `${(duringManual / 1000).toFixed(1)}秒後`)
+        um.destroyThumbnailLoop()
         h.restore()
     }
 }
@@ -1098,6 +1225,9 @@ async function inPlaceUpdate() {
     const mkEl = (cls) => {
         const el = {
             className: cls || '', children: [], attrs: {}, style: {},
+            // 本物の要素は必ず dataset を持つ。省くと「実装が dataset を読んだ瞬間に落ちる」
+            // 検証になり、実装の正否と無関係な NG が出る（doc/09 項目AR）。
+            dataset: {},
             textContent: '', title: '', _src: '', _href: '',
             get src() { return this.attrs.src || '' }, set src(v) { this.attrs.src = v },
             get href() { return this.attrs.href || '' }, set href(v) { this.attrs.href = v },
@@ -1131,6 +1261,9 @@ async function inPlaceUpdate() {
     const thumb = mkEl('program_thumbnail')
     const a = mkEl(''); a.tag = 'a'
     const img = mkEl('program_thumbnail_img'); img.setAttribute('data-src', '')
+    // 生成時にサムネURLが無かったカードは makeProgramElement が thumbLive='0' を書く。
+    // ここを省くと「未設定＝ライブ表示中」と解釈され、実物と違う前提の検証になる。
+    img.dataset.thumbLive = '0'
     a.appendChild(img); thumb.appendChild(a); card.appendChild(thumb)
     const title = mkEl('program_title'); title.textContent = '旧タイトル'; card.appendChild(title)
 
@@ -1152,8 +1285,23 @@ async function inPlaceUpdate() {
         img.getAttribute('data-src') === 'https://dlive.nicovideo.jp/s.jpg',
         `data-src="${img.getAttribute('data-src')}"`)
     check('AK タイトルも更新される', title.textContent === '新タイトル')
-    check('AK 表示中の画像(src)は触らない（差し替えはサムネ更新ループの仕事）',
-        !img.attrs.src, `src="${img.attrs.src || ''}"`)
+    // 🔴 かつては「表示中の画像(src)は触らない（差し替えはループの仕事）」だった。その結果、表示経路が
+    // ループ1本しか無くなり「更新ボタンでは出ないがページ再読込では出る」を3回生んだ（項目BB）。
+    check('AK まだ絵を出せていないカードには既知のURLを直接出す（項目BB で経路を2本にした）',
+        img.attrs.src === 'https://dlive.nicovideo.jp/s.jpg', `src="${img.attrs.src || ''}"`)
+
+    // 逆側: 既にライブサムネを出しているカードは直接表示で上書きしない（②のコマを守る）
+    const shown = mkEl('program_thumbnail_img')
+    shown.src = 'blob:frame'
+    shown.dataset.thumbLive = '1'
+    const card2 = mkEl('program_container')
+    const thumb2 = mkEl('program_thumbnail'); thumb2.appendChild(shown); card2.appendChild(thumb2)
+    sb.applyProgramInfoToCard(card2, {
+        id: 'lv556', title: 't', providerType: 'user',
+        contentOwner: {}, thumbnailUrl: 'https://dlive.nicovideo.jp/other.jpg',
+        onAirTime: { beginAt: new Date().toISOString() },
+    })
+    check('AK ライブサムネ表示中のカードは直接表示で上書きしない', shown.src === 'blob:frame', shown.src)
 
     // 2回目の適用で重複挿入しないこと
     const before = provider.children.length
@@ -1643,6 +1791,8 @@ if (real) {
     await flippedThumb()
     console.log('')
     await newProgramThumb()
+    console.log('')
+    await twoDisplayPaths()
     console.log('')
     await momentumScore()
     console.log('')

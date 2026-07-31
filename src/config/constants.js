@@ -11,6 +11,13 @@ export const updateThumbnailInterval = 20; // 秒（サムネ<img>更新の基�
 // これを過ぎても空＝ほぼ固定画像運用とみなし、各番組サイクルからの追撃は止める
 // （以降はリスト更新スクレイプ fillMissingDetails の60〜180秒に委譲）。旧A1「8回打ち切り」の代替。
 export const newProgramFastPollMs = 180000; // 3分
+// 途中で増えた新着カードに配る「初回サムネ取得」までの分散窓。
+// 🔴 **新着の初回は待たせないこと。** 初回期限を基準間隔ぶん後ろへ倒していたため、notifybox 先行で
+// 立った新着カード（まだライブサムネURLを持たない）は、アイコンのまま **20〜40秒** 放置されていた。
+// 追撃(_fetchLiveThumbIfPendingYoung)もサムネループの順番が来て初めて走るので、URLの取得ごと遅れる。
+// 後ろへ倒す理由は「読み込み直後の force 一斉更新と衝突させない」ことなので、初回の一斉配布でない
+// 限り待つ理由が無い（doc/09 項目BB）。同時取得だけは避けたいので、この窓の中へ分散させる。
+export const newCardFirstThumbSpreadMs = 2000; // 2秒
 
 // サムネイル更新の安定化用
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）

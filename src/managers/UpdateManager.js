@@ -1,12 +1,12 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, resolveLiveThumbnailBaseUrl } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
 import { totalEngagement } from '../utils/momentum.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, newCardFirstThumbSpreadMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
 
 /**
  * 更新処理とタイマーの管理
@@ -158,6 +158,9 @@ export class UpdateManager {
         const cards = Array.from(container.children);
         const present = new Set();
         const now = Date.now();
+        // 表が空＝これは「読み込み直後の初回一斉配布」。途中で増えた新着カードとは扱いを分ける。
+        // （forEach の中で size を見ると、1件配った時点で判定が裏返ってしまう）
+        const initialAssignment = this._thumbDueAt.size === 0;
         cards.forEach((el, i) => {
             const id = el && el.id;
             if (!id) return;
@@ -177,7 +180,17 @@ export class UpdateManager {
                 // 新規カードの dataset.lastSuccessAt/key が未設定（makeProgramElement は src を入れる
                 // だけで、これらを書くのは applySuccess＝プリロード完了後）なので TTL ガードが素通りし、
                 // 同じ <img> に2本目の取得が走る＝減らしたい同時接続を起動直後に増やしてしまう。
-                this._thumbDueAt.set(id, now + cycleMs + Math.round((cycleMs * (i + 1)) / cards.length));
+                //
+                // 🔴 **ただし、途中で増えた新着カードは前倒しする。** 後ろへ倒す理由は上のとおり
+                // 「読み込み直後の force 一斉更新と衝突させない」ことだけであり、その一斉更新が
+                // 無い場面まで待たせる理由が無い。待たせると、notifybox 先行で立った新着カード
+                // （まだライブサムネURLを持たない）が**アイコンのまま20〜40秒**放置される。
+                // 追撃 _fetchLiveThumbIfPendingYoung もこのループの順番が来て初めて走るので、
+                // 「URLを取りにいく」こと自体がその時間ぶん遅れていた（doc/09 項目BB）。
+                const fast = !initialAssignment && !this.isPerformingManualUpdate;
+                const base = fast ? now : now + cycleMs;
+                const spreadMs = fast ? newCardFirstThumbSpreadMs : cycleMs;
+                this._thumbDueAt.set(id, base + Math.round((spreadMs * (i + 1)) / cards.length));
             }
         });
         // 消えた番組の期限を解放
@@ -503,6 +516,10 @@ export class UpdateManager {
                 this.updateThumbnail(true, () => { clearTimeout(guard); finish(); });
             });
 
+            // 🧪診断（確認後に撤去）: 反映が終わった時点の状態を出す。プリロードは非同期に続くので、
+            // 少し置いてから撮る（ここで待つのは診断のためだけ＝撤去時に一緒に消える）。
+            setTimeout(() => this._dumpThumbDiagnostics('更新ボタン'), 3000);
+
             // 最低1秒のローディング時間を確保して終了（自分が持ち主の時だけ）
             if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
 
@@ -515,6 +532,61 @@ export class UpdateManager {
             if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
         } finally {
             this.isPerformingManualUpdate = false;
+        }
+    }
+
+    /**
+     * 🧪診断（確認後に撤去）: サムネ表示状態の一括ダンプ。
+     *
+     * 「更新ボタンを押しても出ないが、ページ再読込では出る」がどの段で滑っているかを、
+     * コマンド入力なしで1回のボタン押下から特定するためのもの。判断に要る材料だけを出す:
+     *   store   … storage が持っているURL（＝ページ再読込で出る絵）。空ならURL未取得
+     *   img     … いま <img> が出している絵
+     *   出現→表示 … カードが現れてからサムネが出るまでの秒数（本来の目的の実測値）
+     *   経路    … direct（その場更新の直接表示）か loop（サムネ更新ループ）か
+     *   err/次retry/最終成功/live … プリロード経路の内部状態
+     */
+    _dumpThumbDiagnostics(label) {
+        try {
+            const container = document.getElementById('liveProgramContainer');
+            if (!container) return;
+            const infos = getProgramInfosFromStorage() || [];
+            const byId = new Map(infos.map((i) => [i.id, i]));
+            const now = Date.now();
+            const tail = (u) => (!u ? '' : String(u).length <= 46 ? String(u) : '…' + String(u).slice(-45));
+            const secs = (t) => (t ? ((now - Number(t)) / 1000).toFixed(1) + 's' : '');
+            const rows = [];
+            for (const card of Array.from(container.children)) {
+                if (!card || !card.id || typeof card.querySelector !== 'function') continue;
+                const img = card.querySelector('.program_thumbnail_img');
+                if (!img) continue;
+                const info = byId.get(`lv${card.id}`);
+                const store = info ? (resolveLiveThumbnailBaseUrl(info) || info.thumbnailUrl || '') : '';
+                const born = Number(img.dataset.bornAt || 0);
+                const shown = Number(img.dataset.firstShownAt || 0);
+                const due = this._thumbDueAt.get(card.id);
+                rows.push({
+                    id: card.id,
+                    種別: info ? info.providerType : '(storage無)',
+                    store: tail(store),
+                    img: tail(img.src),
+                    'data-src': tail(img.getAttribute('data-src')),
+                    '出現→表示': born && shown ? ((shown - born) / 1000).toFixed(1) + 's' : (born ? '未表示' : ''),
+                    経路: img.dataset.firstShownBy || '',
+                    live: img.dataset.thumbLive || '',
+                    err: img.dataset.errors || '',
+                    次retry: img.dataset.nextTryAt && Number(img.dataset.nextTryAt) > now
+                        ? ((Number(img.dataset.nextTryAt) - now) / 1000).toFixed(1) + 's後' : '',
+                    最終成功: secs(img.dataset.lastSuccessAt),
+                    次取得: due ? ((due - now) / 1000).toFixed(1) + 's後' : '(予定無)',
+                });
+            }
+            const stuck = rows.filter((r) => r.store && r.img !== r.store && r['出現→表示'] === '未表示');
+            console.log(`🧪[サムネ診断/${label}] ${rows.length}件 / 一度も表示できていない=${stuck.length}件`
+                + '  ※storeに値があるのにimgが違うものが原因調査の対象です');
+            console.table(rows);
+        } catch (e) {
+            console.warn('🧪[サムネ診断] 失敗:', e);
         }
     }
 
