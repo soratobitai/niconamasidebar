@@ -60,6 +60,10 @@ export function initialMomentum(info, now) {
  */
 export function nextMomentum(prev, next, now) {
     if (!next) return 0
+    // notifybox 由来の最小レコード（来場者0・コメント0）を「前回値」に使わない。
+    // 新着を早く見つけるために storage へ蒔いた種であって、実測値ではない。差分を取ると
+    // 0→実数の丸ごとが「急増」に化けて、出てきたばかりの番組が不当に1位へ飛ぶ（doc/09 項目AZ）。
+    if (prev && prev._source === 'notifybox') return initialMomentum(next, now)
     const prevM = prev ? Number(prev.momentum) : NaN
     if (!Number.isFinite(prevM)) return initialMomentum(next, now)
 

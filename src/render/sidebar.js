@@ -104,7 +104,7 @@ export function deriveCardFields(data) {
  *   - 配信者名・アイコン: 生成時に空だった番組（notifybox 先行の新着など）は、後の周期で
  *     フォローAPIが埋めてもカードに反映されず「配信者名不明」で固定される。
  *   - `img[data-src]`（静止サムネの戻り先）: 生成時に `thumbnailUrl` が空だと空文字のまま固定され、
- *     読み込み失敗時に `restoreStaticThumbIfLoading` が `if (!dataSrc) return` で塞がる＝
+ *     読み込み失敗時に `syncStaticThumb` が `if (!dataSrc) return` で塞がる＝
  *     一度 loading.gif に落ちるとページ再読込まで戻らない。
  *
  * ⚠️ **カードを作り直して解決しないこと。** 要素の再利用が img.dataset の TTL/バックオフ・
@@ -410,29 +410,44 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     }
 
     /**
-     * 定期更新の対象外になった img が、error フォールバックで loading.gif に落ちたままなら
-     * 静的サムネ(data-src)へ戻す。
+     * ライブサムネを持たない番組の `<img>` を、静止サムネ（`data-src`）に追従させる。
      *
-     * ライブサムネを持たない番組（channel など）は computeNext が null を返して更新対象から
-     * 外れるため、この img に触れる経路が他に無い。channel は src と data-src が同一URLなので
-     * handleThumbnailError の `this.src !== dataSrc` が偽になり必ず loading.gif へ落ちる。
-     * 復帰させないと、一過性の読み込み失敗（回線瞬断・プロキシの一時エラー）だけで
-     * loading.gif がページ再読込まで固定表示されてしまう。
+     * ライブサムネを持たない番組（**チャンネル番組**など）は `computeNext` が null を返して
+     * 定期更新の対象から外れるため、この img に触れる経路が他に無い。しかも
+     * `applyProgramInfoToCard` は仕様として `img.src` を触らない（差し替えはこのループの仕事）。
+     * つまり **ここが唯一の表示経路**である。
+     *
+     * 🔴 **「loading.gif の時だけ戻す」にしないこと。** 以前はそう書いてあり、繋ぎ画像を
+     * loading.gif から配信者アイコンへ変えた瞬間に条件が成立しなくなって、
+     * **チャンネル番組の絵がページを再読込するまで永久に出なくなった**（doc/09 項目AZ。
+     * 実測: 改修前は58秒で表示 → 改修後は出ない・更新ボタンも効かない・リロードで出る）。
+     * 「今なにを表示しているか」ではなく「**出すべき絵と違うか**」で判断すること。
+     *
      * 壊れたURLを毎周期叩かないよう、プリロード経路と同じ dataset バックオフに乗せる。
+     * ただし **data-src が別のURLに変わった時は仕切り直す**（前のURLの失敗回数を引き継がない）。
      */
-    function restoreStaticThumbIfLoading(img) {
+    function syncStaticThumb(img) {
         const dataSrc = img.getAttribute('data-src')
         if (!dataSrc) return
         const loadingUrl = chrome.runtime.getURL('images/loading.gif')
-        if (dataSrc === loadingUrl) return   // 戻す先が無い（元から静的サムネ不明）
-        if (img.src !== loadingUrl) return   // 落ちていない＝何もしない
-        const nextTryAt = Number(img.dataset.nextTryAt || 0)
-        if (nextTryAt && Date.now() < nextTryAt) return
-        const errors = Number(img.dataset.errors || 0) + 1
-        img.dataset.errors = String(errors)
-        img.dataset.nextTryAt = String(Date.now() + Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1)))
+        if (dataSrc === loadingUrl) return   // 出す先が無い（元から静止サムネ不明）
+        if (img.src === dataSrc) return      // 既に出している
+        if (img.dataset.staticTried === dataSrc) {
+            // 同じURLで失敗を繰り返している間はバックオフ
+            const nextTryAt = Number(img.dataset.nextTryAt || 0)
+            if (nextTryAt && Date.now() < nextTryAt) return
+            const errors = Number(img.dataset.errors || 0) + 1
+            img.dataset.errors = String(errors)
+            img.dataset.nextTryAt = String(Date.now() + Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1)))
+        } else {
+            // 出すべき絵が変わった＝新しい挑戦。前のURLの失敗回数は持ち越さない
+            img.dataset.staticTried = dataSrc
+            img.dataset.errors = '0'
+            img.dataset.nextTryAt = '0'
+        }
         img.src = dataSrc
-        delete img.dataset.thumbSeq // 静止サムネに戻した＝コマではない
+        img.dataset.thumbLive = '0' // ライブサムネではない（動くサムネが最新コマとして混ぜない）
+        delete img.dataset.thumbSeq
     }
 
     function checkComplete() {
@@ -463,7 +478,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             const { nextUrl, key } = computeNext(info)
             if (!nextUrl) {
-                restoreStaticThumbIfLoading(img) // 更新対象外でも loading.gif の固定だけは解く
+                syncStaticThumb(img) // 更新対象外の番組は、ここだけが静止サムネを出す経路
                 continue
             }
 

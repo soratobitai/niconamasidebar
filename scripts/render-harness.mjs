@@ -103,6 +103,11 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         if (u.includes('api.cas.nicovideo.jp')) {
             state.calls.detail++
             // 既定データでは到達しないはず。到達したらテスト側の前提が崩れている。
+            // `state.detailThumb` を立てた時だけ、ライブスクショを返す番組詳細として振る舞う
+            // （notifybox 先行の新番組をフォローAPI抜きで追撃できるかの検証に使う）。
+            if (state.detailThumb) {
+                return jsonResponse({ meta: { status: 200 }, data: { providerType: 'user', liveScreenshotThumbnailUrls: { middle: state.detailThumb } } })
+            }
             return jsonResponse({ data: {} })
         }
         throw new Error('想定外の fetch: ' + u)

@@ -154,6 +154,17 @@ export function createElement(tag = 'div') {
 
         querySelector(sel) { return select([el], sel, false) },
         querySelectorAll(sel) { return select([el], sel, true) },
+        // サムネ更新ループが `img.closest('.program_container')` で自分のカードを辿るのに使う。
+        // 単一ステップのセレクタのみ対応（`.class` / `#id` / `tag`）。子孫セレクタは想定しない。
+        closest(sel) {
+            const cond = parseStep(String(sel).trim())
+            let n = el
+            while (n) {
+                if (matchesStep(n, cond)) return n
+                n = n.parentElement
+            }
+            return NOT_FOUND
+        },
         getElementsByClassName(cls) {
             const out = []
             walk(el, (x) => {

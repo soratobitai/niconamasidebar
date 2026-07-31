@@ -415,6 +415,75 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
 }
 
 /**
+ * AZ: 新番組のサムネイルが出るまで。
+ *
+ * ① ライブサムネを持たない番組（チャンネル等）は、カードが先に立つと**そのカードに触れる経路が
+ *    サムネ更新ループしか無い**。そこが「loading.gif の時だけ戻す」だったため、繋ぎ画像を
+ *    アイコンに変えた瞬間に絵が永久に出なくなった（実測: 改修前58秒 → 出ない・更新ボタンも効かない）。
+ * ② notifybox が先に見つけた新番組は storage に居ないため、ライブサムネの追撃が始まらず
+ *    フォローAPI（20〜101秒遅い）を待っていた。
+ */
+async function newProgramThumb() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram, fixedImageUrl } = await import('./render-harness.mjs')
+    console.log('=== AZ 新番組のサムネイルが出るまで ===')
+    const T = Date.now() - 600000
+
+    // --- ① 静止サムネしか無い番組が、後からでも表示されるか ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        // まず notifybox だけが知っている状態でカードを作らせる（サムネURL無し＝繋ぎはアイコン）
+        h.state.followPrograms = []
+        h.state.notifyRows = [{ id: 555, title: 'ch番組', community_name: 'ch名', thumbnail_url: 'https://icon/ch.jpg', provider_type: 'channel' }]
+        await run()
+        const img = h.dom.getById('555').querySelector('.program_thumbnail_img')
+        check('AZ ① 新着カードの繋ぎは配信者アイコン', img.src === 'https://icon/ch.jpg', img.src)
+
+        // フォローAPIが「絵はあるがライブスクショではない」番組として返す（＝チャンネル番組）
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv555', beginAtMs: T, providerType: 'channel', fixedImage: false, thumb: false })]
+        h.state.followPrograms[0].listingThumbnail = fixedImageUrl('555')
+        await run()
+        check('AZ ① 静止サムネが data-src に入る', img.getAttribute('data-src') === fixedImageUrl('555'), img.getAttribute('data-src'))
+        check('AZ ① この時点では img.src はまだアイコン（その場更新は src を触らない設計）',
+            img.src === 'https://icon/ch.jpg', img.src)
+
+        // サムネ更新ループが回れば表示される（ここが唯一の表示経路）
+        await new Promise((resolve) => um.updateThumbnail(false, resolve))
+        check('AZ ① 🔴 ライブサムネを持たない番組でも、サムネ更新ループが静止サムネを表示する',
+            img.src === fixedImageUrl('555'), img.src)
+        check('AZ ① 静止サムネは thumbLive=0（動くサムネが最新コマとして混ぜない）',
+            img.dataset.thumbLive === '0', img.dataset.thumbLive)
+        h.restore()
+    }
+
+    // --- ② notifybox だけの新番組も storage に載る（＝ライブサムネの追撃が始められる） ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.followPrograms = []
+        h.state.notifyRows = [{ id: 777, title: '新着', community_name: '配信者', thumbnail_url: 'https://icon/u.jpg', provider_type: 'community' }]
+        await run()
+        const stored = JSON.parse(globalThis.localStorage.getItem('programInfos') || '[]')
+        const seed = stored.find((i) => i.id === 'lv777')
+        check('AZ ② 🔴 notifybox だけの新番組も storage に載る（追撃の前提）', !!seed, stored.map((i) => i.id).join(','))
+        check('AZ ② 種は最小レコード（ライブサムネ空・user 扱い）',
+            !!seed && seed.thumbnailUrl === '' && seed.providerType === 'user')
+
+        // 追撃が実際に詳細APIを叩き、取れたサムネが storage に入るか
+        h.state.detailThumb = 'https://dlive.nicovideo.jp/live/777/screenshot/1.jpg'
+        await um._fetchLiveThumbIfPendingYoung('777')
+        const after = JSON.parse(globalThis.localStorage.getItem('programInfos') || '[]').find((i) => i.id === 'lv777')
+        check('AZ ② 🔴 フォローAPIを待たずにライブサムネを取得できる',
+            !!after && after.thumbnailUrl === h.state.detailThumb, after ? after.thumbnailUrl : '(レコード無し)')
+        check('AZ ② そのために詳細APIを1回だけ叩いた', h.state.calls.detail === 1, `${h.state.calls.detail} 回`)
+        h.restore()
+    }
+}
+
+/**
  * AY: 盛り上がり（人気順のスコア）＝直近の増分レートの指数移動平均。
  *
  * 旧スコアは「開始からの平均」だったので、長時間放送は今どれだけ盛り上がっていても不利で、
@@ -445,6 +514,11 @@ async function momentumScore() {
         near(nextMomentum({ ...prev, momentum: 10 }, prog(50, 10, 11), NOW), 10 + (0 - 10) * a60))
     check('AY 極小のΔtでは据え置く（勢いが爆発しない）',
         nextMomentum({ viewers: 0, comments: 0, momentum: 7, _fetchedAt: NOW - 10 }, prog(500, 0, 5), NOW) === 7)
+    // notifybox 由来の種（来場者0）を前回値に使うと、0→実数の丸ごとが「急増」に化ける（項目AZ）
+    const seed = { viewers: 0, comments: 0, momentum: 0, _fetchedAt: NOW - 60000, _source: 'notifybox' }
+    check('AY 🔴 notifybox の種を「前回値」に使わない（新着が不当に1位へ飛ぶのを防ぐ）',
+        near(nextMomentum(seed, prog(600, 0, 10), NOW), initialMomentum(prog(600, 0, 10), NOW)),
+        `種から計算=${nextMomentum(seed, prog(600, 0, 10), NOW).toFixed(1)} / 開始からの平均=${initialMomentum(prog(600, 0, 10), NOW).toFixed(1)}（差分方式なら 600/分 に跳ねる）`)
 
     // --- 更新間隔が変わっても手触りが揃うか（時間ベースのα） ---
     // 30秒×6回 と 180秒×1回。どちらも「1分あたり10」で伸び続けた3分間なので、結果は一致するはず。
@@ -1541,6 +1615,8 @@ if (real) {
     await r3merge()
     console.log('')
     await flippedThumb()
+    console.log('')
+    await newProgramThumb()
     console.log('')
     await momentumScore()
     console.log('')

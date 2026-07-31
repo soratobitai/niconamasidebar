@@ -587,6 +587,26 @@ export class UpdateManager {
         return Array.from(byId.values());
     }
 
+    /**
+     * notifybox が先に見つけた新番組の最小レコードを storage にも載せる。
+     *
+     * 【なぜ必要か】ライブサムネの追撃 `_fetchLiveThumbIfPendingYoung` は **storage のレコードを
+     * 見て動く**。notifybox 由来の番組は storage に居ないので追撃が始まらず、フォローAPIが
+     * その番組を返すまで（実測 **20〜101秒**）サムネを取りに行けなかった。
+     * ここで種を蒔いておけば、カードのサムネ周期（20秒）が来た時点で詳細APIを叩ける＝
+     * フォローAPIを待たずにライブサムネが出る（doc/09 項目AZ）。
+     *
+     * ⚠️ 蒔くのは `_source==='notifybox'`（＝フォローAPIにも storage にも無い正真正銘の新着）だけ。
+     *    フォローAPI由来のレコードを上書きしないこと。`_mergeSources` の優先順位がそれを保証している。
+     * ⚠️ この最小レコードは 来場者0・コメント0 なので、**盛り上がりの計算で「前回値」に使わない**
+     *    （0からの差分を急増と誤認する）。`nextMomentum` が `_source` を見て弾いている。
+     * @param {Array<object>} programs `_mergeSources` の結果
+     */
+    _seedNewProgramsToStorage(programs) {
+        const seeds = programs.filter((p) => p && p._source === 'notifybox');
+        if (seeds.length) upsertProgramInfos(seeds);
+    }
+
     _orderByBeginAtDesc(programs) {
         const beginMs = (p) => {
             const t = p && p.onAirTime && p.onAirTime.beginAt ? Date.parse(p.onAirTime.beginAt) : NaN;
@@ -678,6 +698,7 @@ export class UpdateManager {
             }
 
             const merged = this._mergeSources(notifyList, fetched);
+            this._seedNewProgramsToStorage(merged);
 
             // 空のときは既存DOMを維持（取得は成功していて放送中0件）
             if (merged.length === 0) {
