@@ -160,7 +160,7 @@ API-1b にしか無い番組は「たった今始まった新着」なので、`
 |---|---|
 | URL | `https://api.cas.nicovideo.jp/v1/services/live/programs/lv{id}` |
 | 認証 | **なし**（Cookie を送らない） |
-| 用途 | API-1 で埋まらない穴**だけ**を補完。①user でライブサムネが空（固定画像配信者／放送直後で未生成）②配信者名が空のまま（想定外の応答）の番組の `contentOwner` |
+| 用途 | API-1 で埋まらない穴**だけ**を補完。①user でライブサムネが空（放送直後で未生成／flipped が包まれた形だった番組）②配信者名が空のまま（想定外の応答）の番組の `contentOwner` |
 | 上限 | 1サイクルあたり `MAX_DETAIL_FALLBACK = 30` 件 |
 
 > 旧方式（全番組を API-2 で個別取得＋レート制限キュー）は撤去済み。復活させないこと。
@@ -177,7 +177,7 @@ API-1 の各要素を `mapApiProgramToInfo()` が以下へ変換する。
 | `contentOwner` | object | `{ id, name, icon }`。**配信者**（user はユーザー、channel はチャンネル）。channel は `programProvider` に id もアイコンも無く、`socialGroup:{id,name,thumbnailUrl}` から拾う（2026-07-31 実測） |
 | `liveScreenshotThumbnailUrls.middle` | string? | **ライブスクショと判定できた場合のみ**設定 |
 | `large1280x720ThumbnailUrl` | string? | 同上 |
-| `thumbnailUrl` | string | 表示用。user はライブスクショのみ、channel/official は `listingThumbnail` をそのまま |
+| `thumbnailUrl` | string | 表示用。user はライブスクショのみ（`listingThumbnail` → `flippedListingThumbnail` の順に採用）、channel/official は `listingThumbnail` をそのまま |
 | `isMemberOnly` | boolean | `isFollowerOnly` |
 | `viewers` | number | `statistics.watchCount` |
 | `comments` | number | `statistics.commentCount` |
@@ -702,7 +702,7 @@ URL に `?popup=on` が含まれる場合、`DOMContentLoaded` ハンドラの�
 |---|---|---|
 | リスト＋詳細 | 設定値（既定120秒）ごと | **2**（100件超ならページング分だけ増える） |
 | サムネ | 20秒ごと × 番組数 | 番組数ぶん |
-| サムネ補完 | 空サムネの番組のみ | 通常0〜数件（上限30／サイクル） |
+| サムネ補完 | 空サムネの番組のみ | 通常0〜数件（上限30／サイクル）。固定画像運用の番組は `flippedListingThumbnail` で回収するのでここには来ない |
 
 > **最短の30秒を選んだ場合**（2026-07-31 追加）: リスト＋詳細は 4回/分（120秒なら1回/分）。
 > 併せて**サムネ補完も同じ頻度で走る**点に注意する。固定画像配信者は毎サイクル `thumbnailUrl` が

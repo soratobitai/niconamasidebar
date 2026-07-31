@@ -23,6 +23,8 @@ import { installMockDom } from './mock-dom.mjs'
 
 /** ライブスクショ判定を通すURL（isLiveScreenshotUrl が /screenshot/ か dlive を見る） */
 export const liveThumbUrl = (id) => `https://dlive.nicovideo.jp/live/${id}/screenshot/1.jpg`
+/** 配信者が設定した固定画像のURL（ライブスクショ判定を通らない形） */
+export const fixedImageUrl = (id) => `https://listing-thumbnail.live.nicovideo.jp?image=prod-lv${id}/thumbnail_1.png&w=352&h=198`
 
 /**
  * フォローAPIの生データ1件を作る。
@@ -30,7 +32,7 @@ export const liveThumbUrl = (id) => `https://dlive.nicovideo.jp/live/${id}/scree
  * @param {string} o.id           - "lv123"
  * @param {number} o.beginAtMs    - 放送開始（エポックms）。新しいほど上に来る
  */
-export function apiProgram({ id, beginAtMs, title, providerType = 'user', name, viewers = 10, comments = 5, thumb = true }) {
+export function apiProgram({ id, beginAtMs, title, providerType = 'user', name, viewers = 10, comments = 5, thumb = true, fixedImage = false }) {
     const num = String(id).replace(/^lv/, '')
     const isChannel = providerType === 'channel' || providerType === 'official'
     const providerName = name || `配信者${num}`
@@ -38,7 +40,10 @@ export function apiProgram({ id, beginAtMs, title, providerType = 'user', name, 
         id: String(id),
         title: title || `番組${num}`,
         providerType: providerType === 'user' ? 'community' : providerType,
-        listingThumbnail: thumb ? liveThumbUrl(num) : '',
+        // fixedImage: 配信者が固定画像を設定している番組の形（listingThumbnail は固定画像で、
+        // ライブスクショは flippedListingThumbnail 側に入る）。実測 user の約1/3がこの形。
+        listingThumbnail: fixedImage ? fixedImageUrl(num) : (thumb ? liveThumbUrl(num) : ''),
+        ...(fixedImage ? { flippedListingThumbnail: liveThumbUrl(num) } : {}),
         // 実測（2026-07-31 / 70件）: channel は programProvider に **id もアイコンも無く**、
         // 代わりに socialGroup にチャンネルID・チャンネル名・チャンネルアイコンが入る。
         // user(community) はその逆で programProvider が完備・socialGroup 無し。

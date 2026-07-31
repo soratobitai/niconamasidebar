@@ -19,7 +19,8 @@ import { fetchProgramInfo } from './api.js'
  * total まで offset を進めて取り切る（放送中フォローが limit を超えても全件カバー）。安全上限あり。
  * 選択補完(fillMissingDetails): フォローAPIだけでは埋まらない情報を、対象番組だけ詳細API
  * (fetchProgramInfo)で補う（全番組には叩かない＝旧方式の重さを避ける）。
- *  - user で固定画像設定/未生成によりライブサムネが空 → liveScreenshotThumbnailUrls を補完。
+ *  - user でライブサムネが空（放送直後で未生成など）→ liveScreenshotThumbnailUrls を補完。
+ *    ※ 固定画像運用の番組は flippedListingThumbnail から回収するのでここには来ない（下記）。
  *  - 配信者名が空のまま（想定外の応答）→ contentOwner を補完。
  *    ※ channel のアイコンは socialGroup.thumbnailUrl から拾えるので、この補完には頼らない。
  * 出力は内部 programInfo 形（従来の詳細APIと同じshape）に揃えてあり、makeProgramElement /
@@ -54,9 +55,19 @@ export function mapApiProgramToInfo(p) {
     // user は配信者設定の固定画像を出さずライブスクショのみ採用。
     // channel/official は listingThumbnail がそのイベントの正規サムネ（固定画像形でも）なので表示には使う。
     const rawThumb = p.listingThumbnail || ''
-    const thumb = providerType === 'user'
-        ? (isLiveScreenshotUrl(rawThumb) ? rawThumb : '')
-        : rawThumb
+    // 配信者が固定画像を設定している番組は listingThumbnail が固定画像になるが、
+    // **同じ応答の flippedListingThumbnail にライブスクショが入っている**
+    // （一覧ページでこの手の番組のサムネが固定画像とスクショで交互に入れ替わるのは、この2枚のこと）。
+    // ここで拾えば、その番組ごとに詳細APIを叩き直す fillMissingDetails がほぼ不要になる
+    // （2026-07-31 実測: user 67件中22件が固定画像運用＝約1/3。その22件すべてが flipped を持っていた）。
+    // ⚠️ 採用は **isLiveScreenshotUrl を通る素直な形だけ**。同22件中2件は listing-thumbnail プロキシに
+    //    包まれた形（`?url=<エンコードしたスクショURL>`）で来ており、判定を通らない。ここを緩めて
+    //    ホストで通すと、同じホストが配る固定画像・チャンネルアイコンまで「ライブサムネ」として
+    //    登録してしまう（doc/09 項目AA の事故そのもの）。包まれた分は従来どおり詳細APIの補完に回す。
+    const flipped = p.flippedListingThumbnail || ''
+    const shot = isLiveScreenshotUrl(rawThumb) ? rawThumb
+        : (isLiveScreenshotUrl(flipped) ? flipped : '')
+    const thumb = providerType === 'user' ? shot : rawThumb
     // ただし「20秒周期で取り直す対象」に含めてよいのはライブスクショだけ。
     // 前提（ニコ生の仕様・2026-07-26 に利用者確認）: チャンネル番組にライブサムネは提供されない。
     // チャンネルは固定画像／チャンネルアイコンを出しているのが正しい姿であり、
@@ -121,7 +132,9 @@ async function fetchOnePage(offset) {
 
 /**
  * フォローAPIだけでは埋まらない情報を、番組詳細API(fetchProgramInfo)で選択的に補完する。
- *  - user でライブサムネが空（固定画像配信者／放送直後で未生成）→ liveScreenshotThumbnailUrls を補う。
+ *  - user でライブサムネが空（放送直後で未生成／flipped が包まれた形だった番組）→
+ *    liveScreenshotThumbnailUrls を補う。**固定画像運用の番組の大半は mapApiProgramToInfo が
+ *    flippedListingThumbnail から回収済みなので、ここへ来る件数は実測で 22件中2件程度まで減る。**
  *  - 配信者名が空 → 詳細APIの contentOwner で名前/アイコンを補う（イベントサムネが空なら
  *    large1280x720ThumbnailUrl も）。通常はフォローAPIの programProvider / socialGroup で埋まるので、
  *    ここに落ちてくるのは応答が想定と違うときだけ。
@@ -176,6 +189,36 @@ async function fillMissingDetails(programs) {
 }
 
 /**
+ * 固定画像の番組から flippedListingThumbnail でライブスクショを回収できなかったら1回だけ警告する（鳴る罠）。
+ *
+ * 回収できていれば**完全に無言**。応答から flipped が消える／形が変わると、詳細APIでの補完
+ * （番組ごと・毎サイクル・最大30件）が静かに復活するだけで、画面上は何も変わらないので気付けない。
+ * ⚠️ 包まれた形（listing-thumbnail プロキシ経由）ばかりだった回も鳴りうる。実測では22件中2件なので稀。
+ * @param {Array<object>} raw フォローAPIの生データ
+ * @param {Array<object>} mapped 写像後の programInfo
+ */
+let flippedWarned = false
+function warnIfFlippedThumbMissing(raw, mapped) {
+    if (flippedWarned) return
+    const byId = new Map(mapped.map((m) => [m.id, m]))
+    // 「固定画像運用」＝ listingThumbnail はあるがライブスクショ形ではない user 番組。
+    // （放送直後でスクショ未生成の番組は listingThumbnail 自体が空なので、ここには入らない）
+    const fixed = raw.filter((p) => {
+        const m = p && p.id ? byId.get(String(p.id)) : null
+        return m && m.providerType === 'user' && p.listingThumbnail && !isLiveScreenshotUrl(p.listingThumbnail)
+    })
+    if (fixed.length === 0) return
+    const recovered = fixed.filter((p) => byId.get(String(p.id)).thumbnailUrl).length
+    if (recovered > 0) return
+    flippedWarned = true
+    console.warn(
+        `[followApi] 固定画像の番組 ${fixed.length}件からライブスクショを回収できませんでした`
+        + '（詳細APIでの番組ごと補完に戻ります）。flippedListingThumbnail の有無/形を確認してください。実際のキー:',
+        Object.keys(fixed[0] || {})
+    )
+}
+
+/**
  * 放送中フォロー番組を、内部 programInfo 形の配列で返す（ページングして全件）。
  * ライブサムネが無い番組・名前やアイコンが無い番組は詳細APIで補完する（fillMissingDetails）。
  * @returns {Promise<Array<object>|null>} 失敗時 null（フォールバックはしない）
@@ -196,7 +239,8 @@ export async function fetchFollowedProgramsViaPage() {
             if (all.length >= total) break   // total まで取り切った
         }
         const mapped = all.map(mapApiProgramToInfo).filter(Boolean)
-        // フォローAPIで埋まらない情報（固定画像userのライブサムネ／公式・chの名前アイコン）を選択補完
+        warnIfFlippedThumbMissing(all, mapped)
+        // フォローAPIで埋まらない情報（スクショ未生成の番組／想定外に名前が空の番組）を選択補完
         await fillMissingDetails(mapped)
         return mapped
     } catch (error) {

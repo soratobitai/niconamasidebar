@@ -90,14 +90,15 @@ socialGroup?:{id,name,thumbnailUrl}, statistics:{watchCount,commentCount}, times
 | `fetchFollowedProgramsViaPage()` ★ | 放送中フォロー番組の詳細を**ページングして全件**取得し、内部 programInfo 形の**配列**で返す。`fetchOnePage(offset)` を offset=0,1,2… と回し、`id` で重複排除しつつ `total` に達するまで蓄積（安全上限 `MAX_PAGES`）。集めた各番組を `mapApiProgramToInfo` で変換 → 穴のある番組を `fillMissingDetails` で補完 → 返す。失敗（未ログイン/仕様変更/通信エラー、`res.ok` 偽含む）時は `null`。`UpdateManager._refreshDetailsViaScrape` が結果を `upsertProgramInfos` で storage へ一括投入する |
 | `mapApiProgramToInfo(p)` | フロントAPIの1番組を、詳細API相当の内部 programInfo 形（`id="lv..."`, `title`, `providerType`, `contentOwner`, `viewers`(watchCount), `comments`(commentCount), `isMemberOnly`(isFollowerOnly), `onAirTime.beginAt`(beginAt(ms)→ISO), サムネURL群, `status`, `watchPageUrl`, `_source:'followApi'`）へ変換。`makeProgramElement`/`resolveLiveThumbnailBaseUrl`/`calculateActivePoint` がそのまま読めるshape。`p.id` が無ければ `null` |
 | `fetchOnePage(offset)`（内部） | 1ページ取得。`?status=onair&offset=<0始まりページ番号>&limit=PAGE_LIMIT` を `credentials:'include'` で fetch し、`{ programs, total }` を返す。`res.ok` が偽なら throw（→ `fetchFollowedProgramsViaPage` の catch で `null`） |
-| `fillMissingDetails(programs)`（内部） | **選択的フォールバック**。①`thumbnailUrl` が空の **user** 番組（固定画像設定／放送直後で未生成）→ライブサムネを補完 ②配信者名が空のまま（想定外の応答）→`contentOwner` を補完。`fetchProgramInfo`（詳細API）を叩いて**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦）。⚠️ channel のアイコンはここではなく `socialGroup.thumbnailUrl` から拾う（この条件は名前が埋まっていると発火しない） |
-| `isLiveScreenshotUrl(u)`（内部） | ライブスクショURLかどうか（配信者設定の**固定画像**と区別）。`/screenshot/` を含む or `dlive.nicovideo.jp` 形なら true。`mapApiProgramToInfo`（listingThumbnail採否）と `fillMissingDetails`（補完候補の採否）で使う |
+| `fillMissingDetails(programs)`（内部） | **選択的フォールバック**。①`thumbnailUrl` が空の **user** 番組（放送直後で未生成／flipped が包まれた形）→ライブサムネを補完 ②配信者名が空のまま（想定外の応答）→`contentOwner` を補完。`fetchProgramInfo`（詳細API）を叩いて**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦）。⚠️ channel のアイコンはここではなく `socialGroup.thumbnailUrl` から拾う（この条件は名前が埋まっていると発火しない） |
+| `isLiveScreenshotUrl(u)`（内部） | ライブスクショURLかどうか（配信者設定の**固定画像**と区別）。`/screenshot/` を含む or `dlive.nicovideo.jp` 形なら true。`mapApiProgramToInfo`（listingThumbnail / flippedListingThumbnail の採否）と `fillMissingDetails`（補完候補の採否）で使う |
+| （内部）`warnIfFlippedThumbMissing` | 固定画像の番組が居るのに `flippedListingThumbnail` から1件も回収できなかった時だけ**1回だけ** `console.warn`（鳴る罠）。回収できていれば無言。フィールドが消えても**詳細APIでの補完が静かに復活するだけで画面は何も変わらない**ので、ここでしか気付けない |
 | `followApiUrl` | `https://live.nicovideo.jp/front/api/pages/follow/v1/programs` |
 | （グローバル）`window.__testFollowScrape()` | 実ページのConsoleから取得結果を件数＋表(`console.table`)で確認するデバッグ用（`debugTestFollowScrape`。現在はAPI経路を叩く） |
 
 - **定数（モジュール内）**：`PAGE_LIMIT=100`（1リクエストあたり件数。notifybox の rows=100 に対応）、`MAX_PAGES=5`（ページング安全上限＝最大500件）、`MAX_DETAIL_FALLBACK=30`（1サイクルで詳細APIを呼ぶ上限）。
 - **ページング実装済み**：`offset` は「0始まりのページ番号」（ページNは items[N×limit .. N×limit+limit)）。通常は1リクエストで済む（limit=100 が放送中フォロー100件未満をカバー）。同時放送中のフォローが**100件を超えても**offsetを進めて全件の詳細を取得する。
-- サムネは JSON API の `listingThumbnail` 1枠のみ。ライブスクショ形のときだけ採用し、固定画像は空にして表示しない（`isLiveScreenshotUrl` フィルタ）。空になった番組は上記 `fillMissingDetails` の詳細APIで補完する。
+- サムネ枠は**2つ**（`listingThumbnail` と `flippedListingThumbnail`）。ライブスクショ形のときだけ、この順で採用する（`isLiveScreenshotUrl` フィルタ）。**固定画像運用の番組はライブスクショが flipped 側に入っている**ので、ここで拾えば詳細APIの補完がほぼ不要になる（2026-07-31 実測: user 67件中22件が固定画像運用、22件すべてが flipped を持つ）。どちらも通らない番組だけ上記 `fillMissingDetails` へ回す。⚠️ 包まれた形（listing-thumbnail プロキシ経由）を拾おうとして判定を緩めないこと（→ [09 項目AA/AW](./09-gotchas-and-techdebt.md)）。
 - 失敗時は `handleError` に記録して `null` を返すのみ。**本流の一括取得に失敗した周は詳細が古い/欠けるだけ**（意図的。全体フォールバックは無い）。
 
 ---

@@ -415,6 +415,45 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
 }
 
 /**
+ * AW: 固定画像運用の番組から flippedListingThumbnail でライブスクショを回収できるか。
+ *
+ * 回収できないと、その番組は毎サイクル「詳細APIで番組ごとに問い合わせ」に回る（実測で user の約1/3）。
+ * しかもリスト描画はその応答を待つので、更新が丸ごと遅くなる。
+ */
+async function flippedThumb() {
+    console.log('=== AW 固定画像の番組からライブスクショを回収する（flippedListingThumbnail） ===')
+    const { mapApiProgramToInfo, isLiveScreenshotUrl } = await import(
+        new URL('../src/services/followPageSource.js', import.meta.url).href)
+    const FIXED = 'https://listing-thumbnail.live.nicovideo.jp?image=prod-lv1/thumbnail_1774977137608.png&w=352&h=198'
+    const SHOT = 'https://asset2.dlive.nicovideo.jp/915e/abc/screenshot/123/thumbnail-352x198/screenshot.jpg'
+    // 実測22件中2件はこの形（プロキシに包まれたスクショ）。判定を通さないのが正解
+    const WRAPPED = 'https://listing-thumbnail.live.nicovideo.jp/?url=' + encodeURIComponent(SHOT)
+    const base = { id: 'lv1', title: 't', providerType: 'community', programProvider: { id: '1', name: 'n' }, statistics: {}, beginAt: Date.now() }
+
+    const fixedOnly = mapApiProgramToInfo({ ...base, listingThumbnail: FIXED })
+    check('AW 固定画像だけの番組はライブサムネ空のまま（詳細APIの補完に回す）',
+        fixedOnly.thumbnailUrl === '' && !fixedOnly.liveScreenshotThumbnailUrls, fixedOnly.thumbnailUrl)
+
+    const withFlipped = mapApiProgramToInfo({ ...base, listingThumbnail: FIXED, flippedListingThumbnail: SHOT })
+    check('AW 🔴 flippedListingThumbnail からライブスクショを回収する',
+        withFlipped.thumbnailUrl === SHOT, withFlipped.thumbnailUrl)
+    check('AW 回収したURLは定期更新の対象にも入る（liveScreenshotThumbnailUrls）',
+        withFlipped.liveScreenshotThumbnailUrls && withFlipped.liveScreenshotThumbnailUrls.middle === SHOT)
+
+    const wrapped = mapApiProgramToInfo({ ...base, listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED })
+    check('AW 🔴 プロキシに包まれた形は採用しない（項目AA の事故を避ける）',
+        wrapped.thumbnailUrl === '' && !isLiveScreenshotUrl(WRAPPED), wrapped.thumbnailUrl)
+
+    const normal = mapApiProgramToInfo({ ...base, listingThumbnail: SHOT, flippedListingThumbnail: FIXED })
+    check('AW listingThumbnail がスクショなら従来どおりそれを使う（flipped に引きずられない）',
+        normal.thumbnailUrl === SHOT, normal.thumbnailUrl)
+
+    const ch = mapApiProgramToInfo({ ...base, providerType: 'channel', listingThumbnail: FIXED, flippedListingThumbnail: SHOT })
+    check('AW channel の表示サムネは従来どおり listingThumbnail（ライブサムネは提供されない前提）',
+        ch.thumbnailUrl === FIXED && !ch.liveScreenshotThumbnailUrls, ch.thumbnailUrl)
+}
+
+/**
  * R-3(A): 2つの取得元の和集合が正しく作られるか。
  *
  * notifybox は「早さ」担当（user番組の新着検知が 20〜101秒 速い）、
@@ -1167,6 +1206,15 @@ async function render() {
     check('channel のアイコン補完で詳細APIを呼んでいない（socialGroup で足りている）',
         h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
 
+    // --- 固定画像運用の番組: flipped からスクショを回収し、詳細APIを呼ばずに済むか（項目AW・実描画経路） ---
+    h.state.followPrograms = [apiProgram({ id: 'lv666', beginAtMs: T + 6000, fixedImage: true })]
+    await run()
+    const img666 = h.dom.getById('666').querySelector('.program_thumbnail_img')
+    check('AW 固定画像の番組でもライブサムネが入る（flipped から回収）',
+        (img666.src || '').includes('/screenshot/'), img666.src)
+    check('AW そのために詳細APIを呼んでいない（リスト描画が補完待ちで遅れない）',
+        h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
+
     // --- ソート切替 ---
     h.state.notifyRows = []
     h.state.followPrograms = [
@@ -1349,6 +1397,8 @@ if (real) {
     await r1()
     console.log('')
     await r3merge()
+    console.log('')
+    await flippedThumb()
     console.log('')
     await r1NoSpin()
     console.log('')

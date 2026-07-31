@@ -12,9 +12,9 @@
 |------|-----|------|----------|
 | リストAPI | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php` | フォロー中の放送中番組リスト（並び順の元） | `notifyboxAPI` |
 | 詳細フロントAPI | `https://live.nicovideo.jp/front/api/pages/follow/v1/programs` | 放送中フォロー番組の**全詳細をJSONで一括取得**（`?status=onair&offset=&limit=`／ページング対応） | `followApiUrl`（`followPageSource.js` 内で定義） |
-| 詳細API（補完専用） | `https://api.cas.nicovideo.jp/v1/services/live/programs` | フロントAPIがライブサムネを返さない番組（**固定画像配信者・放送直後**）のサムネ補完だけに使う | `liveInfoAPI` |
+| 詳細API（補完専用） | `https://api.cas.nicovideo.jp/v1/services/live/programs` | フロントAPIがライブサムネを返さない番組（**放送直後で未生成**など）のサムネ補完だけに使う | `liveInfoAPI` |
 
-> リスト＝notifybox、詳細＝フォロー中ページ・フロントAPIの**2ソース構成**。両者を `UpdateManager.updateSidebar` が `Promise.all` で並列取得し、フロントAPI結果を storage へ upsert してからカードを組む（→ [04-data-flow](./04-data-flow.md)）。**従来の1番組=詳細API×Nのキューは廃止**（詳細はフロントAPIのJSONで全件一括入手）。詳細API（`liveInfoAPI`）は撤去せず、**固定画像番組のサムネ補完専用**として残す（§1-2）。
+> リスト＝notifybox、詳細＝フォロー中ページ・フロントAPIの**2ソース構成**。両者を `UpdateManager.updateSidebar` が `Promise.all` で並列取得し、フロントAPI結果を storage へ upsert してからカードを組む（→ [04-data-flow](./04-data-flow.md)）。**従来の1番組=詳細API×Nのキューは廃止**（詳細はフロントAPIのJSONで全件一括入手）。詳細API（`liveInfoAPI`）は撤去せず、**サムネが空の番組の補完専用**として残す（§1-2）。
 
 ### 1-1. フォロー中番組リスト — `fetchLivePrograms(rows=100)`（`api.js`）
 - **リクエスト**: `GET ${notifyboxAPI}?rows=100`、**`credentials:'include'`（Cookie送信）**。ログイン状態でフォロー番組を取得するためCookieが必要。
@@ -31,7 +31,7 @@
 
 ### 1-2. 番組詳細 — `fetchFollowedProgramsViaPage()`（`followPageSource.js`）
 - **リクエスト**: `GET ${followApiUrl}?status=onair&offset=<0始まりページ番号>&limit=100`、**`credentials:'include'`（Cookie送信）**。フォロー中ページ（`.../follow?status=onair`）が「もっと見る」で叩く公開フロントJSON API を直接呼ぶ。
-- **応答形**: `{ data: { programs: [...], total: N } }`。`programs[]` の1要素 = 1番組（`id:"lv..."`, `title`, `listingThumbnail`, `watchPageUrl`, `providerType`, `liveCycle`, `beginAt`（ミリ秒エポック）, `endAt`, `isFollowerOnly`, `isPayProgram`, `programProvider:{id,name,icon,iconSmall}`, `statistics:{watchCount,commentCount}`, `timeshift`）。
+- **応答形**: `{ data: { programs: [...], total: N } }`。`programs[]` の1要素 = 1番組（`id:"lv..."`, `title`, `listingThumbnail`, `flippedListingThumbnail`(固定画像運用の番組のみ＝ライブスクショ), `watchPageUrl`, `providerType`, `liveCycle`, `beginAt`（ミリ秒エポック）, `endAt`, `isFollowerOnly`, `isPayProgram`, `programProvider:{id,name,icon,iconSmall}`, `statistics:{watchCount,commentCount}`, `timeshift`）。
 - **変換**: 各 `programs[]` を `mapApiProgramToInfo` で**従来の詳細API相当の内部 programInfo 形**に写像。`makeProgramElement` / `resolveLiveThumbnailBaseUrl` / `calculateActivePoint` がそのまま読めるshape。
 - **ページング（実装済み）**: `offset` は**0始まりのページ番号**（`offset=0` が先頭 `limit` 件、`offset=1` が次の `limit` 件＝items[N*limit .. N*limit+limit)）。`offset=0,1,2,…` とループし、`id` で重複排除しながら `total` 件を取り切るまで加算取得する。安全上限 `MAX_PAGES=5`（最大500件）。通常は **1リクエスト**（`limit=100` で放送中フォロー<100件を1発カバー）。同時放送フォローが100件超でも**全番組に詳細が付く**（旧「約70件超はタイトルのみ」の制限は解消）。
 - **戻り値**: 内部 programInfo 配列。失敗（未ログイン/構造変化/HTTPエラー/通信エラー）時は **`null`**（フォールバックなし＝その周は詳細が古いまま）。クラッシュはしない（`updateSidebar` の番組ごと try/catch ＋ `makeProgramElement` の `String(id)`）。
@@ -49,7 +49,7 @@
 | `contentOwner.icon` | `programProvider.icon`／`iconSmall` → 無ければ `socialGroup.thumbnailUrl` | アイコン画像 |
 
 > **channel は `programProvider` に id もアイコンも無い**（2026-07-31 実測・70件: community 67件は `programProvider.icon` が 67/67 埋まり `socialGroup` 無し、channel 3件は `icon` が 0/3 で `socialGroup:{id,name,thumbnailUrl}` が 3/3）。`socialGroup` を見ないと**チャンネルカードのアイコンは永久に空**になる（`fillMissingDetails` は「名前が空」でしか発火せず、名前は埋まっているので対象外）。
-| `thumbnailUrl` | ライブスクショURL（`isLiveScreenshotUrl` 通過時のみ） | サムネのベース/フォールバック（静的サムネ兼用）。空なら §後述の補完対象 |
+| `thumbnailUrl` | ライブスクショURL（`listingThumbnail` → `flippedListingThumbnail` の順に `isLiveScreenshotUrl` 通過時のみ） | サムネのベース/フォールバック（静的サムネ兼用）。空なら §後述の補完対象 |
 | `liveScreenshotThumbnailUrls.middle` | ライブスクショURL（同上、`thumb` があれば） | **user配信**のライブサムネ（`?cache=<ms>` 付与） |
 | `large1280x720ThumbnailUrl` | ライブスクショURL（同上） | **channel配信**のライブサムネ優先URL |
 | `isMemberOnly` | `isFollowerOnly` | `computeNext` で true ならサムネ更新停止（`key:'member'`） |
@@ -59,8 +59,11 @@
 | `status` | `liveCycle` | 番組ステータス |
 | `watchPageUrl` | `watchPageUrl` | 視聴ページURL |
 
-- **サムネURLの選定**: フロントAPIは `listingThumbnail` の**1枠のみ**を返す。`isLiveScreenshotUrl`（`/screenshot/` を含む・`dlive.nicovideo.jp` 由来）で**ライブスクショ形のときだけ採用**。配信者設定の固定画像（`listing-thumbnail...thumbnail_{ts}.png` 形）はライブ形でないため空文字にする（→ **常にライブスクショ**というユーザー要件）。空になった番組は次項の補完対象。
-- **穴の選択的補完**（`fillMissingDetails`）: `thumbnailUrl` が空の番組（**固定画像配信者**／**放送直後で未生成**）だけ、番組ごとの詳細API `fetchProgramInfo()`（`liveInfoAPI`）を叩いて `liveScreenshotThumbnailUrls` を回収する。空の番組は通常0〜数件で、上限 `MAX_DETAIL_FALLBACK=30`／サイクル。**全番組×詳細API**の旧方式の重さは避けたまま穴だけ埋める。個別失敗は空のまま（次サイクルで再挑戦）。
+- **サムネURLの選定**: サムネ枠は**2つ**ある。`listingThumbnail`（配信者が固定画像を設定していればそれ）と `flippedListingThumbnail`（**そのときのライブスクショ**）。一覧ページでこの手の番組のサムネが交互に入れ替わるのがこの2枚。`isLiveScreenshotUrl`（`/screenshot/` を含む・`dlive.nicovideo.jp` 由来）で**ライブスクショ形のときだけ採用**し、`listingThumbnail` → `flippedListingThumbnail` の順に見る（→ **常にライブスクショ**というユーザー要件）。どちらも通らなければ空文字にし、次項の補完対象になる。
+  - 実測（2026-07-31・70件）: user 67件中22件が固定画像運用で、**22件すべてが flipped を持っていた**。うち20件は素直なスクショURL、2件は listing-thumbnail プロキシに包まれた形（`?url=…`）。
+  - 🔴 **包まれた形を拾おうとして判定を緩めないこと。** 同じホストは固定画像・チャンネルアイコンも配っており、緩めるとそれらを「ライブサムネ」として登録してしまう（→ [09 項目AA](./09-gotchas-and-techdebt.md)）。包まれた分は詳細APIの補完に回す。
+  - 固定画像の番組が居るのに flipped から1件も回収できなかった時だけ **1回だけ `console.warn`**（正常時は無言。フィールドが消えても画面は何も変わらないので、ここでしか気付けない）。
+- **穴の選択的補完**（`fillMissingDetails`）: `thumbnailUrl` が空の番組（**放送直後で未生成**／flipped が包まれた形だった番組）だけ、番組ごとの詳細API `fetchProgramInfo()`（`liveInfoAPI`）を叩いて `liveScreenshotThumbnailUrls` を回収する。上限 `MAX_DETAIL_FALLBACK=30`／サイクル。**この呼び出しは `fetchFollowedProgramsViaPage` の中で await される＝リスト描画がその応答を待つ**ので、件数が減ると更新そのものが速くなる（flipped の採用で実測22件→2件程度）。個別失敗は空のまま（次サイクルで再挑戦）。
 
 ### 1-3. 呼び出し制御
 - **リスト＋詳細を毎サイクル同時取得**: `updateSidebar` が `Promise.all([fetchLivePrograms(100), _refreshDetailsViaScrape()])` を実行。取得結果は**和集合**にする（`_mergeSources`）。前者は notifybox（`data.notifybox_content`）、後者はフォロー中ページ・フロントAPI（`_refreshDetailsViaScrape` 内で `fetchFollowedProgramsViaPage` を呼ぶ）→ `upsertProgramInfos` で storage へ全件一括 upsert。
