@@ -1,4 +1,4 @@
-import { fetchLivePrograms, fetchProgramInfo } from '../services/api.js';
+import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard } from '../render/sidebar.js';
@@ -575,17 +575,13 @@ export class UpdateManager {
             // どこにも詳細が無い＝たった今始まった番組。
             // notifybox は放送開始が新しい順に返すので、その並びを保ったまま
             // 「今この瞬間に始まった」扱いにして新着順の先頭へ置く。
-            byId.set(id, {
-                id,
-                title: row.title || 'タイトル不明',
-                providerType: 'user',
-                contentOwner: { id: '', name: '', icon: '' },
-                thumbnailUrl: '',
-                isMemberOnly: false,
-                viewers: 0,
-                comments: 0,
-                onAirTime: { beginAt: new Date(now - i).toISOString() },
-            });
+            //
+            // ⚠️ **notifybox の行を id と title だけに削らないこと。** 配信者名(community_name)と
+            // アイコン(thumbnail_url)と種別(provider_type)も入っている。ここで捨てると、
+            // フォローAPIが同じ番組を拾うまでの 20〜101秒＋1周期のあいだ、新着カードが
+            // 「配信者名不明・アイコンなし・ローディング画像」で立つ（doc/09 項目AT）。
+            const info = mapNotifyboxRowToInfo(row, new Date(now - i).toISOString());
+            if (info) byId.set(id, info);
         });
         return Array.from(byId.values());
     }

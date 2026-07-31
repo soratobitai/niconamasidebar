@@ -236,19 +236,19 @@ body.nicosidebar-light {
     box-sizing: border-box;
 }
 
-.program_container .community {
+.program_container .provider {
     margin-bottom: 5px;
     display: flex;
     align-items: center;
 }
-.program_container .community a {
+.program_container .provider a {
     width: 40px;
     min-width: 40px;
     height: 40px;
     min-height: 40px;
     overflow: hidden;
 }
-.program_container .community img {
+.program_container .provider img {
     width: 40px;
     min-width: 40px;
     height: 40px;
@@ -258,7 +258,7 @@ body.nicosidebar-light {
     overflow: hidden;
 }
 
-.program_container .community .community_name {
+.program_container .provider .provider_name {
     padding-left: 7px;
     width: 100%;
     font-size: 0.8rem;

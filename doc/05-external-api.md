@@ -21,7 +21,12 @@
 - **重複排除**: `liveProgramsInFlight`(Map, key=`rows`) でin-flight共有、`finally`で削除。
 - **成功判定**: `meta.status===200 && data.notifybox_content`。**戻り値は `data.notifybox_content`（配列）**。失敗時 `false`。
 - **失敗時UI**: `updateSidebar` が **notifybox とフォローAPIの両方**に失敗した時だけ `#api_error` を `block`（ログイン誘導）表示。片方でも取れていれば描画するので出さない。
-- **リスト要素で参照するフィールド**: `program.id`（**lvなし数値**）、`program.title`。
+- **1行の実測形**: `{ id:"<lvなし数値>", title, thumbnail_url, community_name, provider_type, elapsed_time }`。
+  - `community_name` / `thumbnail_url` は**レガシー名**で、中身は**配信者名**と**配信者アイコン**（user は `…/nicoaccount/usericon/<上位>/<userId>.jpg`、channel は `…/comch/channel-icon/128x128/ch<数字>.jpg`）。コミュニティ廃止後もキー名だけが残っている。
+  - `mapNotifyboxRowToInfo()`（`api.js`）が内部 programInfo 形へ写像し、`_mergeSources` がフォローAPI未着の新着番組に使う。アイコンURLから配信者IDも復元する（notifybox は ID を直接返さない）。
+  - ⚠️ **`thumbnail_url` を `thumbnailUrl` に入れないこと**（アイコンをライブサムネとして20秒ごとに取り直す＝doc/09 項目AA の再発）。カードの表示フォールバック専用。
+  - 応答形が変わったら `fetchLivePrograms` が **1回だけ `console.warn`** する（正常時は無言。名前とアイコンが黙って消える壊れ方を検知するため）。
+- **リスト要素で参照するフィールド**: `program.id`（**lvなし数値**）、`program.title`、`community_name`、`thumbnail_url`、`provider_type`。
   - 詳細はフロントAPI由来（`lv`付きで格納）を `programInfos.find(info.id==='lv'+program.id)` で突合。突合できない番組（フロントAPI取得失敗など）はリスト要素そのまま `makeProgramElement` に渡り、タイトルのみの暫定描画になる。ページングで全件取得するため、放送中フォローが100件を超えても詳細が付く（→ §1-2）。
 
 ### 1-2. 番組詳細 — `fetchFollowedProgramsViaPage()`（`followPageSource.js`）
@@ -39,9 +44,11 @@
 | `id` | `id`（`"lv..."`、**lv付き**で格納・照合） | localStorageキー、`makeProgramElement`（`.replace('lv','')`でcontainer id化）、`programInfos.find(info.id==='lv'+program.id)` の突合 |
 | `title` | `title`（既定 `'タイトル不明'`） | 番組タイトル |
 | `providerType` | `providerType` を `'user'`/`'channel'` へ写像（`mapProviderType`：`channel`/`official`→channel、`community`等→user） | サムネURL・投稿者ページURL・保存可否の分岐 |
-| `contentOwner.id` | `programProvider.id`（文字列化） | ユーザー/チャンネルページURL生成 |
-| `contentOwner.name` | `programProvider.name` | コミュニティ名（既定 `''`） |
-| `contentOwner.icon` | `programProvider.icon`／`iconSmall` | アイコン画像 |
+| `contentOwner.id` | `programProvider.id`（文字列化）→ 無ければ `socialGroup.id`（`ch…`） | ユーザー/チャンネルページURL生成 |
+| `contentOwner.name` | `programProvider.name` → 無ければ `socialGroup.name` | 配信者名（既定 `''`） |
+| `contentOwner.icon` | `programProvider.icon`／`iconSmall` → 無ければ `socialGroup.thumbnailUrl` | アイコン画像 |
+
+> **channel は `programProvider` に id もアイコンも無い**（2026-07-31 実測・70件: community 67件は `programProvider.icon` が 67/67 埋まり `socialGroup` 無し、channel 3件は `icon` が 0/3 で `socialGroup:{id,name,thumbnailUrl}` が 3/3）。`socialGroup` を見ないと**チャンネルカードのアイコンは永久に空**になる（`fillMissingDetails` は「名前が空」でしか発火せず、名前は埋まっているので対象外）。
 | `thumbnailUrl` | ライブスクショURL（`isLiveScreenshotUrl` 通過時のみ） | サムネのベース/フォールバック（静的サムネ兼用）。空なら §後述の補完対象 |
 | `liveScreenshotThumbnailUrls.middle` | ライブスクショURL（同上、`thumb` があれば） | **user配信**のライブサムネ（`?cache=<ms>` 付与） |
 | `large1280x720ThumbnailUrl` | ライブスクショURL（同上） | **channel配信**のライブサムネ優先URL |
@@ -120,9 +127,9 @@
 **番組カードDOM構造**（`makeProgramElement`）:
 ```
 div.program_container[id=<数値ID>, active-point=<数値>]
- ├ div.community
+ ├ div.provider
  │   ├ a[href=user_page_url, target=_blank] > img[src=icon_url]
- │   └ div.community_name[title]
+ │   └ div.provider_name[title]
  ├ div.program_thumbnail.program-card_
  │   └ a[href=thumbnail_link_url] > img.program_thumbnail_img[src, data-src]
  └ div.program_title[title]
@@ -178,7 +185,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 | **視聴ページ / watch** | 生放送視聴ページ `.../watch/lvXXXX` | `content_scripts.matches`。ID=`lv\d+` |
 | **番組ID / lvID** | `lv`+数値。数値が大きいほど新しい | リスト=数値 / 詳細・格納=lv付き の使い分けに注意 |
 | **providerType** | 配信主体。`user`（ユーザー生）/ `channel`（チャンネル生） | サムネ・投稿者URL・保存可否の分岐 |
-| **コミュニティ名 / provider** | 配信者表示名 | `contentOwner.name` → `.community_name` |
+| **配信者名 / provider** | 配信者の表示名（user はユーザー名 / channel はチャンネル名）。⚠️ ニコ生の**コミュニティ機能は廃止済み**で、API のキー名（`community_name` / `providerType:'community'`）だけがレガシーとして残っている。表示・命名を引きずられないこと | `contentOwner.name` → `.provider_name` |
 | **ライブサムネ** | 放送中の実映像サムネ。user=スクショ、channel=大サイズ画像 | user:`liveScreenshotThumbnailUrls.middle` / channel:`large1280x720ThumbnailUrl` |
 | **メンバー限定(isMemberOnly)** | 会員限定番組。サムネ更新対象外 | `computeNext` で `key:'member'` |
 | **人気度 / active-point** | 独自指標 `(viewers+1 + comments+1) / 経過分`。人気順ソートのキー | `calculateActivePoint`、DOM属性 `active-point` |

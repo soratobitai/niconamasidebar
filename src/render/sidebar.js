@@ -62,55 +62,37 @@ export function resolveLiveThumbnailBaseUrl(info) {
 export function deriveCardFields(data) {
     if (!data || !data.id) return null
 
-    // notifybox のリスト項目は id が数値（lvなし）で来ることがあるため文字列化してから扱う。
-    const idStr = String(data.id)
-    const id = idStr.replace('lv', '')
-    let user_page_url = ''
-    let community_name = ''
-    let thumbnail_link_url = ''
-    let thumbnail_url = ''
-    let icon_url = ''
-    let live_thumbnail_url = ''
+    // id は取得元によって 'lv123' / '123' の両方がありうるので、数値部に正規化して扱う
+    // （カードのDOM id は数値・視聴URLは lv 付き、という規約はここが唯一の生成点）。
+    const id = String(data.id).replace(/^lv/, '')
+    const owner = data.contentOwner || {}
     const title = data.title || 'タイトル不明'
-
-    if (idStr.includes('lv')) {
-        if (data.contentOwner && data.contentOwner.id) {
-            user_page_url = `https://www.nicovideo.jp/user/${data.contentOwner.id}`
-        }
-        community_name = (data.contentOwner && data.contentOwner.name) || 'コミュニティ名不明'
-        thumbnail_link_url = `${watchPageBaseUrl}${data.id}`
-        thumbnail_url = data.thumbnailUrl || ''
-        icon_url = (data.contentOwner && data.contentOwner.icon) || ''
-
-        if (data.providerType === 'user') {
-            live_thumbnail_url = data.thumbnailUrl || ''
-            if (data.liveScreenshotThumbnailUrls && data.liveScreenshotThumbnailUrls.middle) {
-                live_thumbnail_url = appendCacheParam(data.liveScreenshotThumbnailUrls.middle, Date.now())
-            }
-        }
-        if (data.providerType === 'channel') {
-            if (data.contentOwner && data.contentOwner.id) {
-                user_page_url = `https://ch.nicovideo.jp/${data.contentOwner.id}`
-            }
-            live_thumbnail_url = data.thumbnailUrl || ''
-            if (data.large1280x720ThumbnailUrl) {
-                live_thumbnail_url = data.large1280x720ThumbnailUrl
-            }
-        }
-    } else {
-        community_name = data.community_name || 'コミュニティ名不明'
-        thumbnail_link_url = data.thumbnail_link_url || ''
-        thumbnail_url = data.thumbnail_url || ''
-        icon_url = data.thumbnail_url || ''
-        live_thumbnail_url = data.thumbnail_url || ''
-
-        if (thumbnail_url) {
-            const match = thumbnail_url.match(/\/(\d+)\.jpg/i)
-            if (match) user_page_url = `https://www.nicovideo.jp/user/${match[1]}`
-        }
+    // 「コミュニティ名」ではなく**配信者名**（user はユーザー名 / channel はチャンネル名）。
+    // ニコ生のコミュニティ機能は廃止済みで、API のキー名(community_name / providerType:'community')
+    // だけがレガシーとして残っている。表示・命名を API の古い語彙に引きずられないこと。
+    const provider_name = owner.name || '配信者名不明'
+    const icon_url = owner.icon || ''
+    const thumbnail_link_url = `${watchPageBaseUrl}lv${id}`
+    let user_page_url = ''
+    if (owner.id) {
+        user_page_url = data.providerType === 'channel'
+            ? `https://ch.nicovideo.jp/${owner.id}`
+            : `https://www.nicovideo.jp/user/${owner.id}`
     }
 
-    return { id, user_page_url, community_name, thumbnail_link_url, thumbnail_url, icon_url, live_thumbnail_url, title }
+    const thumbnail_url = data.thumbnailUrl || ''
+    let live_thumbnail_url = ''
+    if (data.providerType === 'user') {
+        live_thumbnail_url = thumbnail_url
+        if (data.liveScreenshotThumbnailUrls && data.liveScreenshotThumbnailUrls.middle) {
+            live_thumbnail_url = appendCacheParam(data.liveScreenshotThumbnailUrls.middle, Date.now())
+        }
+    }
+    if (data.providerType === 'channel') {
+        live_thumbnail_url = data.large1280x720ThumbnailUrl || thumbnail_url
+    }
+
+    return { id, user_page_url, provider_name, thumbnail_link_url, thumbnail_url, icon_url, live_thumbnail_url, title }
 }
 
 /**
@@ -118,8 +100,8 @@ export function deriveCardFields(data) {
  *
  * 旧実装は updateSidebar が active-point / data-api-index / タイトル / リンク先の4つしか
  * その場更新していなかった。そのため次の2つが後から埋まらなかった（doc/09 項目AK）:
- *   - 配信者名・アイコン: フォローAPIは channel の programProvider を返さないので、
- *     `fillMissingDetails` が詳細APIで後から埋める。カードは生成時のまま「コミュニティ名不明」で固定。
+ *   - 配信者名・アイコン: 生成時に空だった番組（notifybox 先行の新着など）は、後の周期で
+ *     フォローAPIが埋めてもカードに反映されず「配信者名不明」で固定される。
  *   - `img[data-src]`（静止サムネの戻り先）: 生成時に `thumbnailUrl` が空だと空文字のまま固定され、
  *     読み込み失敗時に `restoreStaticThumbIfLoading` が `if (!dataSrc) return` で塞がる＝
  *     一度 loading.gif に落ちるとページ再読込まで戻らない。
@@ -150,18 +132,18 @@ export function applyProgramInfoToCard(card, data) {
         img.setAttribute('data-src', f.thumbnail_url)
     }
 
-    const communityDiv = card.querySelector('.community')
-    if (!communityDiv) return
+    const providerDiv = card.querySelector('.provider')
+    if (!providerDiv) return
 
-    const nameEl = communityDiv.querySelector('.community_name')
-    if (nameEl && f.community_name && nameEl.textContent !== f.community_name) {
-        nameEl.textContent = f.community_name
-        nameEl.title = f.community_name
+    const nameEl = providerDiv.querySelector('.provider_name')
+    if (nameEl && f.provider_name && nameEl.textContent !== f.provider_name) {
+        nameEl.textContent = f.provider_name
+        nameEl.title = f.provider_name
     }
 
     // アイコンは**生成時に空だと要素そのものが作られない**ので、後から挿入する必要がある。
-    const existingImg = communityDiv.querySelector('img')
-    const existingLink = existingImg && existingImg.parentElement !== communityDiv ? existingImg.parentElement : null
+    const existingImg = providerDiv.querySelector('img')
+    const existingLink = existingImg && existingImg.parentElement !== providerDiv ? existingImg.parentElement : null
     if (f.icon_url) {
         if (existingImg) {
             if (existingImg.getAttribute('src') !== f.icon_url) existingImg.src = f.icon_url
@@ -179,7 +161,7 @@ export function applyProgramInfoToCard(card, data) {
                 iconLink.appendChild(iconImg)
                 node = iconLink
             }
-            communityDiv.insertBefore(node, communityDiv.firstChild) // 名前より前＝生成時と同じ並び
+            providerDiv.insertBefore(node, providerDiv.firstChild) // 名前より前＝生成時と同じ並び
         }
     }
 }
@@ -187,14 +169,26 @@ export function applyProgramInfoToCard(card, data) {
 export function makeProgramElement(data, loadingImageURL) {
     const f = deriveCardFields(data)
     if (!f) return null
-    const { id, user_page_url, community_name, thumbnail_link_url, icon_url, title } = f
+    const { id, user_page_url, provider_name, thumbnail_link_url, icon_url, title } = f
     let { thumbnail_url, live_thumbnail_url } = f
 
+    // サムネ枠に出す画像がライブサムネか（＝この後のフォールバックに落ちていないか）。
+    // 動くサムネの末尾スロット判定に使う dataset.thumbLive の初期値になる。
+    const isLiveSrc = !!live_thumbnail_url
+
+    // ライブサムネも静止サムネも無い間（放送直後でスクショ未生成／notifybox 先行分）は
+    // **配信者アイコン**を繋ぎに出す。ローディング画像はアイコンも無い時の最後の砦。
+    //   - 昔ここに出ていたのは notifybox の thumbnail_url（＝ユーザーアイコン）と
+    //     詳細APIの thumbnailUrl（＝コミュニティアイコン）だった。後者はコミュニティ廃止で
+    //     `comch/community-icon/128x128/404.jpg`（汎用404画像）に変わり、前者は
+    //     `_mergeSources` が捨てていたため、ローディング画像に落ちていた（doc/09 項目AT）。
+    //   - ⚠️ アイコンは**表示のフォールバックにだけ使うこと**。programInfo.thumbnailUrl 側に
+    //     入れると「アイコンをライブサムネとして20秒ごとに取り直す」（doc/09 項目AA）の再発になる。
     if (!live_thumbnail_url) {
-        live_thumbnail_url = thumbnail_url || loadingImageURL
+        live_thumbnail_url = thumbnail_url || icon_url || loadingImageURL
     }
     if (!thumbnail_url) {
-        thumbnail_url = loadingImageURL
+        thumbnail_url = icon_url || loadingImageURL
     }
 
     const activePoint = calculateActivePoint(data)
@@ -205,11 +199,11 @@ export function makeProgramElement(data, loadingImageURL) {
     container.className = 'program_container'
     container.setAttribute('active-point', String(activePoint))
 
-    // コミュニティセクション
-    const communityDiv = document.createElement('div')
-    communityDiv.className = 'community'
+    // 配信者セクション（アイコン＋配信者名）
+    const providerDiv = document.createElement('div')
+    providerDiv.className = 'provider'
 
-    // ユーザーアイコン
+    // 配信者アイコン
     if (icon_url) {
         if (user_page_url) {
             const iconLink = document.createElement('a')
@@ -218,22 +212,22 @@ export function makeProgramElement(data, loadingImageURL) {
             const iconImg = document.createElement('img')
             iconImg.src = icon_url
             iconLink.appendChild(iconImg)
-            communityDiv.appendChild(iconLink)
+            providerDiv.appendChild(iconLink)
         } else {
             const iconImg = document.createElement('img')
             iconImg.src = icon_url
-            communityDiv.appendChild(iconImg)
+            providerDiv.appendChild(iconImg)
         }
     }
 
-    // コミュニティ名
-    const communityNameDiv = document.createElement('div')
-    communityNameDiv.className = 'community_name'
-    communityNameDiv.title = community_name
-    communityNameDiv.textContent = community_name
-    communityDiv.appendChild(communityNameDiv)
+    // 配信者名
+    const providerNameDiv = document.createElement('div')
+    providerNameDiv.className = 'provider_name'
+    providerNameDiv.title = provider_name
+    providerNameDiv.textContent = provider_name
+    providerDiv.appendChild(providerNameDiv)
 
-    container.appendChild(communityDiv)
+    container.appendChild(providerDiv)
 
     // サムネイルセクション
     const thumbnailDiv = document.createElement('div')
@@ -244,6 +238,9 @@ export function makeProgramElement(data, loadingImageURL) {
     thumbnailImg.className = 'program_thumbnail_img'
     thumbnailImg.src = live_thumbnail_url
     thumbnailImg.setAttribute('data-src', thumbnail_url)
+    // 繋ぎのアイコン/ローディング画像を「ライブサムネ」と誤認させない印。動くサムネの末尾スロットが
+    // 最新コマのフリでこれを混ぜないようにする（サムネ更新が成功したら applySuccess が '1' に戻す）。
+    if (!isLiveSrc) thumbnailImg.dataset.thumbLive = '0'
     // 画像読み込み失敗時のフォールバック（data-src → loading.gif）を配線
     thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)

@@ -39,9 +39,9 @@
 |---------|------|
 | `.program_container` | 1番組カード。`id`=番組数値ID、属性 `active-point`（人気順ソートのキー） |
 | `.program_thumbnail .anim_thumb_overlay` / `.anim_thumb_layer` / `.show` | 🧪実験。動くサムネのホバー用オーバーレイ（div, `inset:0`, `pointer-events:none`, **`z-index:1`**）。内部に2枚の `.anim_thumb_layer`(img) を重ね、`opacity`(0.4s)でクロスフェード。生成/制御は `render/animatedThumbnail.js`。⚠️ **`z-index` は必ずベースサムネの上・ホバーボタンの下**（「別窓くん」の `.nicolive_link_button_wrap` は `z-index:2`）。div自身が stacking context になり内部レイヤーの z-index は外に漏れない |
-| `.program_container .community` | 配信者行（アイコン＋名前） |
-| `.community a` / `.community img` | 丸いユーザーアイコン（40px, `border-radius:50%`） |
-| `.community .community_name` | 配信者名（1行省略 `text-overflow:ellipsis`） |
+| `.program_container .provider` | 配信者行（アイコン＋名前）。⚠️ 旧 `.community`（ニコ生のコミュニティ廃止に伴い 2026-07-31 改名） |
+| `.provider a` / `.provider img` | 丸い配信者アイコン（40px, `border-radius:50%`） |
+| `.provider .provider_name` | 配信者名（1行省略 `text-overflow:ellipsis`）。旧 `.community_name` |
 | `.program_thumbnail` | サムネ枠（`aspect-ratio:16/9`, 角丸, 黒背景） |
 | `.program_thumbnail a` / `img` | サムネ画像（`object-fit:contain`）。`img.src`=ライブサムネ, `data-src`=静的サムネ |
 | `.program_title` | 番組タイトル（2行クランプ `-webkit-line-clamp:2`, `min-height:2.8em`） |

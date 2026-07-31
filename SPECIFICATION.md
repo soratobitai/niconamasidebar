@@ -133,11 +133,15 @@ main.js（エントリ：初期化・イベント配線・各層への委譲）
 | URL | `https://papi.live.nicovideo.jp/api/relive/notifybox.content.php?rows=100` |
 | 認証 | `credentials: 'include'`（**ログイン Cookie 必須**） |
 | 応答 | `{ meta: { status: 200 }, data: { notifybox_content: [...] } }` |
-| 要素 | `{ id: "<lv抜きの数値>", title }` 程度。**詳細は含まない** |
+| 要素 | `{ id: "<lv抜きの数値>", title, community_name, thumbnail_url, provider_type, elapsed_time }` |
 | 上限 | **`rows=100`・ページングなし** |
 | 返り値 | 失敗時 `false` |
 
 **user番組の新着検知が API-1 より 20〜101秒 速い**（2026-07-29 実測・9件）。この1点のために併用する。
+
+⚠️ **`community_name` / `thumbnail_url` はレガシー名で、中身は「配信者名」と「配信者アイコン」**（ニコ生のコミュニティ機能は廃止済み。キー名だけが残っている）。視聴者数・コメント数・ライブサムネは**含まれない**が、**配信者名とアイコンは含まれる**。ここを捨てると、API-1 が同じ番組を拾うまでの 20〜101秒＋1周期のあいだ、新着カードが「配信者名不明・アイコンなし・ローディング画像」で立つ（doc/09 項目AT）。写像は `mapNotifyboxRowToInfo()`。
+
+⚠️ **`thumbnail_url`（アイコン）を `programInfo.thumbnailUrl` に入れてはならない。** アイコンをライブサムネとして20秒ごとに取り直す事故になる（doc/09 項目AA）。カードの**表示フォールバック**にだけ使う。
 
 #### API-1 と API-1b の合成
 
@@ -145,7 +149,8 @@ main.js（エントリ：初期化・イベント配線・各層への委譲）
 **API-1 の実データ ＞ storage の前回値 ＞ API-1b の最小情報**。
 
 API-1b にしか無い番組は「たった今始まった新着」なので、`beginAt` 不明のまま新着順の先頭へ置き、
-次の周期で API-1 の実データに置き換わる。
+次の周期で API-1 の実データに置き換わる。**その間も配信者名・アイコン・種別は API-1b の値で出す**
+（視聴者数・コメント数・ライブサムネだけが空のまま次の周期を待つ）。
 
 > ⚠️ **notifybox を「絞り込み」に使ってはならない。** 旧実装は notifybox に載った番組だけカード化しており、`rows=100` のため**放送中が100件を超えると101件目以降が表示されなかった**（詳細は500件まで取得して捨てていた）。和集合にすることでこれが解消している。
 
@@ -155,7 +160,7 @@ API-1b にしか無い番組は「たった今始まった新着」なので、`
 |---|---|
 | URL | `https://api.cas.nicovideo.jp/v1/services/live/programs/lv{id}` |
 | 認証 | **なし**（Cookie を送らない） |
-| 用途 | API-1 で埋まらない穴**だけ**を補完。①user でライブサムネが空（固定画像配信者／放送直後で未生成）②channel/official の配信者名・アイコン（`contentOwner`）— フォローAPIは `programProvider` を返さないため |
+| 用途 | API-1 で埋まらない穴**だけ**を補完。①user でライブサムネが空（固定画像配信者／放送直後で未生成）②配信者名が空のまま（想定外の応答）の番組の `contentOwner` |
 | 上限 | 1サイクルあたり `MAX_DETAIL_FALLBACK = 30` 件 |
 
 > 旧方式（全番組を API-2 で個別取得＋レート制限キュー）は撤去済み。復活させないこと。
@@ -168,8 +173,8 @@ API-1 の各要素を `mapApiProgramToInfo()` が以下へ変換する。
 |---|---|---|
 | `id` | string | `"lv..."` 形式 |
 | `title` | string | 空なら `'タイトル不明'` |
-| `providerType` | string | API の `community` → `'user'` に正規化 |
-| `contentOwner` | object | `{ id, name, icon }` |
+| `providerType` | string | API の `community` → `'user'` に正規化（`mapProviderType`：3つの取得元で共用） |
+| `contentOwner` | object | `{ id, name, icon }`。**配信者**（user はユーザー、channel はチャンネル）。channel は `programProvider` に id もアイコンも無く、`socialGroup:{id,name,thumbnailUrl}` から拾う（2026-07-31 実測） |
 | `liveScreenshotThumbnailUrls.middle` | string? | **ライブスクショと判定できた場合のみ**設定 |
 | `large1280x720ThumbnailUrl` | string? | 同上 |
 | `thumbnailUrl` | string | 表示用。user はライブスクショのみ、channel/official は `listingThumbnail` をそのまま |
@@ -394,6 +399,14 @@ URL に "/screenshot/" を含む、または ホストが dlive.nicovideo.jp
 **空サムネの追撃**
 
 放送開始から3分以内（`newProgramFastPollMs`）の **user・非会員限定でない**番組でライブサムネが空の場合のみ、各サイクルで **API-2**（番組詳細）を1回叩いて補完する。3分を超えた空サムネは「固定画像運用」とみなし追撃しない。
+
+**ライブサムネが出るまでの繋ぎ画像**
+
+サムネ枠に出す画像の優先順位は **ライブサムネ → 静止サムネ(`thumbnailUrl`) → 配信者アイコン → `images/loading.gif`**。
+放送直後（スクショ未生成）や API-1b 先行分の番組では**配信者アイコン**が出る（`aspect-ratio:16/9` の枠に `object-fit:contain` で収まる）。ローディング画像はアイコンも無い時の最後の砦であり、**通常は目に見えない**。
+
+> アイコンを繋ぎに出した `<img>` には `dataset.thumbLive='0'` を立てる。動くサムネ（F-09）が
+> 非ライブ画像を「最新コマ」として混ぜないための印であり、サムネ更新が成功したら `'1'` に戻る。
 
 **背景タブ**
 

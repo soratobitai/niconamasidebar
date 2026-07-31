@@ -1,9 +1,13 @@
 import { notifyboxAPI, liveInfoAPI } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
+import { mapProviderType } from '../utils/providerType.js'
 
 // notifybox はリストの「早さ」担当。2026-07-29 の実測で、user番組の新着検知が
 // フォローAPIより 20〜101秒 速いことが分かったため、和集合方式で併用している（doc/09 項目AD）。
-// 返すのは実質 id と title だけなので、詳細と並び順はフォローAPI側が担う。
+// 視聴者数・コメント数・ライブサムネは無いので、詳細と並び順はフォローAPI側が担う。
+// ただし**配信者名とアイコンは notifybox にも入っている**（下記 mapNotifyboxRowToInfo）。
+// フォローAPIが同じ番組を拾うまでの 20〜101秒＋1周期のあいだ、それを使わないと
+// カードが「名前なし・アイコンなし」で立つ（doc/09 項目AT）。
 
 /**
  * フォロー中の放送中番組リストを notifybox から取得する。
@@ -27,6 +31,7 @@ export async function fetchLivePrograms(rows = 100) {
                 )
                 return false
             }
+            warnIfNotifyboxShapeChanged(response.data.notifybox_content)
             return response.data.notifybox_content
         } catch (error) {
             handleError(error, { api: 'fetchLivePrograms', rows })
@@ -38,6 +43,84 @@ export async function fetchLivePrograms(rows = 100) {
 
     liveProgramsInFlight.set(key, p)
     return p
+}
+
+/**
+ * notifybox の応答形が変わっていたら1回だけ警告する（鳴る罠）。
+ *
+ * 配信者名/アイコンが取れなくなると、新着カードが「名前なし・アイコンなし・ローディング画像」で
+ * 立つだけで**エラーは一切出ない**。原因に辿り着けない類の壊れ方なので、ここで鳴らす。
+ * 正常時は完全に無言（毎サイクル出すと埋もれるので1回だけ）。
+ */
+let notifyboxShapeWarned = false
+function warnIfNotifyboxShapeChanged(rows) {
+    if (notifyboxShapeWarned || !Array.isArray(rows) || rows.length === 0) return
+    const row = rows[0] || {}
+    // 値の中身ではなくキーの有無を見る（空文字は「フィールドはある」＝仕様変更ではない）
+    if (row.community_name !== undefined && row.thumbnail_url !== undefined) return
+    notifyboxShapeWarned = true
+    console.warn(
+        '[notifybox] 配信者名/アイコンのフィールドが見つかりません。'
+        + '新着番組のカードが「名前なし・アイコンなし」で表示されます。実際のキー:',
+        Object.keys(row)
+    )
+}
+
+/**
+ * アイコンURLから配信者IDを取り出す。
+ * notifybox は配信者IDを直接返さないが、アイコンURLに埋まっている（実測値）:
+ *   user    : `https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/5255/52553742.jpg?…` → `52553742`
+ *   channel : `https://secure-dcdn.cdn.nimg.jp/comch/channel-icon/128x128/ch2607134.jpg?…` → `ch2607134`
+ * 取れなければ空文字（＝カードのアイコンにリンクを張らないだけ。表示は壊れない）。
+ * @param {string} url
+ * @returns {string}
+ */
+function providerIdFromIconUrl(url) {
+    if (!url) return ''
+    const m = String(url).match(/\/(ch\d+|\d+)\.jpg/i)
+    return m ? m[1] : ''
+}
+
+/**
+ * notifybox の1行を内部 programInfo 形へ写像する。
+ *
+ * **notifybox が返すのは id と title だけではない。** 実測の1行:
+ * ```json
+ * { "id": "341121933", "title": "…",
+ *   "thumbnail_url": "https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/5255/52553742.jpg?…",
+ *   "community_name": "配信者の表示名", "provider_type": "community", "elapsed_time": 137 }
+ * ```
+ * `community_name` はコミュニティ廃止後もキー名だけ残っているレガシー名で、**中身は配信者名**
+ * （user ならユーザー名 / channel ならチャンネル名）。`thumbnail_url` も同様に**配信者アイコン**で、
+ * ライブサムネではない（ここを thumbnailUrl に入れると「アイコンをライブサムネとして20秒ごとに
+ * 取り直す」doc/09 項目AA の再発になる。入れないこと）。
+ *
+ * `elapsed_time`（放送開始からの経過秒）は**意図的に使っていない**。新着順の基準は
+ * 呼び出し側が渡す beginAt（notifybox の返却順を保つための擬似値）に一本化している。
+ *
+ * @param {object} row notifybox_content の1要素
+ * @param {string} beginAtIso 新着順の基準に使う beginAt（ISO文字列）。呼び出し側が決める
+ * @returns {object|null} 内部 programInfo（不正な行は null）
+ */
+export function mapNotifyboxRowToInfo(row, beginAtIso) {
+    if (!row || row.id == null) return null
+    const icon = row.thumbnail_url || ''
+    return {
+        id: 'lv' + String(row.id).replace(/^lv/, ''),
+        title: row.title || 'タイトル不明',
+        providerType: mapProviderType(row.provider_type),
+        contentOwner: {
+            id: providerIdFromIconUrl(icon),
+            name: row.community_name || '',
+            icon,
+        },
+        thumbnailUrl: '',   // notifybox はライブサムネを持たない（アイコンを入れないこと・上記参照）
+        isMemberOnly: false,
+        viewers: 0,
+        comments: 0,
+        onAirTime: { beginAt: beginAtIso },
+        _source: 'notifybox',
+    }
 }
 
 /**

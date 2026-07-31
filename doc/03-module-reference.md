@@ -63,6 +63,8 @@
 |------|-----------|------|
 | `fetchLivePrograms` | `(rows=100) => Promise<false \| Array>` | `notifyboxAPI?rows=100` を `credentials:'include'` で取得。`meta.status===200` かつ `data.notifybox_content` があれば**その配列を返す**。失敗時 `false`。`liveProgramsInFlight`(Map) で `rows` をキーに重複排除 |
 | `fetchProgramInfo` | `(liveId) => Promise<any \| undefined>` | 1番組の**詳細**を `liveInfoAPI/lv{liveId}`（`lv` 無しのID）で取得。`meta.status===200` かつ `data` があれば `data` を返す。失敗時 `undefined`。`programInfoInFlight`(Map) で `liveId` をキーに重複排除。⚠️ **用途限定**：フォローAPIがライブサムネを返さない番組の補完（[followPageSource.js](#servicesfollowpagesourcejs-) の `fillMissingDetails`）だけが呼ぶ。全番組には叩かない |
+| `mapNotifyboxRowToInfo` | `(row, beginAtIso) => object \| null` | notifybox の1行を内部 programInfo 形へ写像（`_mergeSources` が新着番組に使う）。**notifybox は id と title だけではない**: `community_name`（＝配信者名）と `thumbnail_url`（＝配信者アイコン）と `provider_type` を持つ。⚠️ アイコンは `contentOwner.icon` に入れ、**`thumbnailUrl` には入れない**（ライブサムネ誤登録＝項目AA の再発）。配信者IDはアイコンURL（`…/usericon/…/<id>.jpg` / `…/channel-icon/…/ch<id>.jpg`）から復元する |
+| （内部）`warnIfNotifyboxShapeChanged` | — | notifybox の応答から `community_name`/`thumbnail_url` が消えていたら**1回だけ** `console.warn`（鳴る罠）。正常時は無言。名前とアイコンが黙って消える壊れ方はエラーが出ないので、ここでしか気付けない |
 
 - 失敗は `handleError` に記録し、例外は投げず false / undefined を返す方針。
 - 番組**詳細を一括取得**する経路（並びと突き合わせる本流）はフロントAPI方式（[followPageSource.js](#servicesfollowpagesourcejs-)）。`fetchProgramInfo` はそこから漏れた「ライブサムネが空の番組」だけを埋める補助であり、旧「全番組×詳細API」ではない。
@@ -77,9 +79,10 @@
 フォロー中の放送中番組ページが使う公開フロントAPI（`followApiUrl`）を直接呼ぶ:
 `GET https://live.nicovideo.jp/front/api/pages/follow/v1/programs?status=onair&offset=<0始まりページ番号>&limit=100`
 を `credentials:'include'`（Cookie）で取得。応答は `{ data: { programs: [...], total: N } }`。各 program は
-`{ id:"lv...", title, listingThumbnail, watchPageUrl, providerType:"community"|"channel"|"official",
+`{ id:"lv...", title, listingThumbnail, flippedListingThumbnail?, watchPageUrl, providerType:"community"|"channel"|"official",
 liveCycle, beginAt(ミリ秒エポック), endAt, isFollowerOnly, isPayProgram, programProvider:{id,name,icon,iconSmall},
-statistics:{watchCount,commentCount}, timeshift }`。watchページと同一オリジンなので content script から取得できる。
+socialGroup?:{id,name,thumbnailUrl}, statistics:{watchCount,commentCount}, timeshift }`。watchページと同一オリジンなので content script から取得できる。
+`socialGroup` は **channel のみ**（チャンネルID・チャンネル名・チャンネルアイコン）。`programProvider` は channel だと id とアイコンが空なので、`contentOwner` はこの2つを合成して作る。
 ⚠️ リストは notifybox と**和集合**にする。並び順は notifybox 由来ではなく、ここが返す `beginAt` の降順で決める。
 
 | エクスポート | 説明 |
@@ -87,8 +90,7 @@ statistics:{watchCount,commentCount}, timeshift }`。watchページと同一オ�
 | `fetchFollowedProgramsViaPage()` ★ | 放送中フォロー番組の詳細を**ページングして全件**取得し、内部 programInfo 形の**配列**で返す。`fetchOnePage(offset)` を offset=0,1,2… と回し、`id` で重複排除しつつ `total` に達するまで蓄積（安全上限 `MAX_PAGES`）。集めた各番組を `mapApiProgramToInfo` で変換 → 穴のある番組を `fillMissingDetails` で補完 → 返す。失敗（未ログイン/仕様変更/通信エラー、`res.ok` 偽含む）時は `null`。`UpdateManager._refreshDetailsViaScrape` が結果を `upsertProgramInfos` で storage へ一括投入する |
 | `mapApiProgramToInfo(p)` | フロントAPIの1番組を、詳細API相当の内部 programInfo 形（`id="lv..."`, `title`, `providerType`, `contentOwner`, `viewers`(watchCount), `comments`(commentCount), `isMemberOnly`(isFollowerOnly), `onAirTime.beginAt`(beginAt(ms)→ISO), サムネURL群, `status`, `watchPageUrl`, `_source:'followApi'`）へ変換。`makeProgramElement`/`resolveLiveThumbnailBaseUrl`/`calculateActivePoint` がそのまま読めるshape。`p.id` が無ければ `null` |
 | `fetchOnePage(offset)`（内部） | 1ページ取得。`?status=onair&offset=<0始まりページ番号>&limit=PAGE_LIMIT` を `credentials:'include'` で fetch し、`{ programs, total }` を返す。`res.ok` が偽なら throw（→ `fetchFollowedProgramsViaPage` の catch で `null`） |
-| `fillMissingDetails(programs)`（内部） | **選択的フォールバック**。①`thumbnailUrl` が空の **user** 番組（固定画像設定／放送直後で未生成）→ライブサムネを補完 ②**channel/official** で名前かアイコンが空→`contentOwner` を補完（フォローAPIは `programProvider` を返さないため）。`fetchProgramInfo`（詳細API）を叩いて**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦） |
-| `mapProviderType(pt)`（内部） | `'channel'`/`'official'`→`'channel'`、それ以外(`community`/`user`/未知)→`'user'` |
+| `fillMissingDetails(programs)`（内部） | **選択的フォールバック**。①`thumbnailUrl` が空の **user** 番組（固定画像設定／放送直後で未生成）→ライブサムネを補完 ②配信者名が空のまま（想定外の応答）→`contentOwner` を補完。`fetchProgramInfo`（詳細API）を叩いて**破壊的に補完**。空の少数だけ・上限 `MAX_DETAIL_FALLBACK` 件まで。全番組には叩かない（＝旧「全番組×詳細API」の重さを避けたまま穴だけ埋める）。個別失敗は空のまま（次サイクル再挑戦）。⚠️ channel のアイコンはここではなく `socialGroup.thumbnailUrl` から拾う（この条件は名前が埋まっていると発火しない） |
 | `isLiveScreenshotUrl(u)`（内部） | ライブスクショURLかどうか（配信者設定の**固定画像**と区別）。`/screenshot/` を含む or `dlive.nicovideo.jp` 形なら true。`mapApiProgramToInfo`（listingThumbnail採否）と `fillMissingDetails`（補完候補の採否）で使う |
 | `followApiUrl` | `https://live.nicovideo.jp/front/api/pages/follow/v1/programs` |
 | （グローバル）`window.__testFollowScrape()` | 実ページのConsoleから取得結果を件数＋表(`console.table`)で確認するデバッグ用（`debugTestFollowScrape`。現在はAPI経路を叩く） |
@@ -222,13 +224,13 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | エクスポート | 説明 |
 |-------------|------|
-| `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `community`(icon/community_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。旧形式(lv無し)データにも対応 |
+| `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `provider`(icon/provider_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。**サムネが無い間の繋ぎは配信者アイコン**（→ 無ければ `loading.gif`）で、その時は `dataset.thumbLive='0'` を立てる |
 | `calculateActivePoint(data)` | 人気度スコア = `(viewers+1 + comments+1) / max(1, 経過分)`。`onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete,onlyIds,onSettled})` ★★ | localStorageの番組情報を元に各サムネを更新。既定は**コンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`onlyIds` 指定時はその id 集合の番組だけ更新（番組ごと自己連鎖サイクルで使う）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。**`onSettled`** は全プリロードが settle したら1回だけ発火し、`_updateOneThumbnailAndWait` がこれを待って次サイクルを張る（＝作業時間ぶん自然にドリフトする） |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体）。比較器は `utils/programOrder.js` の `compareByActivePoint` |
 | `resolveLiveThumbnailBaseUrl(info)` | ライブサムネのベースURLを provider 別に選ぶ純関数（user=`liveScreenshotThumbnailUrls.middle` / channel=`large1280x720ThumbnailUrl`） |
-| `deriveCardFields(data)` | 番組データ→カードに書く値一式（id/リンク/コミュ名/サムネURL/アイコン/タイトル）を導出する純関数。`makeProgramElement` と `applyProgramInfoToCard` の**共通の土台** |
+| `deriveCardFields(data)` | 番組データ→カードに書く値一式（id/リンク/配信者名/サムネURL/アイコン/タイトル）を導出する純関数。`makeProgramElement` と `applyProgramInfoToCard` の**共通の土台**。`data.id` は `lv` 有無どちらでも受ける（カードDOM id は数値・視聴URLは `lv` 付き、という規約の唯一の生成点） |
 | `applyProgramInfoToCard(card, data)` ★ | **既存カードを作り直さずにその場で更新**（タイトル/リンク先/配信者名/アイコン/`data-src`）。⚠️ `img.src` は**触らない**（サムネ更新ループの担当。触ると動くサムネの状態が壊れる）。項目AK の修正本体 |
 | `setAnimThumbnailFeed(feed)` | 動くサムネ(②)への給餌フックを注入。①が `crossOrigin` で読んだ画像を②へ渡し、**②の自前取得＝二重通信を止める** |
 | `flipReorder(container, reorderFn, duration=300)` | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。**`UpdateManager.updateSidebar` から現役で呼ばれている**（定期更新の並べ替えアニメ本体）。🔴 `reorderFn` の中でフラグメントを組むこと。外で組むと既存カードが親から外れた状態で First を測ることになり、**毎回空振りする**（項目AM） |
@@ -278,6 +280,19 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 - `#optionForm` の `change` で `saveOptions()`（`chrome.storage.local` へ）。
 - **ソート変更(`programsSort`)時のみ特別扱い**: 取得を伴わず、保存＋既存DOMを `sortPrograms(container)` で即ソート。
 - 保存自体は `chrome.storage.local` へ。変更は `main.js` の `chrome.storage.onChanged` が拾って各挙動へ反映（[04-data-flow](./04-data-flow.md) 参照）。
+
+---
+
+## utils/providerType.js
+
+**配信主体の種別（`'user'`/`'channel'`）への写像の唯一の定義**（2026-07-31 新設）。
+
+| 関数 | 説明 |
+|------|------|
+| `mapProviderType(pt)` | `'channel'`/`'official'`→`'channel'`、それ以外（`'community'`/`'user'`/未知）→`'user'` |
+
+取得元が3つ（フォローAPI `providerType` / notifybox `provider_type` / 詳細API `providerType`）あっても
+語彙は共通なので写像は1つに集約する。`'community'` は**旧コミュニティ時代の名残**で、実体はユーザー生放送。
 
 ---
 

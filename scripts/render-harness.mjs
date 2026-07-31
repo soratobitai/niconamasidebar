@@ -32,12 +32,23 @@ export const liveThumbUrl = (id) => `https://dlive.nicovideo.jp/live/${id}/scree
  */
 export function apiProgram({ id, beginAtMs, title, providerType = 'user', name, viewers = 10, comments = 5, thumb = true }) {
     const num = String(id).replace(/^lv/, '')
+    const isChannel = providerType === 'channel' || providerType === 'official'
+    const providerName = name || `配信者${num}`
     return {
         id: String(id),
         title: title || `番組${num}`,
         providerType: providerType === 'user' ? 'community' : providerType,
         listingThumbnail: thumb ? liveThumbUrl(num) : '',
-        programProvider: { id: `u${num}`, name: name || `配信者${num}`, icon: `https://icon/${num}.png` },
+        // 実測（2026-07-31 / 70件）: channel は programProvider に **id もアイコンも無く**、
+        // 代わりに socialGroup にチャンネルID・チャンネル名・チャンネルアイコンが入る。
+        // user(community) はその逆で programProvider が完備・socialGroup 無し。
+        // ここを「両方入っている」形で作ると、実際には出ないアイコンをテストが通してしまう。
+        programProvider: isChannel
+            ? { name: providerName, icon: '', iconSmall: '' }
+            : { id: `u${num}`, name: providerName, icon: `https://icon/${num}.png` },
+        ...(isChannel
+            ? { socialGroup: { id: `ch${num}`, name: providerName, thumbnailUrl: `https://channel-icon/ch${num}.jpg` } }
+            : {}),
         statistics: { watchCount: viewers, commentCount: comments },
         isFollowerOnly: false,
         beginAt: beginAtMs,

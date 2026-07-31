@@ -1,4 +1,5 @@
 import { handleError } from '../utils/error.js'
+import { mapProviderType } from '../utils/providerType.js'
 import { fetchProgramInfo } from './api.js'
 
 /**
@@ -19,7 +20,8 @@ import { fetchProgramInfo } from './api.js'
  * 選択補完(fillMissingDetails): フォローAPIだけでは埋まらない情報を、対象番組だけ詳細API
  * (fetchProgramInfo)で補う（全番組には叩かない＝旧方式の重さを避ける）。
  *  - user で固定画像設定/未生成によりライブサムネが空 → liveScreenshotThumbnailUrls を補完。
- *  - channel/official はフォローAPIが配信者名/アイコン(programProvider)を持たない → contentOwner を補完。
+ *  - 配信者名が空のまま（想定外の応答）→ contentOwner を補完。
+ *    ※ channel のアイコンは socialGroup.thumbnailUrl から拾えるので、この補完には頼らない。
  * 出力は内部 programInfo 形（従来の詳細APIと同じshape）に揃えてあり、makeProgramElement /
  * resolveLiveThumbnailBaseUrl / calculateActivePoint がそのまま読める。
  */
@@ -29,16 +31,6 @@ const followApiUrl = 'https://live.nicovideo.jp/front/api/pages/follow/v1/progra
 const PAGE_LIMIT = 100 // 1リクエストあたり件数（notifybox の rows=100 に合わせる）
 const MAX_PAGES = 5    // 安全上限（放送中フォローが極端に多い場合の暴走防止：最大 500 件）
 const MAX_DETAIL_FALLBACK = 30 // 1サイクルで詳細APIを呼ぶ上限（固定画像番組の補完・暴走防止）
-
-/**
- * providerType を内部モデル（'user'|'channel'）へ写像する。
- * API観測値: 'community'（ユーザー生放送）/ 'channel' / 'official'。
- */
-function mapProviderType(pt) {
-    if (pt === 'channel' || pt === 'official') return 'channel'
-    // community / user / 未知 は user 扱い（ライブサムネは liveScreenshotThumbnailUrls 経路で拾う）
-    return 'user'
-}
 
 /**
  * ライブスクショURLかどうか（配信者が設定した「固定画像」と区別する）。
@@ -76,15 +68,22 @@ export function mapApiProgramToInfo(p) {
     // 表示用の thumbnailUrl は従来どおり残すので、カードの見た目は変わらない。
     const liveThumb = isLiveScreenshotUrl(thumb) ? thumb : ''
     const provider = p.programProvider || {}
+    // channel/official は `programProvider` が `{name, icon:'', iconSmall:''}` で **id とアイコンが空**、
+    // 代わりに `socialGroup:{id:'ch…', name, thumbnailUrl}` にチャンネル名とチャンネルアイコンが入る
+    // （2026-07-31 実測: community 67件は programProvider.icon が 67/67 埋まり socialGroup 無し、
+    //   channel 3件は programProvider.icon が 0/3・socialGroup が 3/3）。
+    // ここで拾わないと channel カードのアイコンは**永久に空**になる（fillMissingDetails は
+    // 「名前が空」でしか発火せず、名前は埋まっているので対象にならない）。
+    const social = p.socialGroup || {}
     const stats = p.statistics || {}
     return {
         id: String(p.id),                                    // "lv..."
         title: p.title || 'タイトル不明',
         providerType,
         contentOwner: {
-            id: provider.id != null ? String(provider.id) : '',
-            name: provider.name || '',
-            icon: provider.icon || provider.iconSmall || '',
+            id: provider.id != null ? String(provider.id) : (social.id || ''),
+            name: provider.name || social.name || '',
+            icon: provider.icon || provider.iconSmall || social.thumbnailUrl || '',
         },
         // user は liveScreenshotThumbnailUrls.middle、channel は large1280x720ThumbnailUrl を見る。
         // 両方に同じライブスクショURLを入れ、resolveLiveThumbnailBaseUrl が provider 別に拾えるようにする。
@@ -123,22 +122,25 @@ async function fetchOnePage(offset) {
 /**
  * フォローAPIだけでは埋まらない情報を、番組詳細API(fetchProgramInfo)で選択的に補完する。
  *  - user でライブサムネが空（固定画像配信者／放送直後で未生成）→ liveScreenshotThumbnailUrls を補う。
- *  - channel/official → フォローAPIは programProvider（配信者名/アイコン）を持たないので、詳細APIの
- *    contentOwner で名前/アイコンを補う（イベントサムネが空なら large1280x720ThumbnailUrl も）。
+ *  - 配信者名が空 → 詳細APIの contentOwner で名前/アイコンを補う（イベントサムネが空なら
+ *    large1280x720ThumbnailUrl も）。通常はフォローAPIの programProvider / socialGroup で埋まるので、
+ *    ここに落ちてくるのは応答が想定と違うときだけ。
  * 全番組には叩かない（対象の少数だけ・上限あり）＝旧方式の「全番組×詳細API」の重さを避けて穴だけ埋める。
  * @param {Array<object>} programs - map済みの内部 programInfo 配列（破壊的に補完する）
  */
 async function fillMissingDetails(programs) {
+    // 穴は2種類だけ:「サムネが空」または「配信者名が空」。providerType 別に条件を分けない
+    // （旧実装は channel のときだけ名前の空を見ていたが、channel は名前が埋まるので発火せず、
+    //   逆に名前が空の user は拾えなかった。実測上どちらもほぼ起きないが、条件を狭く書く理由が無い）。
     const targets = programs.filter((p) => p && (
-        (p.providerType === 'user' && !p.thumbnailUrl) ||
-        (p.providerType === 'channel' && (!p.contentOwner || !p.contentOwner.name || !p.thumbnailUrl))
+        !p.thumbnailUrl || !p.contentOwner || !p.contentOwner.name
     )).slice(0, MAX_DETAIL_FALLBACK)
     if (targets.length === 0) return
     await Promise.all(targets.map(async (p) => {
         try {
             const detail = await fetchProgramInfo(String(p.id).replace(/^lv/, ''))
             if (!detail) return
-            // 配信者名/アイコン（公式/チャンネルはフォローAPIに無いので補完）
+            // 配信者名/アイコン（フォローAPIの programProvider / socialGroup で埋まらなかった時だけ）
             const co = detail.contentOwner
             if (co && (!p.contentOwner || !p.contentOwner.name)) {
                 p.contentOwner = {

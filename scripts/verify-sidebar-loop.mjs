@@ -457,6 +457,36 @@ async function r3merge() {
         onlyNotify.every((x) => x.title && x.id.startsWith('lv')),
         onlyNotify.map((x) => `${x.id}:${x.title}`).join(', '))
 
+    // --- 項目AT: notifybox の行を id と title だけに削らない ---
+    // フォローAPIが同じ番組を拾うまでの 20〜101秒＋1周期、ここで捨てた情報がそのまま
+    // 「配信者名不明・アイコンなし・ローディング画像」として画面に出る。
+    const userRow = {
+        id: '880', title: 'ユーザー生放送', community_name: '速報の配信者', provider_type: 'community',
+        thumbnail_url: 'https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/5255/52553742.jpg?1673509950',
+    }
+    const chRow = {
+        id: '881', title: 'チャンネル番組', community_name: 'チャンネルX', provider_type: 'official',
+        thumbnail_url: 'https://secure-dcdn.cdn.nimg.jp/comch/channel-icon/128x128/ch2607134.jpg?1680231845',
+    }
+    const rich = um._mergeSources([userRow, chRow], [])
+    const u880 = rich.find((x) => x.id === 'lv880')
+    const c881 = rich.find((x) => x.id === 'lv881')
+    check('AT notifybox の配信者名(community_name)を捨てない',
+        u880?.contentOwner?.name === '速報の配信者', `"${u880?.contentOwner?.name}"`)
+    check('AT notifybox のアイコン(thumbnail_url)を捨てない',
+        (u880?.contentOwner?.icon || '').includes('usericon'), u880?.contentOwner?.icon)
+    check('AT アイコンURLから配信者IDを復元する（投稿者ページへのリンク用）',
+        u880?.contentOwner?.id === '52553742', `"${u880?.contentOwner?.id}"`)
+    check('AT 🔴 アイコンを thumbnailUrl に入れない（アイコンをライブサムネとして20秒ごとに取り直す事故の防止・項目AA）',
+        u880?.thumbnailUrl === '', `thumbnailUrl="${u880?.thumbnailUrl}"`)
+    check('AT notifybox の provider_type を反映する（official → channel）',
+        c881?.providerType === 'channel', c881?.providerType)
+    check('AT チャンネルアイコンURLからはチャンネルIDを復元する',
+        c881?.contentOwner?.id === 'ch2607134', `"${c881?.contentOwner?.id}"`)
+    check('AT 想定外の行でも落ちない（欠損は空で埋める）',
+        um._mergeSources([{ id: '882', title: 'x' }], [])
+            .find((x) => x.id === 'lv882')?.contentOwner?.name === '')
+
     // --- 並びの安定性（同時刻は lv番号降順で決定的） ---
     const same = [
         { id: 'lv200', title: 'a', onAirTime: { beginAt: iso(t) } },
@@ -820,10 +850,10 @@ async function inPlaceUpdate() {
 
     // 生成時: 配信者名もアイコンもサムネURLも無い状態のカードを手で組む
     const card = mkEl('program_container')
-    const community = mkEl('community')
-    const name = mkEl('community_name'); name.textContent = 'コミュニティ名不明'
-    community.appendChild(name)
-    card.appendChild(community)
+    const provider = mkEl('provider')
+    const name = mkEl('provider_name'); name.textContent = '配信者名不明'
+    provider.appendChild(name)
+    card.appendChild(provider)
     const thumb = mkEl('program_thumbnail')
     const a = mkEl(''); a.tag = 'a'
     const img = mkEl('program_thumbnail_img'); img.setAttribute('data-src', '')
@@ -840,10 +870,10 @@ async function inPlaceUpdate() {
 
     check('AK 後から埋まった配信者名が反映される', name.textContent === '公式チャンネル',
         `"${name.textContent}"`)
-    const iconImg = community.children.find((c) => c.tag === 'img' || (c.children[0] && c.children[0].tag === 'img'))
+    const iconImg = provider.children.find((c) => c.tag === 'img' || (c.children[0] && c.children[0].tag === 'img'))
     check('AK 生成時に無かったアイコンが後から挿入される', !!iconImg,
-        iconImg ? '挿入された' : 'community の子: ' + community.children.map((c) => c.tag || c.className).join(','))
-    check('AK アイコンは配信者名より前に入る', community.children[0] !== name)
+        iconImg ? '挿入された' : 'provider の子: ' + provider.children.map((c) => c.tag || c.className).join(','))
+    check('AK アイコンは配信者名より前に入る', provider.children[0] !== name)
     check('AK 空だった data-src が実URLに更新される',
         img.getAttribute('data-src') === 'https://dlive.nicovideo.jp/s.jpg',
         `data-src="${img.getAttribute('data-src')}"`)
@@ -852,15 +882,15 @@ async function inPlaceUpdate() {
         !img.attrs.src, `src="${img.attrs.src || ''}"`)
 
     // 2回目の適用で重複挿入しないこと
-    const before = community.children.length
+    const before = provider.children.length
     sb.applyProgramInfoToCard(card, {
         id: 'lv555', title: '新タイトル', providerType: 'channel',
         contentOwner: { id: 'ch99', name: '公式チャンネル', icon: 'https://x/icon.png' },
         thumbnailUrl: 'https://dlive.nicovideo.jp/s.jpg',
         viewers: 1, comments: 1, onAirTime: { beginAt: new Date().toISOString() },
     })
-    check('AK 2回適用してもアイコンが増殖しない', community.children.length === before,
-        `${before} → ${community.children.length}`)
+    check('AK 2回適用してもアイコンが増殖しない', provider.children.length === before,
+        `${before} → ${provider.children.length}`)
 
     // 導出が1箇所に集約されているか（同じ事実を2箇所に置かない）
     const { readFileSync } = await import('fs')
@@ -870,9 +900,9 @@ async function inPlaceUpdate() {
     const codeOnly = src.split('\n')
         .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) })
         .join('\n')
-    const derivations = (codeOnly.match(/コミュニティ名不明/g) || []).length
-    check('AK 配信者名のフォールバックが deriveCardFields に集約されている', derivations === 2,
-        `コード中の出現 ${derivations} 箇所（deriveCardFields の2分岐のみが正常）`)
+    const derivations = (codeOnly.match(/配信者名不明/g) || []).length
+    check('AK 配信者名のフォールバックが deriveCardFields に集約されている', derivations === 1,
+        `コード中の出現 ${derivations} 箇所（deriveCardFields の1箇所だけが正常）`)
     const applyFn = src.slice(src.indexOf('export function applyProgramInfoToCard'),
         src.indexOf('export function makeProgramElement'))
     check('AK その場更新も deriveCardFields を通す（導出を二重に書かない）',
@@ -1014,7 +1044,7 @@ async function render() {
         h.dom.container.children.map((c) => c.dataset.apiIndex).join(',') === '0,1,2')
     check('初回描画: タイトルと配信者名が入る',
         h.dom.container.children[0].querySelector('.program_title').textContent === '番組100' &&
-        h.dom.container.children[0].querySelector('.community_name').textContent === '配信者100')
+        h.dom.container.children[0].querySelector('.provider_name').textContent === '配信者100')
     check('初回描画: 件数表示がカード数と一致',
         h.dom.getById('program_count').textContent === String(h.dom.container.children.length))
     check('初回描画では FLIP を出さない（比較対象が無いので動かしようがない）',
@@ -1072,11 +1102,64 @@ async function render() {
         h.dom.getById('program_count').textContent === '0')
 
     // --- notifybox だけ生きている（和集合） ---
-    h.state.notifyRows = [{ id: 777, title: '速報だけの番組' }]
+    h.state.notifyRows = [{
+        id: 777, title: '速報だけの番組', community_name: '速報の配信者', provider_type: 'community',
+        thumbnail_url: 'https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/5255/52553742.jpg?1673509950',
+    }]
     await run()
     check('和集合: フォローAPIが0件でも notifybox の番組が出る', ids().includes('777'), ids().join(','))
     check('和集合: 詳細が無くてもタイトルは出る',
         h.dom.getById('777').querySelector('.program_title').textContent === '速報だけの番組')
+
+    // --- 項目AT: フォローAPIが拾う前でも配信者名・アイコン・繋ぎ画像が出る（実描画経路） ---
+    const card777 = h.dom.getById('777')
+    check('AT 新着カードに配信者名が出る（"配信者名不明" で立たない）',
+        card777.querySelector('.provider_name').textContent === '速報の配信者',
+        `"${card777.querySelector('.provider_name').textContent}"`)
+    const icon777 = card777.querySelector('.provider img')
+    check('AT 新着カードに配信者アイコンが付く', !!icon777 && icon777.src.includes('usericon'),
+        icon777 ? icon777.src : '(img が無い)')
+    check('AT アイコンには投稿者ページへのリンクが張られる',
+        (card777.querySelector('.provider a') || {}).href === 'https://www.nicovideo.jp/user/52553742',
+        (card777.querySelector('.provider a') || {}).href)
+    const img777 = card777.querySelector('.program_thumbnail_img')
+    check('AT サムネ生成までの繋ぎはローディング画像ではなく配信者アイコン',
+        img777.src.includes('usericon'), img777.src)
+    check('AT 繋ぎ画像の戻り先(data-src)もアイコン（loading.gif に固定されない）',
+        (img777.getAttribute('data-src') || '').includes('usericon'), img777.getAttribute('data-src'))
+    check('AT 繋ぎ画像は thumbLive=0（動くサムネが最新コマとして混ぜない）',
+        img777.dataset.thumbLive === '0', `thumbLive="${img777.dataset.thumbLive}"`)
+    check('AT 視聴ページへのリンクは lv 付きで張られる',
+        (card777.querySelector('.program_thumbnail a') || {}).href === 'https://live.nicovideo.jp/watch/lv777',
+        (card777.querySelector('.program_thumbnail a') || {}).href)
+
+    // 繋ぎで立てたカードに、後からフォローAPIの実データが乗るか（カードは作り直さない）
+    h.state.followPrograms = [apiProgram({ id: 'lv777', beginAtMs: T + 4000, name: '正式な配信者名' })]
+    await run()
+    check('AT 繋ぎで立てたカードは作り直されない（動くサムネ・TTLの状態を保つ）',
+        h.dom.getById('777') === card777)
+    check('AT 後からフォローAPIの配信者名で上書きされる',
+        card777.querySelector('.provider_name').textContent === '正式な配信者名',
+        `"${card777.querySelector('.provider_name').textContent}"`)
+    check('AT 繋ぎのアイコンだった data-src が実サムネURLに差し替わる',
+        (img777.getAttribute('data-src') || '').includes('/screenshot/'), img777.getAttribute('data-src'))
+
+    // --- channel のアイコン: フォローAPIは programProvider.icon を空で返す（socialGroup から拾う） ---
+    h.state.notifyRows = []
+    h.state.followPrograms = [apiProgram({ id: 'lv555', beginAtMs: T + 5000, providerType: 'channel', name: 'チャンネルX' })]
+    await run()
+    const card555 = h.dom.getById('555')
+    check('channel カードに配信者名（チャンネル名）が出る',
+        card555.querySelector('.provider_name').textContent === 'チャンネルX',
+        `"${card555.querySelector('.provider_name').textContent}"`)
+    const icon555 = card555.querySelector('.provider img')
+    check('channel カードのアイコンを socialGroup.thumbnailUrl から拾う',
+        !!icon555 && icon555.src.includes('channel-icon'), icon555 ? icon555.src : '(img が無い)')
+    check('channel のアイコンリンクはチャンネルページ',
+        (card555.querySelector('.provider a') || {}).href === 'https://ch.nicovideo.jp/ch555',
+        (card555.querySelector('.provider a') || {}).href)
+    check('channel のアイコン補完で詳細APIを呼んでいない（socialGroup で足りている）',
+        h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
 
     // --- ソート切替 ---
     h.state.notifyRows = []
@@ -1099,7 +1182,7 @@ async function render() {
     check('AK その場更新でタイトルが反映される',
         h.dom.getById('100').querySelector('.program_title').textContent === '差し替え後タイトル')
     check('AK その場更新で配信者名が反映される',
-        h.dom.getById('100').querySelector('.community_name').textContent === '改名した配信者')
+        h.dom.getById('100').querySelector('.provider_name').textContent === '改名した配信者')
 
     check('詳細API(fetchProgramInfo)は呼ばれていない（前提が崩れていない）', h.state.calls.detail === 0,
         `notifybox ${h.state.calls.notify} / フォローAPI ${h.state.calls.follow} / 詳細 ${h.state.calls.detail}`)

@@ -69,9 +69,21 @@ const PROGRAMS = Array.from({ length: 4 }, (_, i) => ({
     beginAt: Date.now() - 600000, isFollowerOnly: false, liveCycle: 'ON_AIR',
     watchPageUrl: `https://live.nicovideo.jp/watch/lv20000000${i + 1}`,
 }))
+// notifybox の1行は id/title だけではない（実測のキー名に合わせる）。
+// community_name / thumbnail_url は**コミュニティ廃止後もキー名だけ残っているレガシー名**で、
+// 中身は配信者名と配信者アイコン。新着カードはこれで名前・アイコンを出す（doc/09 項目AM）。
 const NOTIFYBOX = {
     meta: { status: 200 },
-    data: { notifybox_content: PROGRAMS.map((p) => ({ id: p.id.replace('lv', ''), title: p.title })) },
+    data: {
+        notifybox_content: PROGRAMS.map((p, i) => ({
+            id: p.id.replace('lv', ''),
+            title: p.title,
+            community_name: p.programProvider.name,
+            thumbnail_url: `https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/10/${1000 + i}.jpg`,
+            provider_type: 'community',
+            elapsed_time: 600,
+        })),
+    },
 }
 const FOLLOW = { data: { programs: PROGRAMS, total: PROGRAMS.length } }
 const PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>テスト視聴ページ</title></head>

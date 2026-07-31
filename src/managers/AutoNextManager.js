@@ -268,7 +268,7 @@ export class AutoNextManager {
                         const card = targetLink.closest('.program_container');
                         const imgEl = card ? card.querySelector('.program_thumbnail_img') : null;
                         const titleEl = card ? card.querySelector('.program_title') : null;
-                        const providerEl = card ? card.querySelector('.community_name') : null;
+                        const providerEl = card ? card.querySelector('.provider_name') : null;
                         preview = {
                             href: targetLink.href,
                             thumb: imgEl && imgEl.src ? imgEl.src : '',

@@ -158,7 +158,7 @@
 
 ## ✅ X. 動くサムネが稀に途中停止（🟡→修正済み・2026-07-23）
 - **症状**: ホバー中の動くサムネのアニメが極稀に途中で止まり、マウスを動かすまで再開しない。
-- **原因**: `animatedThumbnail.onMouseOver` がサムネ枠 `.program_thumbnail` を**厳格判定**し、同一カード内でもサムネ枠の外（`.program_title`/`.community`/アイコン/カード余白5px）へポインタが少しでも入ると `setHoverCard(null)→stopAnim()` で連鎖(`animTimer` 一本)が切れていた。停止を「コンテナ離脱時のみ」に限る `onMouseOut` と**粒度が非対称**で、サムネ枠へ入り直すまで再開しない（＝ユーザーはサムネを見ているつもりなのに止まる＝「極稀」に感じる）。
+- **原因**: `animatedThumbnail.onMouseOver` がサムネ枠 `.program_thumbnail` を**厳格判定**し、同一カード内でもサムネ枠の外（`.program_title`/`.provider`（当時の名称は `.community`）/アイコン/カード余白5px）へポインタが少しでも入ると `setHoverCard(null)→stopAnim()` で連鎖(`animTimer` 一本)が切れていた。停止を「コンテナ離脱時のみ」に限る `onMouseOut` と**粒度が非対称**で、サムネ枠へ入り直すまで再開しない（＝ユーザーはサムネを見ているつもりなのに止まる＝「極稀」に感じる）。
 - **修正**: `onMouseOver` を「サムネ枠へ入ったらそのカードをホバー対象／サムネ枠外でも現 `hoverCard` の内側なら維持／それ以外のみ `setHoverCard(null)`」に変更。停止はカード離脱・コンテナ離脱（`onMouseOut`）へ一本化。**同一カードのタイトル等の上でも再生継続する仕様変更**を含む（`onMouseOut` が既にコンテナ全体をホバー領域とみなす設計と粒度を揃えた）。`animTimer`/`animGen`/eviction 経路には非介入。
 - 対象: `src/render/animatedThumbnail.js`（`onMouseOver`）。
 - **2026-07-23 追記（挙動をユーザー要望で変更）**: 上記「同一カード内なら再生継続」は、サムネ画像から外れてもカード内で動き続けるため不評。`onMouseOver` を再び `.program_thumbnail` 厳格判定へ戻し、**サムネ画像にホバー中だけ再生／外れたら停止**とした（枠外への微小ドリフトで止まる件は許容）。
@@ -641,9 +641,9 @@ if (changes.programsSort) options.programsSort = changes.programsSort.newValue; 
 
 `updateSidebar` のその場更新が **active-point / data-api-index / タイトル / リンク先の4つしか**反映していなかった。カードは作り直さない設計（要素の再利用が TTL・エラーリスナ・動くサムネのオーバーレイ・ホバー状態を同時に生かしている）なので、**ここで反映しない情報は生成時のまま固定される**。
 
-### 実害1: 配信者名・アイコンが「コミュニティ名不明」で固定される
+### 実害1: 配信者名・アイコンが「配信者名不明」で固定される
 
-フォローAPIは channel の `programProvider` を返さない。`fillMissingDetails` が詳細APIで**後から**埋めるが、その場更新が見ていないためカードに出ない。
+生成時に配信者名/アイコンが空だった番組（当時は channel と、notifybox 先行の新着）は、`fillMissingDetails` や次周期のフォローAPIが**後から**埋めても、その場更新が見ていないためカードに出ない。
 
 **アイコンは生成時に空だと要素そのものが作られない**（`makeProgramElement` は `if (icon_url)` で分岐）ので、後から**挿入**する必要がある。
 
@@ -663,7 +663,8 @@ if (!dataSrc) return          // ← ここで塞がる
 導出ロジックを **`deriveCardFields(data)` に集約**し、生成（`makeProgramElement`）とその場更新（`applyProgramInfoToCard`）の**両方から呼ぶ**。
 
 > ⚠️ **2箇所に同じ導出を書かないこと**（doc/02 設計原則 1-b）。片方だけ直して食い違う。
-> 検証で「`コミュニティ名不明` のコード中の出現が2箇所（`deriveCardFields` の2分岐）だけ」を担保している。
+> 検証で「`配信者名不明` のコード中の出現が1箇所（`deriveCardFields`）だけ」を担保している
+> （2026-07-31 に旧 notifybox 生行用の分岐を削除したため 2箇所→1箇所。→ 項目AT）。
 
 `applyProgramInfoToCard` が更新するのは タイトル / リンク先 / 配信者名 / アイコン（無ければ挿入）/ `data-src` の5つ。
 
@@ -924,3 +925,86 @@ FLIP は `structuralChange` が立った時だけ走る。立つ条件は**3つ*
 
 R-2 とは無関係に成立する（FLIP は描画された DOM の実測だけで動く）。
 `verify:loop` の `flipOnReorder` 群で両モードを固定してある。
+
+## ✅ AT. 新着カードが「配信者名不明・アイコンなし・ローディング画像」で立っていた（2026-07-31 修正）
+
+利用者からの指摘:「**昔はサムネが生成されるまでユーザーアイコンが出ていた。今はローディング画像**。名前も出ないしアイコンも出ない」。
+3つの症状は別々のバグではなく、**`_mergeSources` が notifybox の行を `id` と `title` だけに削っていた**という1点から出ていた。
+
+### notifybox は id と title だけではない（実測）
+
+```json
+{ "id": "341121933", "title": "…",
+  "thumbnail_url": "https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/5255/52553742.jpg?…",
+  "community_name": "配信者の表示名", "provider_type": "community", "elapsed_time": 137 }
+```
+
+`community_name` / `thumbnail_url` は**コミュニティ廃止後もキー名だけ残っているレガシー名**で、中身は
+**配信者名**と**配信者アイコン**である。旧実装（v1.x）はこの行をそのままカード化していたので、
+アイコンが名前欄にもサムネ枠にも出ていた。それが「昔は出ていた」の正体。
+
+`_mergeSources` は notifybox 由来の番組に対し `contentOwner:{id:'',name:'',icon:''}` / `thumbnailUrl:''` の
+**空レコードを合成**していた。フォローAPIが同じ番組を拾うのは **20〜101秒後**、カードに反映されるのは
+さらに次の周期（60〜180秒）なので、**新着カードは最悪で数分間、名前もアイコンもサムネも無い**状態だった。
+
+> `deriveCardFields` には notifybox の生行を読む分岐（`data.community_name` / `data.thumbnail_url`）が
+> 残っていたが、合成レコードは常に `lv` 付き id を持つため**到達しない死にコード**になっていた。
+> 「昔の挙動」がそこに書かれたまま動かない状態が、原因の特定を遅らせた。今回削除。
+
+### サムネ枠がローディング画像になっていた理由（2段構え）
+
+1. notifybox のアイコンを捨てていた（上記）。
+2. 詳細APIの `thumbnailUrl` は昔**コミュニティアイコン**（`comch/community-icon/128x128/co6015020.jpg`）で、
+   これが繋ぎ画像だった。コミュニティ廃止後は **`…/community-icon/128x128/404.jpg`（汎用404画像）** に変わり、
+   現行実装ではそもそも採用しない（ライブスクショのみ）。
+
+→ 繋ぎの優先順位を **ライブサムネ → 静止サムネ → 配信者アイコン → `loading.gif`** に変更。
+
+> ⚠️ **アイコンは表示のフォールバックにだけ使うこと。** `programInfo.thumbnailUrl` に入れると
+> `resolveLiveThumbnailBaseUrl` がライブサムネとして拾い、**アイコンを20秒ごとに取り直す**
+> （項目AA の再発）。加えて `_fetchLiveThumbIfPendingYoung` の `if (hasLive || info.thumbnailUrl) return`
+> に引っかかり、**本物のスクショの追撃が止まる**。検証で固定してある。
+>
+> 繋ぎ画像を出した `<img>` には `dataset.thumbLive='0'` を立てる。動くサムネの末尾スロットが
+> 非ライブ画像を「最新コマ」として混ぜないため（成功時に `applySuccess` が `'1'` へ戻す）。
+
+### channel のアイコンは永久に空だった（同時修正）
+
+フォローAPIの `programProvider` は **channel だと id もアイコンも空**で、代わりに
+`socialGroup:{id:'ch…', name, thumbnailUrl}` にチャンネル名とチャンネルアイコンが入る
+（2026-07-31 実測・70件: community 67件は `programProvider.icon` が 67/67、`socialGroup` は 0/67。
+channel 3件は `icon` 0/3、`socialGroup` 3/3）。
+
+`fillMissingDetails` の対象条件は「**名前が空**または サムネが空」なので、**名前は埋まっている channel は
+永久に対象外**＝アイコンが出ないまま固定されていた。`socialGroup` から拾うようにして解決（詳細APIは不要）。
+
+> doc/09・doc/03・doc/05 にあった「フォローAPIは channel の `programProvider` を返さない」は**誤り**。
+> 返るが id とアイコンだけが空、が正しい。今回すべて訂正した。
+
+### 「コミュニティ」表記の一掃
+
+ニコ生のコミュニティ機能は廃止済みなので、**カードのその欄に出るのは配信者名**（user はユーザー名 /
+channel はチャンネル名）。DOMクラス `.community`/`.community_name` → **`.provider`/`.provider_name`**、
+内部名 `community_name` → `provider_name`、フォールバック文言「コミュニティ名不明」→「配信者名不明」へ改名。
+API 側の語彙（`providerType:'community'` / `community_name` キー）はニコ生の仕様なのでそのまま受け取り、
+`mapProviderType`（`utils/providerType.js` に集約）と `mapNotifyboxRowToInfo` が境界で内部語彙へ変換する。
+
+### 鳴る罠
+
+notifybox の応答から `community_name`/`thumbnail_url` が消えたら、`fetchLivePrograms` が**1回だけ**
+`console.warn` する。名前とアイコンが黙って消える壊れ方はエラーが出ず、まさに今回のように
+「気づいたら出なくなっていた」になるため（項目AL と同じ考え方）。
+
+### 検証
+
+`verify:loop` に `AT` 系14項目を追加（`_mergeSources` の写像・アイコンURLからのID復元・
+`thumbnailUrl` に入れないこと・実描画経路で名前/アイコン/繋ぎ画像/`thumbLive` が出ること・
+channel の `socialGroup` アイコン）。`render-harness` の `apiProgram()` は channel を実測どおり
+（`programProvider` にアイコン無し＋`socialGroup` あり）に修正した。**両方入っている形で作ると、
+実際には出ないアイコンをテストが通してしまう。**
+
+### やり残し（意図的）
+
+notifybox の `elapsed_time`（放送開始からの経過秒）は使っていない。新着順の基準は従来どおり
+「notifybox の返却順を保つ擬似 beginAt」のまま。使えば実際の開始時刻で並べられるが、
+並び順と `_fetchLiveThumbIfPendingYoung` の若さ判定の挙動が変わるため、別件として保留した。
