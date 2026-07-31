@@ -129,6 +129,7 @@
 | `services/animFrameStore.js` 🧪 | 動くサムネのフレーム永続化（IndexedDB, blob保存, TTL/件数掃除）。リロード/番組移動をまたいで復元 | `saveFrames`, `loadFrames`, `cleanupFrames` |
 | `utils/dom.js` | `debounce` | `debounce` |
 | `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`（`ErrorManager`/`ErrorType`/`ErrorLevel` は内部専用・未export） |
+| `utils/momentum.js` | **「盛り上がり」（人気順のスコア）の唯一の定義**。直近の増分レートを指数移動平均で均す。計算するのは `storage.upsertProgramInfos` だけ（前回値と出会う唯一の場所／doc/09 AY） | `totalEngagement`, `initialMomentum`, `nextMomentum` |
 | `utils/programOrder.js` | **並び順の比較器の唯一の定義**。実際に並べ替える処理と「並べ替えが要るか」の判定が同じ比較器を使う（食い違うと全カードが毎周期スライドする／doc/09 AR） | `compareByActivePoint`, `compareByApiIndex`, `orderComparator` |
 | `utils/sorting.js` | 番組リストのソート（新着順=`beginAt` 降順＝`data-api-index` 昇順 / 人気順=active-point）。比較器は `programOrder.js` から取る | `sortPrograms` |
 

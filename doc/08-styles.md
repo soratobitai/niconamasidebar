@@ -37,7 +37,7 @@
 
 | セレクタ | 役割 |
 |---------|------|
-| `.program_container` | 1番組カード。`id`=番組数値ID、属性 `active-point`（人気順ソートのキー） |
+| `.program_container` | 1番組カード。`id`=番組数値ID、属性 `active-point`（盛り上がり＝人気順の第1キー）と `data-total`（累計＝同点時の第2キー） |
 | `.program_thumbnail .anim_thumb_overlay` / `.anim_thumb_layer` / `.show` | 🧪実験。動くサムネのホバー用オーバーレイ（div, `inset:0`, `pointer-events:none`, **`z-index:1`**）。内部に2枚の `.anim_thumb_layer`(img) を重ね、`opacity`(0.4s)でクロスフェード。生成/制御は `render/animatedThumbnail.js`。⚠️ **`z-index` は必ずベースサムネの上・ホバーボタンの下**（「別窓くん」の `.nicolive_link_button_wrap` は `z-index:2`）。div自身が stacking context になり内部レイヤーの z-index は外に漏れない |
 | `.program_container .provider` | 配信者行（アイコン＋名前）。⚠️ 旧 `.community`（ニコ生のコミュニティ廃止に伴い 2026-07-31 改名） |
 | `.provider a` / `.provider img` | 丸い配信者アイコン（40px, `border-radius:50%`） |

@@ -61,7 +61,7 @@
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`（比較器は `utils/programOrder.js`）。`active`=`active-point`降順（人気順）、`newest`=**`beginAt` 降順**（新着順。`data-api-index` 昇順として実装）。
 - 旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` の `_orderByBeginAtDesc` が **`beginAt` 降順**で並べ、その位置を各カードの `data-api-index` に書く。`newest` はそれを昇順に並べる。同時刻/欠落時のみ lv番号降順フォールバック。
-- 人気度: `calculateActivePoint` = `(viewers+1 + comments+1) / 経過分`。カード生成時に `active-point` 属性へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
+- 盛り上がり: 直近の増分レートのEMA（τ=3分・`utils/momentum.js`。計算は storage の upsert）。カード生成時に `active-point` 属性（と同点用の `data-total`）へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
 - ✅ **初回描画から順位確定（整列確定機構は不要に）**: 詳細（視聴者数/コメント）が**リストと同時にフロントAPIで storage へ載る**ため、
@@ -80,7 +80,7 @@
 
 | ソート設定 | 定期更新で順位が動くか | アニメが出る場面 |
 |---|---|---|
-| `active`（人気順） | **動く**。スコアの分母（経過分）が番組ごとに違う速さで増えるため | ほぼ毎周期 |
+| `active`（人気順） | **数字が伸びた時だけ動く**（2026-07-31〜）。旧スコアは経過分で割っていたため、**データが変わらなくても**分母の増え方の違いだけで動いていた（実測: 2分経過で70件中58件） | 番組が伸び縮みした時 |
 | `newest`（新着順・既定） | **動かない**。同じ番組集合なら `beginAt` 降順は常に同じ | 番組が**増減した時だけ** |
 
 入れ替わり自体はアニメの有無に関係なく起きている。アニメは動きを足すのではなく、**既に起きている瞬間移動を目で追える形にする**もの。

@@ -1,5 +1,6 @@
 import { maxSaveProgramInfos } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
+import { nextMomentum } from '../utils/momentum.js'
 
 /**
  * Get options from chrome.storage.local and merge with defaults.
@@ -169,7 +170,8 @@ export function patchProgramThumbnail(id, fields) {
  * 呼ぶと O(N^2) になる。これを1回の読み書きに畳む。id 一致は上書き、無ければ追加、末尾から上限トリム。
  * 各レコードに _fetchedAt（取得時刻）を付与する。毎回フルレコードで上書きするので、
  * サムネURL未生成のまま古い値が固定化することはない。
- * @param {Array<object>} programInfos
+ * @param {Array<object>} programInfos **破壊的に `momentum`（盛り上がり）を書き戻す**。
+ *   前回値との差分が要るのでここでしか計算できず、描画側も同じ配列を使うため（本文の🔴を参照）。
  */
 export function upsertProgramInfos(programInfos) {
     if (!Array.isArray(programInfos) || programInfos.length === 0) return
@@ -178,6 +180,13 @@ export function upsertProgramInfos(programInfos) {
     const now = Date.now()
     for (const info of programInfos) {
         if (!info || !info.id) continue
+        // 「盛り上がり」は前回値との差分なので、**新旧が出会うここが唯一の計算地点**。
+        //
+        // 🔴 **渡された info 自身にも書き戻すこと（破壊的）。** 呼び出し元は upsert に渡した配列を
+        //    そのまま描画へ回す（`_refreshDetailsViaScrape` → `_mergeSources`）。保存用のコピーにだけ
+        //    書くと、画面が使うオブジェクトは momentum を知らないまま＝**計算しても順位に何も反映されない**。
+        //    例外もログも出ないので、気付けるのは「人気順にしても並びが変わらない」という形だけになる。
+        info.momentum = nextMomentum(byId.get(info.id), info, now)
         // 既存idは一度消してから入れ直し、touchしたレコードを末尾（=最新）へ移す。
         // これで上限トリム(先頭shift)は「今回更新されなかった古いレコード(=放送終了済み等)」から落ちる。
         byId.delete(info.id)

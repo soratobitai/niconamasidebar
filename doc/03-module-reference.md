@@ -228,7 +228,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | エクスポート | 説明 |
 |-------------|------|
 | `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `provider`(icon/provider_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。**サムネが無い間の繋ぎは配信者アイコン**（→ 無ければ `loading.gif`）で、その時は `dataset.thumbLive='0'` を立てる |
-| `calculateActivePoint(data)` | 人気度スコア = `(viewers+1 + comments+1) / max(1, 経過分)`。`onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
+| `calculateActivePoint(data)` | **盛り上がり**（＝人気順のスコア）を返す。実体は `data.momentum`（直近の増分レートのEMA。計算は `utils/momentum.js`、更新は `storage.upsertProgramInfos`）。未計算なら `initialMomentum`（開始からの平均レート）で代用。⚠️ 旧式 `(viewers+1 + comments+1) / 経過分` に戻さないこと（doc/09 項目AY）。旧 `onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete,onlyIds,onSettled})` ★★ | localStorageの番組情報を元に各サムネを更新。既定は**コンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`onlyIds` 指定時はその id 集合の番組だけ更新（番組ごと自己連鎖サイクルで使う）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。**`onSettled`** は全プリロードが settle したら1回だけ発火し、`_updateOneThumbnailAndWait` がこれを待って次サイクルを張る（＝作業時間ぶん自然にドリフトする） |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体）。比較器は `utils/programOrder.js` の `compareByActivePoint` |
@@ -288,6 +288,22 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 ---
 
+## utils/momentum.js ★
+
+**「盛り上がり」（人気順のスコア）の唯一の定義**（2026-07-31 新設）。
+
+| 関数 | 説明 |
+|------|------|
+| `totalEngagement(info)` | 来場者＋コメントの累計。差分の元であり、同点時の第2キー（`data-total`）にも使う。⚠️ `viewers` は**累計の来場者数**で、同時視聴者数ではない（2026-07-31 に70件×6分で実測: 増26/減0） |
+| `initialMomentum(info, now)` | 前回値が無い時の初期値＝**開始からの平均レート**。若い番組ではこれが実質そのまま直近レートになる。長時間放送では平均から始まるので、直近値へ寄るまで実時間で数分かかる（EMA の暖機） |
+| `nextMomentum(prev, next, now)` | 新しい取得値で更新。`instant = max(0, 累計の増分) / 経過分` を `α = 1 - exp(-Δt/τ)` で混ぜる。⚠️ **減少はクリップ**（負の勢いを作らない）、**Δt<1秒は据え置き**（極小の分母で爆発させない） |
+
+- 呼ぶのは **`storage.upsertProgramInfos` だけ**（前回値と新値が出会う唯一の場所）。`calculateActivePoint` は結果を読むだけ。
+- 🔴 **α を固定値にしないこと。** 更新間隔は 30〜180秒で可変なので、時間から計算しないと間隔を変えた瞬間に手触りが変わる。検証で「30秒×6回 と 180秒×1回 が一致すること」を固定している。
+- 🔴 **生の差分をそのまま順位に使わないこと。** 30秒ウィンドウでは平均79%の番組が増分ゼロ（ニコ生の統計が約60秒粒度）。平滑化なしでは1周期あたり平均14.4位動く（τ=3分で1.1位）。→ [09 項目AY](./09-gotchas-and-techdebt.md)
+
+---
+
 ## utils/providerType.js
 
 **配信主体の種別（`'user'`/`'channel'`）への写像の唯一の定義**（2026-07-31 新設）。
@@ -307,7 +323,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | 関数 | 説明 |
 |------|------|
-| `compareByActivePoint(a, b)` | 人気順（`active-point` 降順）。**tie-break 無し**＝同点は現状順を保つ（`parseFloat` の NaN との比較が常に false になることと `sort` の安定性による） |
+| `compareByActivePoint(a, b)` | 人気順（`active-point` 降順 → 同点は `data-total` 降順）。静かな番組は勢い0で並ぶため第2キーが要る（2026-07-31）。旧: tie-break 無し＝同点は現状順を保つ（`parseFloat` の NaN との比較が常に false になることと `sort` の安定性による） |
 | `compareByApiIndex(a, b)` | 新着順（`data-api-index` 昇順＝放送開始が新しい順）。第2キーは lv番号降順だが、`data-api-index` はカード間で常に一意なので**実際には効いていない**（属性欠けの保険） |
 | `orderComparator(sortType)` | 設定値から比較器を選ぶ。`'active'` なら人気順、それ以外は新着順 |
 

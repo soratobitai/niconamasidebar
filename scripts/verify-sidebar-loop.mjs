@@ -415,6 +415,121 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
 }
 
 /**
+ * AY: 盛り上がり（人気順のスコア）＝直近の増分レートの指数移動平均。
+ *
+ * 旧スコアは「開始からの平均」だったので、長時間放送は今どれだけ盛り上がっていても不利で、
+ * 序盤だけ人が来た枠は貯金で上位に残り続けた。ここでは「新旧が同じ土俵に乗る」ことを固定する。
+ */
+async function momentumScore() {
+    console.log('=== AY 盛り上がり（人気順のスコア） ===')
+    const { initialMomentum, nextMomentum } = await import(new URL('../src/utils/momentum.js', import.meta.url).href)
+    const { compareByActivePoint } = await import(new URL('../src/utils/programOrder.js', import.meta.url).href)
+    const { momentumTauMs } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const NOW = Date.now()
+    const prog = (v, c, ageMin) => ({ viewers: v, comments: c, onAirTime: { beginAt: new Date(NOW - ageMin * 60000).toISOString() } })
+    const near = (a, b) => Math.abs(a - b) < 1e-9
+
+    // --- 立ち上げ ---
+    check('AY 初回は開始からの平均レート', near(initialMomentum(prog(100, 20, 10), NOW), 12), '(100+20)/10分 = 12')
+    check('AY 開始直後は1分として扱う（0除算しない）', near(initialMomentum(prog(5, 0, 0), NOW), 5))
+    check('AY 開始時刻が不明でも落ちない', Number.isFinite(initialMomentum({ viewers: 3, comments: 0 }, NOW)))
+    check('AY 前回値が無ければ初回扱い',
+        near(nextMomentum(null, prog(100, 20, 10), NOW), initialMomentum(prog(100, 20, 10), NOW)))
+
+    // --- 更新（EMA） ---
+    const a60 = 1 - Math.exp(-60000 / momentumTauMs)
+    const prev = { viewers: 100, comments: 20, momentum: 0, _fetchedAt: NOW - 60000 }
+    check('AY 直近の増分レートが指数移動平均で入る',
+        near(nextMomentum(prev, prog(160, 20, 11), NOW), 0 + (60 - 0) * a60), '60秒で+60 → 60/分 が α で混ざる')
+    check('AY 🔴 累計が減っても負の勢いにしない（取得元の揺れ対策）',
+        near(nextMomentum({ ...prev, momentum: 10 }, prog(50, 10, 11), NOW), 10 + (0 - 10) * a60))
+    check('AY 極小のΔtでは据え置く（勢いが爆発しない）',
+        nextMomentum({ viewers: 0, comments: 0, momentum: 7, _fetchedAt: NOW - 10 }, prog(500, 0, 5), NOW) === 7)
+
+    // --- 更新間隔が変わっても手触りが揃うか（時間ベースのα） ---
+    // 30秒×6回 と 180秒×1回。どちらも「1分あたり10」で伸び続けた3分間なので、結果は一致するはず。
+    let m30 = 0
+    for (let i = 0; i < 6; i++) {
+        m30 = nextMomentum({ viewers: 0, comments: 0, momentum: m30, _fetchedAt: NOW - 30000 }, prog(5, 0, 1), NOW)
+    }
+    const m180 = nextMomentum({ viewers: 0, comments: 0, momentum: 0, _fetchedAt: NOW - 180000 }, prog(30, 0, 3), NOW)
+    check('AY 🔴 更新間隔が違っても同じ実時間なら同じ値になる（30秒×6 と 180秒×1）',
+        near(m30, m180), `30秒×6=${m30.toFixed(6)} / 180秒×1=${m180.toFixed(6)}`)
+
+    // --- 同点時の第2キー（静かな番組は勢いが0で並ぶ） ---
+    const el = (ap, total) => ({ getAttribute: (k) => (k === 'active-point' ? ap : k === 'data-total' ? total : null) })
+    check('AY 勢いが違えば勢いが優先',
+        [el('1', '9999'), el('5', '1')].sort(compareByActivePoint)[0].getAttribute('active-point') === '5')
+    check('AY 同点（静かな番組）は累計の多い順',
+        [el('0', '5'), el('0', '50')].sort(compareByActivePoint)[0].getAttribute('data-total') === '50')
+    check('AY 属性が欠けたカードが混ざっても落ちない',
+        Number.isFinite(compareByActivePoint(el(null, null), el(null, null))))
+}
+
+/**
+ * AY(実描画経路): 長時間放送と新しい番組が同じ土俵に乗るか。
+ *
+ * 旧スコア `(来場者+1 + コメント+1) / 経過分` なら、下の 3時間番組(累計30000)は 167、
+ * 10分の番組(累計400)は 40 で、**今どちらが伸びていても3時間番組が勝つ**。
+ * ここが入れ替わることを固定する＝この検証は旧実装では必ず落ちる。
+ */
+async function momentumRanking() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    console.log('=== AY 長時間放送と新番組を同じ土俵で比べる（実描画経路） ===')
+    const NOW = Date.now()
+    const h = buildRenderHarness({ programsSort: 'active' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+    const ids = () => h.dom.ids().join(',')
+    h.state.notifyRows = []
+
+    // ① 基準。lv900=3時間で累計30000（今は静か） / lv901=10分で累計100（これから伸びる）
+    h.state.followPrograms = [
+        apiProgram({ id: 'lv900', beginAtMs: NOW - 180 * 60000, viewers: 30000, comments: 0 }),
+        apiProgram({ id: 'lv901', beginAtMs: NOW - 10 * 60000, viewers: 100, comments: 0 }),
+    ]
+    await run()
+    // ② 1分ずつ経過させ、直近の伸びを 10/分 対 300/分 で与える。
+    // 初回は前回値が無いので「開始からの平均」で立ち上がる（lv900=167, lv901=10）。そこから
+    // 実際の直近レートへ寄っていくので、**入れ替わりは1周期目ではなく数周期かけて起きる**。
+    // これは EMA の暖機であって、旧スコアのような構造的な不利ではない（時定数3分＝実時間で数分）。
+    const ap = (id) => parseFloat(h.dom.getById(id).getAttribute('active-point'))
+    let v900 = 30000; let v901 = 100
+    for (let cycle = 1; cycle <= 3; cycle++) {
+        h.ageStorage(60000)
+        v900 += 10; v901 += 300
+        h.state.followPrograms = [
+            apiProgram({ id: 'lv900', beginAtMs: NOW - (180 + cycle) * 60000, viewers: v900, comments: 0 }),
+            apiProgram({ id: 'lv901', beginAtMs: NOW - (10 + cycle) * 60000, viewers: v901, comments: 0 }),
+        ]
+        await run()
+        if (cycle === 1) {
+            check('AY 1周期目はまだ暖機中（開始からの平均から寄り始める）',
+                ap('900') < 167 && ap('901') > 10,
+                `lv900 ${ap('900').toFixed(1)}（初期値167から下降中） / lv901 ${ap('901').toFixed(1)}（初期値10から上昇中）`)
+        }
+    }
+    check('AY 🔴 長時間放送より、いま伸びている番組が上に来る', ids() === '901,900', ids())
+    // 3周期後は「初期値(167 / 10)」から「実レート(10 / 300)」の側へ十分寄っているはず。
+    // ぴったりの値ではなく“どちらの側に居るか”で見る（時定数を変えても意味が壊れないように）。
+    check('AY 🔴 スコアが「開始からの平均」ではなく「直近の勢い」に寄る',
+        ap('901') > ap('900') && ap('900') < 80 && ap('901') > 150,
+        `3周期後: lv901=${ap('901').toFixed(1)}（初期10→実レート300へ） / lv900=${ap('900').toFixed(1)}（初期167→実レート10へ）`
+        + ' ※旧スコアなら lv900=167, lv901=40 で永久に逆転しない')
+    check('AY 第2キー data-total が両方のカードに入っている',
+        h.dom.getById('900').getAttribute('data-total') === String(v900)
+        && h.dom.getById('901').getAttribute('data-total') === String(v901),
+        `lv900=${h.dom.getById('900').getAttribute('data-total')} / lv901=${h.dom.getById('901').getAttribute('data-total')}`)
+
+    // ④ 数字が変わらない周期は順位も動かない（旧スコアは経過分の切り上がりだけで動いていた）
+    const before = ids()
+    h.ageStorage(60000)
+    await run()
+    check('AY 数字が変わらなければ順位も動かない（時間だけでは入れ替わらない）', ids() === before, ids())
+    h.restore()
+}
+
+/**
  * AW: 固定画像運用の番組から flippedListingThumbnail でライブスクショを回収できるか。
  *
  * 回収できないと、その番組は毎サイクル「詳細APIで番組ごとに問い合わせ」に回る（実測で user の約1/3）。
@@ -1230,17 +1345,26 @@ async function render() {
         h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
 
     // --- ソート切替 ---
+    // ⚠️ 盛り上がりは「前回取得からの増分 ÷ 経過時間」なので、**手順の順番が結果を決める**。
+    //    ①基準の値で1回取得 → ②時間を進める → ③伸びた値で取得、の順でないと増分が計上されない。
+    //    「値を変えてから時間を進める」と、変化が Δt<1秒の回に飲まれて何も起きない（実際に踏んだ）。
     h.state.notifyRows = []
     h.state.followPrograms = [
         apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 1 }),
-        apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 99999 }),
-        apiProgram({ id: 'lv400', beginAtMs: T + 9000, viewers: 50 }),
+        apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 1 }),
+        apiProgram({ id: 'lv400', beginAtMs: T + 9000, viewers: 1 }),
     ]
     await run()
     check('新着順: beginAt 降順', ids().join(',') === '400,100,300', ids().join(','))
     um.options.programsSort = 'active'
+    h.ageStorage(60000)                       // ② 1分経ったことにする
+    h.state.followPrograms = [                // ③ それぞれ違う伸び方をした
+        apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 2 }),      // +1
+        apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 99999 }),  // 爆伸び
+        apiProgram({ id: 'lv400', beginAtMs: T + 9000, viewers: 50 }),     // そこそこ
+    ]
     await run()
-    check('人気順: active-point 降順', ids().join(',') === '300,400,100', ids().join(','))
+    check('人気順: 直近で伸びた順に並ぶ', ids().join(',') === '300,400,100', ids().join(','))
     um.options.programsSort = 'newest'
 
     // --- その場更新で後から埋まった情報が反映される（項目AK の実経路版） ---
@@ -1288,9 +1412,13 @@ async function flipOnReorder() {
         check('AS 前提: 人気順に並ぶ', h.dom.ids().join(',') === '300,200,100', h.dom.ids().join(','))
         const els = h.dom.container.children.slice()
 
-        h.state.followPrograms = mk(99999)   // 番組の増減は無し。lv100 が1位へ
+        // ⚠️ 旧スコアは「経過時間で割る」形だったので、**数字が動かなくても時間が経つだけで**順位が
+        //    入れ替わった（実測: 2分で70件中58件）。今のスコアは直近の増分レートなので、
+        //    順位が動くのは**実際に伸びた時だけ**。時間だけ進めても動かない（下でそれも確かめる）。
+        h.ageStorage(60000)                  // 1分経ったことにする（検証環境は実時間が進まない）
+        h.state.followPrograms = mk(99999)   // 番組の増減は無し。lv100 だけ1分で +99899 → 1位へ
         await run()
-        check('AS 人気順: 増減が無くても順位が入れ替わる', h.dom.ids().join(',') === '100,300,200', h.dom.ids().join(','))
+        check('AS 人気順: 伸びた番組が上がる（順位が入れ替わる）', h.dom.ids().join(',') === '100,300,200', h.dom.ids().join(','))
         check('AS 人気順: 入れ替わった全カードに FLIP が入る', moved(h) === 3, `${moved(h)} / 3 枚`)
         check('AS 人気順: カードは作り直されない（動くサムネの状態が消えない）',
             els.every((e) => h.dom.container.children.includes(e)))
@@ -1413,6 +1541,10 @@ if (real) {
     await r3merge()
     console.log('')
     await flippedThumb()
+    console.log('')
+    await momentumScore()
+    console.log('')
+    await momentumRanking()
     console.log('')
     await r1NoSpin()
     console.log('')

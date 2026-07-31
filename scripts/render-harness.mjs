@@ -70,6 +70,11 @@ export function apiProgram({ id, beginAtMs, title, providerType = 'user', name, 
 export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' } = {}) {
     const dom = installMockDom()
 
+    // localStorage の programInfos を空にしてから始める。
+    // ⚠️ **テスト間で持ち越すと、盛り上がり(momentum)が前のブロックの値から始まって結果が変わる。**
+    // 実際にこれで「実装は正しいのに人気順が並ばない」という誤診をした。土台は毎回まっさらにする。
+    try { globalThis.localStorage.removeItem('programInfos') } catch (_e) { /* 未設定なら無視 */ }
+
     // --- 応答の差し替え。テストから書き換える ---
     const state = {
         followPrograms: [],   // フォローAPIが返す生データ
@@ -103,7 +108,23 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         throw new Error('想定外の fetch: ' + u)
     }
 
-    return { dom, state, restore() { globalThis.fetch = prevFetch; dom.restore() }, intervalSec, programsSort }
+    /**
+     * 保存済みレコードの取得時刻を ms だけ過去へずらす＝「時間が経ったこと」にする。
+     *
+     * 盛り上がり(momentum)は「前回取得からの増分 ÷ 経過時間」なので、実時間が進まない検証環境では
+     * **1ミリ秒差の更新が続き、値が一切動かない**（Δt<1秒は据え置く仕様。α も実質0）。
+     * 数字を変えても順位が変わらず「壊れている」ように見えるが、それは検証側の都合である。
+     * 周期をまたぐ挙動を見たいテストは、run() の間にこれを呼ぶこと。
+     * @param {number} ms 経過させたい時間
+     */
+    function ageStorage(ms) {
+        const raw = globalThis.localStorage.getItem('programInfos')
+        if (!raw) return
+        const list = JSON.parse(raw).map((info) => ({ ...info, _fetchedAt: (info._fetchedAt || Date.now()) - ms }))
+        globalThis.localStorage.setItem('programInfos', JSON.stringify(list))
+    }
+
+    return { dom, state, ageStorage, restore() { globalThis.fetch = prevFetch; dom.restore() }, intervalSec, programsSort }
 }
 
 function jsonResponse(body) {

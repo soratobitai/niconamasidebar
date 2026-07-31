@@ -1,5 +1,6 @@
 import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
+import { initialMomentum, totalEngagement } from '../utils/momentum.js'
 
 /**
  * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
@@ -198,6 +199,9 @@ export function makeProgramElement(data, loadingImageURL) {
     container.id = id
     container.className = 'program_container'
     container.setAttribute('active-point', String(activePoint))
+    // 人気順の第2キー。静かな番組は勢いが 0 で並ぶので、その中は累計の多い順にする。
+    // ⚠️ **active-point を書く所では必ずこれも書くこと**（もう1箇所は updateSidebar のその場更新）。
+    container.setAttribute('data-total', String(totalEngagement(data)))
 
     // 配信者セクション（アイコン＋配信者名）
     const providerDiv = document.createElement('div')
@@ -258,30 +262,28 @@ export function makeProgramElement(data, loadingImageURL) {
 }
 
 /**
- * 番組データから人気度スコア（active-point）を算出する。
- * point = (視聴者数+1 + コメント数+1) / 放送経過分数
- * ソート（人気順）および DOM属性 active-point の元になる現役の関数。
- * @param {Object} data - 番組データ（viewers/comments/onAirTime.beginAt を参照）
- * @returns {number} 人気度スコア（非有限時は0）
+ * 番組データから「盛り上がり」（人気順のスコア＝DOM属性 active-point）を取り出す。
+ *
+ * 実体は **直近の増分レートの指数移動平均**で、計算は `utils/momentum.js`、
+ * 更新は `storage.upsertProgramInfos`（前回値と出会う唯一の場所）が行う。ここは読むだけ。
+ *
+ * `momentum` がまだ無いのは「初回描画」と「notifybox 先行でフォローAPIが未着の新番組」。
+ * その場合は開始からの平均レートで代用する（若い番組ではそれが実質そのまま直近レート）。
+ *
+ * ⚠️ **旧スコア `(来場者+1 + コメント+1) / 経過分` に戻さないこと**（doc/09 項目AY）。
+ *   - 「開始からの平均」なので長時間放送が構造的に不利（3時間なら3倍の総数が必要）
+ *   - `+1` と「最低1分」で、**空の新番組が実在70件中50件より上**に出ていた
+ *   - 経過分が切り上がるたびに階段状に下がるため、**データが変わらなくても順位が動く**
+ *     （実測: 2分経過しただけで70件中58件、上位10件でも6件が入れ替わる）
+ *
+ * @param {Object} data - 番組データ
+ * @returns {number} 盛り上がり（1分あたり。非有限時は0）
  */
 export function calculateActivePoint(data) {
     if (!data) return 0
-    const comments = (data.comments || 0) + 1
-    const viewers = (data.viewers || 0) + 1
-    const elapsedTime = (() => {
-        const beginAt = data && data.onAirTime && data.onAirTime.beginAt
-        if (!beginAt) return 1
-        try {
-            const start = new Date(beginAt)
-            const now = new Date()
-            const minutes = Math.floor((now - start) / (1000 * 60))
-            return Math.max(1, minutes)
-        } catch (_e) {
-            return 1
-        }
-    })()
-    const point = (viewers + comments) / Math.pow(elapsedTime, 1)
-    return Number.isFinite(point) ? point : 0
+    const m = Number(data.momentum)
+    if (Number.isFinite(m)) return m
+    return initialMomentum(data, Date.now())
 }
 
 // サムネイル画像の読み込み失敗時のフォールバック処理。

@@ -5,6 +5,7 @@ import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, 
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
+import { totalEngagement } from '../utils/momentum.js';
 import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
 
 /**
@@ -715,6 +716,9 @@ export class UpdateManager {
                     if (existing) {
                         // その場更新。**カードのDOMは移動も作り直しもしない。**
                         existing.setAttribute('active-point', String(calculateActivePoint(data)));
+                        // 人気順の第2キー（勢いが同じ番組は累計の多い順）。
+                        // ⚠️ active-point とセットで書くこと。片方だけ更新すると同点時の並びが古い値で決まる。
+                        existing.setAttribute('data-total', String(totalEngagement(data)));
                         // 新着順（放送開始が新しい順）での位置。sorting.js の newest がこれを昇順に並べる。
                         existing.setAttribute('data-api-index', String(apiIndex));
                         // タイトル・リンク先・配信者名・アイコン・静止サムネの戻り先(data-src)を反映。

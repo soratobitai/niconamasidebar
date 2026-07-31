@@ -13,18 +13,27 @@
  * 逆向きに食い違えば、並べ替えが必要なのに永久にスキップされる。
  *
  * 【変えてはいけないこと】
- * 現在の tie-break の挙動をそのまま移した。「改善」しないこと（見た目が変わる）。
- * - 人気順には tie-break が無い。`parseFloat` が NaN を返す経路もある（属性が無いカード）。
- *   NaN との比較は常に false なので `Array.prototype.sort` の安定性により現状順が保たれる。
- *   ここに tie-break を足すと、同点番組の並びが変わる。
  * - 新着順の第2キーは lv番号の降順。ただし `data-api-index` は
  *   `livePrograms.forEach((data, apiIndex) => ...)` の添字なのでカード間で常に一意であり、
  *   **この tie-break は実際には効いていない**（属性が欠けたカードが混ざった時の保険）。
+ *
+ * 【2026-07-31 に変えたこと】
+ * 人気順に第2キー（累計 `data-total` の降順）を足した。スコアが「開始からの平均」から
+ * 「直近の勢い」へ変わり、**静かな番組が軒並み 0 で同点になる**ため（利用者決定・doc/09 項目AY）。
+ * それ以前は tie-break 無しで、同点は現状順が保たれていた。
  */
 
-/** 人気順（active-point 降順）。tie-break 無し＝同点は現状順を保つ。 */
+/**
+ * 人気順（盛り上がり `active-point` の降順 → 同点なら累計 `data-total` の降順）。
+ *
+ * ⚠️ `parseFloat` が NaN を返す経路がある（属性が無いカード）。NaN との比較は常に false なので
+ * `if (d)` は偽になり、第2キーへ落ちる。第2キーも欠ければ 0 差＝`Array.prototype.sort` の
+ * 安定性で現状順が保たれる（従来の「同点は動かさない」挙動をここで維持している）。
+ */
 export function compareByActivePoint(a, b) {
-    return parseFloat(b.getAttribute('active-point')) - parseFloat(a.getAttribute('active-point'))
+    const d = parseFloat(b.getAttribute('active-point')) - parseFloat(a.getAttribute('active-point'))
+    if (d) return d
+    return (parseFloat(b.getAttribute('data-total')) || 0) - (parseFloat(a.getAttribute('data-total')) || 0)
 }
 
 /**
