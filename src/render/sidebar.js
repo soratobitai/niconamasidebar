@@ -1,4 +1,4 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs, thumbnailFetchMaxParallel } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { initialMomentum, totalEngagement } from '../utils/momentum.js'
 
@@ -153,7 +153,14 @@ export function applyProgramInfoToCard(card, data) {
     //     「同じURLで中身が変わる」ライブサムネの更新は従来どおりループの仕事。
     if (img && img.dataset.thumbLive === '0') {
         const best = resolveLiveThumbnailBaseUrl(data) || f.thumbnail_url
-        if (best && img.src !== best) {
+        // 🔴 **バックオフ中は触らないこと。** 直接表示はループのバックオフ状態を持っていないので、
+        // ここを見ないと**読み込みに失敗し続けるURLをリスト更新のたびに叩き直す**ことになる
+        // （実測: チャンネル1件の静止サムネが失敗しており、err が 1→2 と増えていた。項目BC）。
+        // 失敗したURLは `handleThumbnailError` が繋ぎ画像へ落とすため、`img.src !== best` は
+        // 毎周期成立してしまう＝バックオフを見ないと指数的な間隔が意味を失う。
+        const nextTryAt = Number(img.dataset.nextTryAt || 0)
+        const backingOff = nextTryAt > 0 && Date.now() < nextTryAt
+        if (best && img.src !== best && !backingOff) {
             img.src = best
             img.dataset.thumbLive = '0' // ②のコマではない（最新コマのフリをさせない）
             delete img.dataset.thumbSeq
@@ -345,6 +352,25 @@ function handleThumbnailError() {
 let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
 
+// 🧪診断（確認後に撤去）: プリロードの結末を数える。
+// 「サムネが出ない」時に、取得が始まっていないのか・失敗しているのか・返ってこないのかを
+// 区別できないと原因に辿り着けない。表示状態のスナップショットだけでは、
+// **撮った瞬間にまだ読み込み中**なのか**失敗して止まっている**のかが見分けられない。
+const thumbProbe = {
+    started: 0,      // プリロード開始
+    ok: 0,           // 1回で読めた
+    crossFail: 0,    // crossOrigin で失敗（②ON時のみ発生しうる）
+    plainOk: 0,      // 平文で読み直して成功
+    plainFail: 0,    // 平文でも失敗（＝本当に取れていない）
+    ingestTimeout: 0,// ②への給餌が上限内に返らず打ち切った
+    skipTtl: 0,      // TTL でスキップ
+    skipBackoff: 0,  // バックオフでスキップ
+    noUrl: 0,        // 取得URLが決まらず静止サムネ経路へ
+}
+export function getThumbProbeStats() {
+    return { ...thumbProbe, feedEnabled: !!(animThumbFeed && animThumbFeed.isEnabled()) }
+}
+
 /**
  * 給餌が時間内に返らなかったら1回だけ警告する（鳴る罠）。
  *
@@ -446,8 +472,29 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
     let index = 0
     const CHUNK = 50
-    let pendingImages = 0 // 画像読み込み待機中の数
+    let pendingImages = 0 // 画像読み込み待機中の数（待機列＋飛行中の合計）
     let isCompleted = false // 完了コールバックが呼ばれたかどうか
+
+    // 🔴 **同時に投げすぎない。** 全カードぶんの取得を一度に開始すると、実測で
+    // 「4本が1.6秒・残り13本が15秒後にまとめて着地」という形になり、**1枚目が出るまで15秒**かかる。
+    // 総時間は同じでも体感がまったく違ううえ、その間に立った新着カードの取得も列の後ろで待たされる
+    // （doc/09 項目BC）。取得は待機列に積み、`thumbnailFetchMaxParallel` 本ずつ流す。
+    const fetchQueue = []
+    let inFlight = 0
+    const pumpFetches = () => {
+        while (inFlight < thumbnailFetchMaxParallel && fetchQueue.length > 0) {
+            const startFetch = fetchQueue.shift()
+            inFlight++
+            startFetch()
+        }
+        maybeSettled()
+    }
+    // 1本ぶんの取得が終わった（成功/失敗どちらでも）。枠を返して次を流す。
+    const releaseFetchSlot = () => {
+        inFlight--
+        pendingImages--
+        pumpFetches()
+    }
 
     function computeNext(info) {
         if (!info) return { nextUrl: null, key: '' }
@@ -529,6 +576,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             const { nextUrl, key } = computeNext(info)
             if (!nextUrl) {
+                thumbProbe.noUrl++ // 🧪診断
                 syncStaticThumb(img) // 更新対象外の番組は、ここだけが静止サムネを出す経路
                 continue
             }
@@ -537,6 +585,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             if (!force) {
                 const lastSuccessAt = Number(img.dataset.lastSuccessAt || 0)
                 if (img.dataset.key === key && lastSuccessAt && (now - lastSuccessAt) < thumbnailTtlMs) {
+                    thumbProbe.skipTtl++ // 🧪診断
                     continue
                 }
             }
@@ -544,11 +593,12 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // バックオフ: 失敗が続いている間は次回許可時刻までスキップ
             if (!force) {
                 const nextTryAt = Number(img.dataset.nextTryAt || 0)
-                if (nextTryAt && now < nextTryAt) continue
+                if (nextTryAt && now < nextTryAt) { thumbProbe.skipBackoff++; continue } // 🧪診断
             }
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
             pendingImages++
+            thumbProbe.started++ // 🧪診断
             const urlForAttempt = key.startsWith('u|') ? appendCacheParam(nextUrl, now) : nextUrl
             // 成功時の共通処理（表示差替え＋成功記録）。
             // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
@@ -578,50 +628,59 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // 動くサムネON時は crossOrigin で読み、読めた画像を②へ給餌（②の自前取得＝二重通信を止める）。
             // CORSで読めない環境でも表示は守るため、失敗時は平文で読み直して表示だけ確保する。
             const feeding = !!(animThumbFeed && animThumbFeed.isEnabled())
-            const pre = new Image()
-            if (feeding) pre.crossOrigin = 'anonymous'
-            pre.onload = () => {
-                pendingImages--
-                if (feeding) {
-                    // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
-                    // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
-                    // 表示確定が toBlob のぶん数十ms遅れるが、pending/settled はここで先に解消しておく。
-                    //
-                    // 🔴 **表示を②の完了に依存させないこと。** ②は IndexedDB を触るので、別タブとの
-                    // 競合などで応答が返らないことがありうる。返らないと applySuccess が呼ばれず、
-                    // **そのカードのサムネがページ再読込まで固まる**（更新ボタンも効かない＝doc/09 項目BA）。
-                    // 上限を切ってURL表示へ倒す。②のコマ化は裏で続くので次の周期で追いつく。
-                    let done = false
-                    const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
-                    const guard = setTimeout(() => {
-                        if (done) return
-                        warnIngestStall()
-                        show(null)
-                    }, animIngestWaitMaxMs)
-                    // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
-                    Promise.resolve(animThumbFeed.ingest(card.id, pre))
-                        .then((frame) => { clearTimeout(guard); show(frame) })
-                        .catch(() => { clearTimeout(guard); show(null) })
-                } else {
-                    applySuccess(null)
+            // 🔴 ここで取得を始めないこと。待機列へ積み、pumpFetches が上限本数ずつ流す（項目BC）。
+            fetchQueue.push(() => {
+                thumbProbe.started++ // 🧪診断
+                const pre = new Image()
+                if (feeding) pre.crossOrigin = 'anonymous'
+                pre.onload = () => {
+                    releaseFetchSlot()
+                    thumbProbe.ok++ // 🧪診断
+                    if (feeding) {
+                        // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
+                        // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
+                        // 取得の枠は onload で返す（②のコマ化は通信ではないので枠を占有しない）。
+                        //
+                        // 🔴 **表示を②の完了に依存させないこと。** ②は IndexedDB を触るので、別タブとの
+                        // 競合などで応答が返らないことがありうる。返らないと applySuccess が呼ばれず、
+                        // **そのカードのサムネがページ再読込まで固まる**（更新ボタンも効かない＝doc/09 項目BA）。
+                        // 上限を切ってURL表示へ倒す。②のコマ化は裏で続くので次の周期で追いつく。
+                        let done = false
+                        const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
+                        const guard = setTimeout(() => {
+                            if (done) return
+                            thumbProbe.ingestTimeout++ // 🧪診断
+                            warnIngestStall()
+                            show(null)
+                        }, animIngestWaitMaxMs)
+                        // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
+                        Promise.resolve(animThumbFeed.ingest(card.id, pre))
+                            .then((frame) => { clearTimeout(guard); show(frame) })
+                            .catch(() => { clearTimeout(guard); show(null) })
+                    } else {
+                        applySuccess(null)
+                    }
                 }
-                maybeSettled()
-            }
-            pre.onerror = () => {
-                if (feeding) {
-                    // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
-                    const plain = new Image()
-                    plain.onload = () => { pendingImages--; applySuccess(null); maybeSettled() }
-                    plain.onerror = () => { pendingImages--; applyBackoff(); maybeSettled() }
-                    plain.src = urlForAttempt
-                    return
+                pre.onerror = () => {
+                    if (feeding) {
+                        // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。
+                        // ⚠️ 取得の枠は**平文側の決着まで返さない**（同じ1枚のための2回目の通信なので、
+                        //    ここで枠を返すと上限を超えて同時取得が走る）。
+                        thumbProbe.crossFail++ // 🧪診断
+                        const plain = new Image()
+                        plain.onload = () => { releaseFetchSlot(); thumbProbe.plainOk++; applySuccess(null) } // 🧪診断
+                        plain.onerror = () => { releaseFetchSlot(); thumbProbe.plainFail++; applyBackoff() } // 🧪診断
+                        plain.src = urlForAttempt
+                        return
+                    }
+                    releaseFetchSlot()
+                    thumbProbe.plainFail++ // 🧪診断（②OFF時はここが唯一の失敗経路）
+                    applyBackoff()
                 }
-                pendingImages--
-                applyBackoff()
-                maybeSettled()
-            }
-            pre.src = urlForAttempt
+                pre.src = urlForAttempt
+            })
         }
+        pumpFetches()
         if (index < sourceImgs.length) {
             requestAnimationFrame(tick)
         } else {

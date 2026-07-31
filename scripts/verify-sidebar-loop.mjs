@@ -523,8 +523,8 @@ async function newProgramThumb() {
  * 後ろへ倒していたため、notifybox 先行で立った新着は**アイコンのまま20〜40秒**放置されていた。
  */
 async function twoDisplayPaths() {
-    const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl } = await import('./render-harness.mjs')
-    const { newCardFirstThumbSpreadMs, updateThumbnailInterval } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl, fixedImageUrl } = await import('./render-harness.mjs')
+    const { newCardFirstThumbSpreadMs, updateThumbnailInterval, thumbnailFetchMaxParallel } = await import(new URL('../src/config/constants.js', import.meta.url).href)
     console.log('=== BB 表示経路の二重化と新着の初回サムネ ===')
     const T = Date.now() - 600000
 
@@ -577,6 +577,72 @@ async function twoDisplayPaths() {
         check('BB ⑤ 🔴 表示中のライブサムネを直接表示が取り直さない（毎周期の無駄な再取得を作らない）',
             img.src === atBirth, `${atBirth} → ${img.src}`)
         h.restore()
+    }
+
+    // --- ⑥ 直接表示がバックオフを無視しない（項目BC） ---
+    // 読み込みに失敗したURLは handleThumbnailError が繋ぎ画像へ落とすので、`img.src !== best` は
+    // **毎周期成立してしまう**。バックオフを見ないと、壊れたURLをリスト更新のたびに叩き直すことになり、
+    // 指数的な再試行間隔が意味を失う（実測: 利用者環境でチャンネル1件の静止サムネが失敗し err が増えていた）。
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv604', beginAtMs: T, providerType: 'channel', thumb: false })]
+        h.state.followPrograms[0].listingThumbnail = fixedImageUrl('604')
+        await run()
+        const img = h.dom.getById('604').querySelector('.program_thumbnail_img')
+        // 失敗して繋ぎ画像へ落ちた直後（バックオフ中）を作る
+        img.src = 'https://icon/604.png'
+        img.dataset.thumbLive = '0'
+        img.dataset.nextTryAt = String(Date.now() + 60000)
+        await run()
+        check('BB ⑥ 🔴 バックオフ中は直接表示も控える（壊れたURLを毎周期叩き直さない）',
+            img.src === 'https://icon/604.png', img.src)
+        // 期限が切れれば再挑戦する（復旧経路を塞いでいないこと）
+        img.dataset.nextTryAt = String(Date.now() - 1)
+        await run()
+        check('BB ⑥ バックオフが明ければ直接表示が再挑戦する（復旧経路を塞がない）',
+            img.src === fixedImageUrl('604'), img.src)
+        h.restore()
+    }
+
+    // --- ⑦ 一斉取得の同時本数に上限があるか（項目BC） ---
+    // 全部いっぺんに投げると、実測で「4本が1.6秒・残り13本が15秒後にまとめて着地」になり、
+    // **1枚目が出るまで15秒**かかっていた。総時間ではなく「1枚目までの時間」を守る検証。
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = Array.from({ length: 12 }, (_, i) => apiProgram({ id: `lv70${i}`, beginAtMs: T - i * 1000 }))
+        await run()
+        // 画像を「読み込みが終わらない」状態にして、同時に何本走ったかを数える
+        let peak = 0, live = 0
+        const holders = []
+        const RealImage = globalThis.Image
+        globalThis.Image = class {
+            constructor() { this.onload = null; this.onerror = null; this.crossOrigin = null; this._src = '' }
+            get src() { return this._src }
+            set src(v) { this._src = String(v); live++; if (live > peak) peak = live; holders.push(this) }
+        }
+        try {
+            um.updateThumbnail(true, null)
+            await sleep(120)
+            check('BB ⑦ 🔴 一斉取得の同時本数に上限がある（1枚目までの時間を守る）',
+                peak <= thumbnailFetchMaxParallel, `同時 ${peak} 本（上限 ${thumbnailFetchMaxParallel}）`)
+            check('BB ⑦ 前提: 上限より多くのカードが対象になっている', holders.length >= 1 && 12 > thumbnailFetchMaxParallel,
+                `対象12件 / 起動 ${holders.length} 本`)
+            // 1本終わるたびに次が流れること（詰まらせない）
+            const before = holders.length
+            live--; holders[0].onload && holders[0].onload()
+            await sleep(50)
+            check('BB ⑦ 1本終わると次が流れる（待機列が詰まらない）', holders.length > before,
+                `${before} → ${holders.length} 本`)
+        } finally {
+            globalThis.Image = RealImage
+            h.restore()
+        }
     }
 
     // --- ② 既にライブサムネを出しているカードには触らない（項目AV を壊さない） ---

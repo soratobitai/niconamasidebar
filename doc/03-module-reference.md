@@ -19,6 +19,7 @@
 | `maxSaveProgramInfos` | `200` | localStorage `programInfos` の最大件数 |
 | `updateThumbnailInterval` | `20`（秒） | サムネ更新の基準間隔（常設ループが、更新完了後にこの時間だけ先へ期限を置き直す。**延ばさない方針**＝ニコ生側の実更新が最速20秒のため） |
 | `newProgramFastPollMs` | `180000`（3分） | 空サムネ番組のライブサムネ追撃（詳細API）を「放送開始からこの時間内の若い番組」だけに限定するゲート。過ぎたら追撃せずスクレイプ `fillMissingDetails`（60〜180秒）に委譲。旧A1「8回打ち切り」の代替 |
+| `thumbnailFetchMaxParallel` | `4` | 一斉取得の同時本数の上限。🔴 **同時に投げるほど1枚目が遅くなる**。実測: 17本同時だと4本が1.6秒・残り13本が15秒後にまとめて着地。1本ずつなら0.0〜0.1秒（doc/09 項目BC） |
 | `thumbnailTtlMs` | `10000` | サムネ成功後この時間は再取得しない（フリッカ抑制） |
 | `thumbnailRetryBaseMs` | `2000` | サムネ失敗時の再試行ベース間隔（指数バックオフの基数） |
 | `thumbnailRetryMaxMs` | `60000` | サムネ再試行の最大間隔 |
