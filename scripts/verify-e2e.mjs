@@ -4,7 +4,7 @@
  *   npm run verify:e2e
  *
  * 本物の Chrome に dist/ の拡張を読ませ、視聴ページとAPIの応答だけこちらで差し替える。
- * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約5分。
+ * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約9分。
  * 検証用の一時プロファイルで起動するので、普段使いの Chrome には影響しない。
  *
  * 【前提】`npm i` 済み（playwright-core）＋ `npm run build` 済み（dist/ が最新であること）。
@@ -22,6 +22,7 @@ import { spawn } from 'child_process'
 import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { deflateSync } from 'zlib'
 
 let chromium
 try {
@@ -88,9 +89,44 @@ const NOTIFYBOX = {
 const FOLLOW = { data: { programs: PROGRAMS, total: PROGRAMS.length } }
 const PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>テスト視聴ページ</title></head>
 <body><div id="watchPage"><div id="root"><div style="height:100vh">プレイヤー相当</div></div></div></body></html>`
-const PNG = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-    'base64')
+// ---- ライブサムネの差し替え画像 ----
+// 「どのコマがどの取得に対応するか」を見分けられるよう、取得ごとに違う単色PNGを返す。
+// ⚠️ **同じURLでも2回目の取得には別の色を返す**。①がプリロードと表示で別々にダウンロードしていた頃は、
+//    この2枚が食い違うと「画面に出ている絵がアニメのどのコマにも無い」状態になった（doc/09 項目AV）。
+//    今は静止サムネにも給餌したコマそのものを出すので2回目の取得自体が起きない＝この仕掛けに引っかからない。
+const crcTable = (() => {
+    const t = []
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0 }
+    return t
+})()
+const crc32 = (buf) => { let c = 0xFFFFFFFF; for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0 }
+const pngChunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length)
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data])
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td))
+    return Buffer.concat([len, td, crc])
+}
+function solidPng(r, g, b, size = 32) {
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 2
+    const raw = Buffer.alloc(size * (size * 3 + 1))
+    for (let y = 0; y < size; y++) {
+        const off = y * (size * 3 + 1)
+        raw[off] = 0
+        for (let x = 0; x < size; x++) { raw[off + 1 + x * 3] = r; raw[off + 2 + x * 3] = g; raw[off + 3 + x * 3] = b }
+    }
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0))])
+}
+const colorOf = new Map()   // "<cache値>|<何回目>" -> 色
+const thumbHits = []        // 画像取得のログ（1URLあたり何回取ったかの検証に使う）
+const urlSeen = new Map()
+let colorCounter = 0
+function colorFor(key) {
+    if (!colorOf.has(key)) {
+        colorCounter++
+        colorOf.set(key, { r: (colorCounter * 37) % 200 + 20, g: (colorCounter * 91) % 200 + 20, b: (colorCounter * 53) % 200 + 20, n: colorCounter })
+    }
+    return colorOf.get(key)
+}
 
 // ---- 起動 -----------------------------------------------------------------
 const dir = mkdtempSync(join(tmpdir(), 'nnsb-e2e-'))
@@ -127,7 +163,20 @@ await page.route('**/*', async (route) => {
         if (slow) await sleep(6000)
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FOLLOW) })
     }
-    if (u.includes('dlive.nicovideo.jp')) return route.fulfill({ status: 200, contentType: 'image/png', body: PNG })
+    if (u.includes('dlive.nicovideo.jp')) {
+        const m = /[?&]cache=(\d+)/.exec(u)
+        const cache = (m ? m[1] : 'none') + '@' + u.replace(/[?&]cache=\d+/, '')
+        const seen = (urlSeen.get(cache) || 0) + 1
+        urlSeen.set(cache, seen)
+        const c = colorFor(cache + '|' + seen)
+        thumbHits.push({ url: cache, n: c.n, seen })
+        // crossOrigin='anonymous' の給餌が通るよう ACAO を返す（本番の dlive も返している）
+        return route.fulfill({
+            status: 200, contentType: 'image/png',
+            headers: { 'access-control-allow-origin': '*' },
+            body: solidPng(c.r, c.g, c.b),
+        })
+    }
     if (u.startsWith('https://live.nicovideo.jp/watch/')) {
         return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: PAGE_HTML })
     }
@@ -261,6 +310,108 @@ await endGuideCase('AU 🔴 リクエストボタンが無い終了ガイドで�
 await endGuideCase('AU リクエストボタンがある従来の形でも発火する', GUIDE.withRequest, true)
 await endGuideCase('AU 配信者本人の満足度アンケート表示でも発火する', GUIDE.enquete, true)
 await endGuideCase('AU 中身が揃っていないガイドでは発火しない（誤爆防止）', GUIDE.partial, false)
+
+// ============================================================
+// AV: 動くサムネに「今表示している絵」が必ず含まれるか
+//
+// 以前は①がプリロードと表示で**同じURLを2回**ダウンロードしており、その2枚が食い違うと
+// 画面に出ている絵がアニメのどのコマにも無い状態になった。しかも末尾スロットの判定が
+// URL文字列比較だったため、URLが同一のこのケースだけ構造的にすり抜けていた。
+// 今は静止サムネにも給餌したコマそのものを出す＝食い違いが起こりようがない。
+// ここでは「2回目の取得には別の色を返す」意地悪な差し替えのまま、症状が出ないことを確かめる。
+// ============================================================
+log('\n=== AV: 動くサムネに「今表示している絵」が含まれるか ===')
+await page.reload({ waitUntil: 'domcontentloaded' })
+await page.waitForSelector('#sidebar', { state: 'attached', timeout: 20000 })
+// ⚠️ `#sidebar` が現れた直後はまだ幅が入っていない。そこで isOpen() を見ると「閉じている」と誤判定し、
+// 開いているサイドバーをこちらのクリックで**閉じてしまう**。落ち着くまで待ってから、開くまで押す。
+await page.waitForTimeout(1500)
+for (let i = 0; i < 3 && !(await isOpen()); i++) {
+    await page.click('#sidebar_button')
+    await page.waitForTimeout(1200)
+}
+check('AV 前提: サイドバーが開いている（閉じているとサムネ更新は動かない）', await isOpen())
+await page.waitForTimeout(1000)
+// この節の操作は全て JS クリックで行う。設定パネルはサイドバー内にあり、項目によっては
+// viewport の外に出て Playwright の click が「outside of the viewport」で通らないため。
+await page.evaluate(() => document.getElementById('setting_options').click()); await page.waitForTimeout(400)
+await page.evaluate(() => document.getElementById('animatedThumbnailOn').click()); await page.waitForTimeout(300)
+await page.evaluate(() => document.getElementById('settings_close').click()); await page.waitForTimeout(400)
+check('AV 前提: 動くサムネをONにできた',
+    await page.evaluate(() => !!document.querySelector('#animatedThumbnailOn')?.checked))
+
+// ⚠️ サムネ更新ループは `document.hidden` を見て素通りする（リスト更新と違って背景タブでは動かない）。
+// 別ウィンドウに隠れているとChromeが hidden 扱いにするため、前面に出してから観測する。
+// これを忘れると「取得0回」でこの節だけが謎に落ちる。
+await page.bringToFront()
+const vis = await page.evaluate(() => document.visibilityState)
+check('AV 前提: タブが可視（サムネ更新は背景タブでは動かない）', vis === 'visible', `visibilityState=${vis}`)
+
+const CARD = PROGRAMS[0].id.replace('lv', '')
+thumbHits.length = 0
+urlSeen.clear()
+log('   コマが貯まるまで 70秒 観測中（サムネ周期20秒）…')
+await page.waitForTimeout(70000)
+
+const st = await page.evaluate((num) => {
+    const card = document.getElementById(num)
+    const im = card ? card.querySelector('.program_thumbnail_img') : null
+    if (!im) return null
+    let rgb = null
+    try {
+        const c = document.createElement('canvas'); c.width = 1; c.height = 1
+        const cx = c.getContext('2d'); cx.drawImage(im, 0, 0, 1, 1)
+        const d = cx.getImageData(0, 0, 1, 1).data
+        rgb = [d[0], d[1], d[2]]
+    } catch (_e) { rgb = null } // クロスオリジンURLを表示中なら読めない（＝給餌が効いていない）
+    return { isBlob: im.src.indexOf('blob:') === 0, seq: im.dataset.thumbSeq || '', rgb }
+}, CARD)
+
+const perUrl = {}
+for (const h of thumbHits) perUrl[h.url] = Math.max(perUrl[h.url] || 0, h.seen)
+const maxPerUrl = Object.values(perUrl).length ? Math.max(...Object.values(perUrl)) : 0
+check('AV 同じURLを2回ダウンロードしていない（静止サムネは給餌したコマを出す）',
+    maxPerUrl === 1, `1URLあたり最大 ${maxPerUrl} 回 / 取得 ${thumbHits.length} 回`)
+check('AV 静止サムネがコマそのものを表示している（blob＋コマ番号つき）',
+    !!(st && st.isBlob && st.seq), st ? `blob=${st.isBlob} seq="${st.seq}"` : '(カードが無い)')
+
+const nearest = (rgb) => {
+    let best = -1; let bd = 1e9
+    for (const c of colorOf.values()) {
+        const d = Math.abs(c.r - rgb[0]) + Math.abs(c.g - rgb[1]) + Math.abs(c.b - rgb[2])
+        if (d < bd) { bd = d; best = c.n }
+    }
+    return bd <= 12 ? best : -1
+}
+// ホバーも合成イベントで送る（同上の理由。動くサムネは委譲リスナなので実ホバーと同じ経路を通る）
+await page.evaluate((num) => {
+    const t = document.getElementById(num).querySelector('.program_thumbnail')
+    t.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+}, CARD)
+const seen = []
+for (let i = 0; i < 60; i++) {
+    const s = await page.evaluate((num) => {
+        const card = document.getElementById(num)
+        if (!card) return null
+        const layers = Array.prototype.slice.call(card.querySelectorAll('.anim_thumb_layer'))
+        const shown = layers.filter((l) => l.classList.contains('show'))
+        const top = shown[shown.length - 1] || layers[0]
+        if (!top || !top.src || !top.complete || !top.naturalWidth) return null
+        try {
+            const c = document.createElement('canvas'); c.width = 1; c.height = 1
+            const cx = c.getContext('2d'); cx.drawImage(top, 0, 0, 1, 1)
+            const d = cx.getImageData(0, 0, 1, 1).data
+            return [d[0], d[1], d[2]]
+        } catch (_e) { return null }
+    }, CARD)
+    if (s) { const n = nearest(s); if (seen[seen.length - 1] !== n) seen.push(n) }
+    await page.waitForTimeout(150)
+}
+const staticN = st && st.rgb ? nearest(st.rgb) : -1
+check('AV アニメが再生されている（2コマ以上めくれた）', new Set(seen).size >= 2, `コマ列: ${seen.join(' → ')}`)
+check('AV 🔴 今表示している絵がアニメのコマに含まれる（最新欠落の回帰テスト）',
+    staticN >= 0 && seen.indexOf(staticN) >= 0,
+    `静止=色${staticN} / コマ列: ${seen.join(' → ')}`)
 
 await browser.close()
 try { child.kill() } catch (_) {}

@@ -757,7 +757,11 @@ async function flip() {
     const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
 
     // --- 定期更新の組み替えが FLIP を通っているか ---
-    const branch = um.slice(um.indexOf('if (structuralChange) {'), um.indexOf('if (structuralChange) {') + 2200)
+    // ⚠️ **固定幅で切らないこと。** 以前は +2200文字で切っており、この区間に数行足しただけで
+    //    sortProgramsInContainer( が窓の外へ押し出され、実装は正しいのに NG が出た（4回目の再発）。
+    //    終端は実際に存在する文字列でアンカーする。
+    const branchStart = um.indexOf('if (structuralChange) {')
+    const branch = um.slice(branchStart, um.indexOf('// else: その場更新のみ', branchStart))
     check('FLIP 定期更新の組み替えが flipReorder を通る', /flipReorder\(/.test(branch))
     check('FLIP replaceChildren と sort が flipReorder の中にある',
         branch.indexOf('flipReorder(') < branch.indexOf('replaceChildren(') &&
@@ -776,7 +780,9 @@ async function flip() {
         !/flipReorder/.test(wrapper), wrapper.trim().split('\n')[0])
 
     // --- flipReorder 本体の性質 ---
-    const fr = sb.slice(sb.indexOf('export function flipReorder'), sb.indexOf('export function flipReorder') + 1800)
+    // ここも終端アンカー方式（次の export まで）。固定幅にすると同じ罠を踏む。
+    const frStart = sb.indexOf('export function flipReorder')
+    const fr = sb.slice(frStart, sb.indexOf('export function buildSidebarShell', frStart))
     check('FLIP 移動量0の要素はスキップする', /dx === 0 && dy === 0/.test(fr))
     check('FLIP First が取れない要素（新規カード）はスキップする', /if \(!first\) return/.test(fr),
         '初回描画は既存カードが無いので自動的にアニメ無しになる')

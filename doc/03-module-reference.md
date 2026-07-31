@@ -232,7 +232,9 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `resolveLiveThumbnailBaseUrl(info)` | ライブサムネのベースURLを provider 別に選ぶ純関数（user=`liveScreenshotThumbnailUrls.middle` / channel=`large1280x720ThumbnailUrl`） |
 | `deriveCardFields(data)` | 番組データ→カードに書く値一式（id/リンク/配信者名/サムネURL/アイコン/タイトル）を導出する純関数。`makeProgramElement` と `applyProgramInfoToCard` の**共通の土台**。`data.id` は `lv` 有無どちらでも受ける（カードDOM id は数値・視聴URLは `lv` 付き、という規約の唯一の生成点） |
 | `applyProgramInfoToCard(card, data)` ★ | **既存カードを作り直さずにその場で更新**（タイトル/リンク先/配信者名/アイコン/`data-src`）。⚠️ `img.src` は**触らない**（サムネ更新ループの担当。触ると動くサムネの状態が壊れる）。項目AK の修正本体 |
-| `setAnimThumbnailFeed(feed)` | 動くサムネ(②)への給餌フックを注入。①が `crossOrigin` で読んだ画像を②へ渡し、**②の自前取得＝二重通信を止める** |
+| `setAnimThumbnailFeed(feed)` | 動くサムネ(②)への給餌フックを注入。①が `crossOrigin` で読んだ画像を②へ渡し、**②が返したコマをそのまま静止サムネにも表示する**（同じ1枚を共有＝「静止サムネ＝最新コマ」が構造的に成立。項目AV） |
+| （内部）`showThumbnail(img, url, frame)` | 静止サムネの表示を確定。②のコマがあればそれを出して `dataset.thumbSeq` を記録、無ければ取得URLを出して記録を消す。blob URL の所有者はこちらで、**1世代遅れで** revoke する（表示中のものを消さないため） |
+| `releaseThumbnailBlobs(card)` | リストから外れるカードが抱えている blob URL を解放（`updateSidebar` の差し替え直前に呼ぶ）。外れた要素はDOMから辿れなくなるため、ここで手放さないとページ滞在中ずっと残る |
 | `flipReorder(container, reorderFn, duration=300)` | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。**`UpdateManager.updateSidebar` から現役で呼ばれている**（定期更新の並べ替えアニメ本体）。🔴 `reorderFn` の中でフラグメントを組むこと。外で組むと既存カードが親から外れた状態で First を測ることになり、**毎回空振りする**（項目AM） |
 | `buildSidebarShell({reloadImageURL, optionsImageURL})` ★ | サイドバー枠HTML(`sidebarHtml`)・境界線(`sidebarLine`)・オプションフォーム(`optionHtml`)の文字列を返す。`main.js` が body に挿入。オプションフォームの全ラジオ(表示順序/自動更新/オートオープン/自動移動)はここに定義 |
 
@@ -354,17 +356,18 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 |-------------|------|
 | `setAnimatedThumbnailEnabled(on)` | 有効/無効の切替（冪等）。有効時: 委譲hoverリスナ付与＋20秒間隔の `pruneAbsentBuffers`（バッファ掃除）開始＋計測リセット。無効時: タイマー/リスナ停止＋全blob解放 |
 | `teardownAnimatedThumbnails()` | `setAnimatedThumbnailEnabled(false)` に委譲（cleanupから呼ぶ） |
-| `ingestAnimatedThumbnailFrame(id, img)` | **①(通常サムネ更新)からの給餌口**。①がcrossOriginで読んだ画像を受け取り再取得せずフレーム化（`storeFrameFromImage`）。ガード: `!enabled/captureUnsupported/document.hidden/isSidebarLoading()` |
-| `isAnimatedThumbnailEnabled()` | ①が「crossOriginで読んで給餌するか」を判断するフラグ。`enabled && !captureUnsupported`（taint後はfalse→①は平文へ自動フォールバック） |
+| `ingestAnimatedThumbnailFrame(id, img)` | **①(通常サムネ更新)からの給餌口**。①がcrossOriginで読んだ画像を受け取り再取得せずフレーム化（`storeFrameFromImage`）。**戻り値は `Promise<{url,seq}\|null>`＝①が静止サムネに出すべき画像**（null ならURL表示）。ガード: `!enabled / captureUnsupported / !id / !img` |
+| `isAnimatedThumbnailEnabled()` | ①が「crossOriginで読んで給餌するか」を判断するフラグ。`enabled && !captureUnsupported`（taint後はfalse→①はURL表示へ自動フォールバック） |
 
 内部の要点:
-- **取得は①へ一本化（給餌方式・2026-07-13）**: 定期の自前取得(`captureVisibleFrames`)は廃止。①(`sidebar.js updateThumbnailsFromStorage`)がプリロード成功画像を `ingestAnimatedThumbnailFrame` へ渡す。配線は `main.js` の `setAnimThumbnailFeed`（②→①ではなく、①が②のフックを呼ぶ形＝循環import無し）。
-- `storeFrameFromImage(id,img,b)`: 給餌/自前取得の共通後半。16×16知覚ハッシュ(`computeSignature`)→`signatureDiffers`(閾値8)で**変化時のみ** `canvas.toBlob`→`createObjectURL` をリングバッファ(N=5)に追加、超過分は `revokeObjectURL`（アニメ表示中カードは遅延revoke）。追加前に `ensureHydrated`→追加→`persistBuffer`。
-- `captureFrame(id,url,source)`: **ホバー即時取得のみ**の自前取得（`crossOrigin='anonymous'`＋cache-bust）。`source='hover'`。定期取得には使わない。
+- **取得は①へ一本化（給餌方式）**: ②は自前取得しない。①(`sidebar.js updateThumbnailsFromStorage`)がプリロード成功画像を `ingestAnimatedThumbnailFrame` へ渡し、**返ってきたコマをそのまま静止サムネにも表示する**。配線は `main.js` の `setAnimThumbnailFeed`（②→①ではなく、①が②のフックを呼ぶ形＝循環import無し）。
+  - 🔴 これにより「静止サムネ＝最新コマ」が**構造的に**成立する。以前は①が同じURLをもう1回ダウンロードして表示しており、2回の取得が食い違うと最新がアニメに含まれなかった（→ [09 項目AV](./09-gotchas-and-techdebt.md)）。②ON時のライブサムネ取得も1周期2回→1回になった。
+- `storeFrameFromImage(id,img,b)`: 16×16知覚ハッシュ(`computeSignature`)→`signatureDiffers` で**変化時のみ** `canvas.toBlob`→`createObjectURL` をリングバッファ(N=5)に追加、超過分は `revokeObjectURL`（アニメ表示中カードは遅延revoke）。追加前に `ensureHydrated`→追加→`persistBuffer`。**戻り値は表示用ハンドル**（`displayHandleOf`＝最新コマの blob から**新しい object URL** を作る。リングバッファ側のURLを貸すと eviction や機能OFFの revoke で表示中の画像を消してしまう）。重複で保存しなかった時も**既存の最新コマ**を返す（見た目が同一なので不変条件は保てる）。
+- `frameSeq`（モジュールスコープ）: フレームの通し番号。**バッファをまたいで単調増加・再利用しない**（IndexedDBからの復元分も採番し直す）。静止サムネ側の `dataset.thumbSeq` と突き合わせて末尾スロットの要否を決める。
 - `pruneAbsentBuffers`: 20秒周期。フレーム取得はせず、リストから消えた番組を `releaseBuffer` でpruneするのみ（メモリ保持）。
-- ホバー: `setHoverCard`（+`captureHoveredCard`でホバー即キャプチャ）/`tryStartAnim`/`stopAnim`。`.anim_thumb_overlay` 内の**2レイヤーを opacity でクロスフェード**巡回（開始は**2枚**から）。DOM再構築・枚数不足・非enabled時は停止（`document.contains`ガード）。
-- 計測: `window.showAnimThumbStats()`（無条件公開）。ingested(①給餌)/fetches(②自前=ホバー)/loaded/stored/dupDiscarded/taintStops。enableごとリセット。
-- 防御: taint検出時 `captureUnsupported=true`（`isAnimatedThumbnailEnabled()`→false で①を平文へ戻す）。①のcrossOrigin失敗時は①が平文で表示だけ確保し②へは渡さない。IndexedDB不可でも try/catch でメモリのみ継続。
+- ホバー: `setHoverCard`/`tryStartAnim`/`stopAnim`。`.anim_thumb_overlay` 内の**2レイヤーを opacity でクロスフェード**巡回（開始は**2枚**から）。DOM再構築・枚数不足・非enabled時は停止（`document.contains`ガード）。
+- 計測: `window.showAnimThumbStats()`（無条件公開）。ingested(①給餌)/loaded/stored/dupDiscarded/taintStops。enableごとリセット。※自前取得の計数(fetches/periodic/hover/errors)は、②の自前取得経路の撤去に伴い**常に0を表示するだけ**になっていたため削除した。
+- 防御: taint検出時 `captureUnsupported=true`（`isAnimatedThumbnailEnabled()`→false で①をURL表示へ戻す）。①のcrossOrigin失敗時は①が平文で表示だけ確保し②へは渡さない。IndexedDB不可でも try/catch でメモリのみ継続。
 
 ### services/animFrameStore.js 🧪（動くサムネのフレーム永続化）
 IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま保存。エラー時は静かに no-op/null（グレースフル）。

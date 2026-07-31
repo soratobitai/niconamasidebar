@@ -291,6 +291,7 @@ function handleThumbnailError() {
     // 「今の静止サムネはライブではない」印。動くサムネの末尾スロットがこの非ライブ画像を
     // 最新のフリで映さないよう thumbLive=0 を立てる（applySuccess で '1' に戻る）。
     this.dataset.thumbLive = '0'
+    delete this.dataset.thumbSeq // 表示中の絵はもうコマではない（末尾スロットの誤スキップを防ぐ）
     const dataSrc = this.getAttribute('data-src')
     if (dataSrc && this.src !== dataSrc) {
         this.src = dataSrc
@@ -301,11 +302,61 @@ function handleThumbnailError() {
 }
 
 // ---- 動くサムネ(②)への給餌フック ----
-// ②ON時、①(この通常サムネ更新)のプリロードを crossOrigin で読み、読めた画像を②へ渡して
-// 「最新サムネを①②が別々に取得する二重通信」をなくす。main.js が setAnimThumbnailFeed で注入。
-// feed = { isEnabled(): boolean, ingest(cardId, HTMLImageElement): void }
+// ②ON時、①(この通常サムネ更新)のプリロードを crossOrigin で読み、読めた画像を②へ渡す。
+// **②はコマ化した画像そのものを返し、①はそれを静止サムネの表示にも使う**（同じ1枚を共有する）。
+// main.js が setAnimThumbnailFeed で注入。
+// feed = { isEnabled(): boolean, ingest(cardId, HTMLImageElement): Promise<{url,seq}|null> }
 let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
+
+/**
+ * 静止サムネの表示を確定する。②から画像を受け取れた時はそれを出し、無ければ取得URLを出す。
+ *
+ * 🔴 **②ON時に URL で表示し直さないこと。** 同じURLでも別リクエストになるため、2回の取得の間に
+ * スクショが1枚進むと「画面に出ている絵がアニメのどのコマにも無い」状態になる（doc/09 項目AV）。
+ * 同じ画像を出せば、その食い違いは**起こりようがなくなる**（判定で当てにいかない）。
+ *
+ * blob URL の所有者はこちら。差し替え時に**1世代遅れで** revoke する（表示中のものを消さないため）。
+ * @param {HTMLImageElement} img カードの静止サムネ
+ * @param {string} url ②から画像を受け取れなかった時に使う取得URL
+ * @param {{url:string,seq:number}|null} frame ②が返したコマ（null なら url を使う）
+ */
+function showThumbnail(img, url, frame) {
+    const next = frame && frame.url ? frame.url : url
+    if (img.src !== next) img.src = next
+    if (frame && frame.url) img.dataset.thumbSeq = String(frame.seq)
+    else delete img.dataset.thumbSeq   // URL表示＝コマと同一である保証が無い（末尾スロットに任せる）
+    // 1世代前の blob を解放する。直前に表示していたものは、新しい画像のデコード中もまだ画面に出て
+    // いるので即 revoke しない（2世代ぶん＝カードあたり最大2枚だけ生かす）。
+    const prev = img.dataset.thumbBlobPrev
+    if (prev && prev !== next) URL.revokeObjectURL(prev)
+    const cur = img.dataset.thumbBlobUrl
+    if (cur && cur !== next) img.dataset.thumbBlobPrev = cur
+    else delete img.dataset.thumbBlobPrev
+    if (frame && frame.url) img.dataset.thumbBlobUrl = frame.url
+    else delete img.dataset.thumbBlobUrl
+}
+
+/**
+ * リストから外れるカードが抱えている blob URL を解放する。
+ *
+ * 静止サムネに②のコマを出すようになったので、カードは blob URL の所有者になっている。
+ * 外れた要素はDOMからも辿れなくなるため、ここで手放さないとページ滞在中ずっと残る
+ * （番組が終わるたびに数十KB×2が積み上がる）。`updateSidebar` の差し替え直前に呼ぶ。
+ * @param {HTMLElement} card `.program_container`
+ */
+export function releaseThumbnailBlobs(card) {
+    const img = card && card.querySelector ? card.querySelector('.program_thumbnail_img') : null
+    if (!img || !img.dataset) return
+    for (const k of ['thumbBlobUrl', 'thumbBlobPrev']) {
+        const u = img.dataset[k]
+        if (u) {
+            try { URL.revokeObjectURL(u) } catch (_e) { /* 解放済み等は無視 */ }
+            delete img.dataset[k]
+        }
+    }
+    delete img.dataset.thumbSeq
+}
 
 export function updateThumbnailsFromStorage(programInfos, options = {}) {
     const force = !!(options && options.force)
@@ -379,6 +430,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
         img.dataset.errors = String(errors)
         img.dataset.nextTryAt = String(Date.now() + Math.min(thumbnailRetryMaxMs, thumbnailRetryBaseMs * Math.pow(2, errors - 1)))
         img.src = dataSrc
+        delete img.dataset.thumbSeq // 静止サムネに戻した＝コマではない
     }
 
     function checkComplete() {
@@ -432,13 +484,14 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             const urlForAttempt = key.startsWith('u|') ? appendCacheParam(nextUrl, now) : nextUrl
             // 成功時の共通処理（表示差替え＋成功記録）。
             // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
-            const applySuccess = () => {
-                if (img.src !== urlForAttempt) img.src = urlForAttempt
+            // frame: ②が返したコマ（null なら取得URLで表示）。showThumbnail 参照。
+            const applySuccess = (frame) => {
+                showThumbnail(img, urlForAttempt, frame)
                 img.dataset.key = key
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
-                // 静止imgは「ライブサムネURL」を表示中。動くサムネの末尾スロット判定に使う
+                // 静止imgは「ライブサムネ」を表示中。動くサムネの末尾スロット判定に使う
                 // （error フォールバックで固定画像/loading.gif になっていない印）。
                 img.dataset.thumbLive = '1'
             }
@@ -456,15 +509,24 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             if (feeding) pre.crossOrigin = 'anonymous'
             pre.onload = () => {
                 pendingImages--
-                applySuccess()
-                if (feeding) animThumbFeed.ingest(card.id, pre) // 再取得なしでフレーム化（②側でON/汚染を再判定）
+                if (feeding) {
+                    // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
+                    // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
+                    // 表示確定が toBlob のぶん数十ms遅れるが、pending/settled はここで先に解消しておく。
+                    // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
+                    Promise.resolve(animThumbFeed.ingest(card.id, pre))
+                        .then((frame) => applySuccess(frame))
+                        .catch(() => applySuccess(null))
+                } else {
+                    applySuccess(null)
+                }
                 maybeSettled()
             }
             pre.onerror = () => {
                 if (feeding) {
                     // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
                     const plain = new Image()
-                    plain.onload = () => { pendingImages--; applySuccess(); maybeSettled() }
+                    plain.onload = () => { pendingImages--; applySuccess(null); maybeSettled() }
                     plain.onerror = () => { pendingImages--; applyBackoff(); maybeSettled() }
                     plain.src = urlForAttempt
                     return

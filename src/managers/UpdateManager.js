@@ -1,7 +1,7 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
@@ -776,6 +776,14 @@ export class UpdateManager {
                 //    **FLIP が毎回何もせずに return する**（＝アニメが一度も出ない）。
                 //    2026-07-29 の初回配線で実際にこの形になっており、翌日にモックDOM検証で発覚した。
                 //    例外もログも出ないので、目視でしか気付けない類の壊れ方だった。
+                // リストから外れるカードが抱えている blob URL（②の給餌コマ）をここで解放する。
+                // 外れた要素はDOMから辿れなくなるので、手放さないとページ滞在中ずっと残る。
+                {
+                    const keep = new Set(orderedIds);
+                    for (const el of container.children) {
+                        if (el && el.id && !keep.has(el.id)) releaseThumbnailBlobs(el);
+                    }
+                }
                 flipReorder(container, () => {
                     const frag = document.createDocumentFragment();
                     for (const id of orderedIds) {

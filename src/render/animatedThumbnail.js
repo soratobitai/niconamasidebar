@@ -21,25 +21,31 @@ import {
  * - ホバー中のカードだけ、貯まったフレームを一定間隔で巡回表示（オーバーレイimgをフェード）。
  * - 追加権限・Service Worker は不要（すべて content script 内で完結）。
  *
- * 取得方式（給餌方式・二重取得の解消）:
+ * 取得方式（給餌方式・**静止サムネもこの1枚を出す**）:
  *   フレームは全て①(通常サムネ更新 updateThumbnailsFromStorage)の給餌から得る（②は自前取得しない）。
- *   ②ON時、①はプリロードを crossOrigin で読み、成功画像を ingestAnimatedThumbnailFrame へ渡す（再取得なし）。
- *   これで「二重通信」をなくす。アニメのコマ（履歴）はすべて①のcrossOrigin成功画像から作る。
- *   ①のcrossOriginが失敗する番組・タイミングでは①が平文で表示だけ確保し（表示は無傷）、②へは渡さない
- *   ＝バッファは更新されない。そこで「アニメの末尾コマは、コマ化(crossOrigin)を待たず“今表示中の静止
- *   サムネそのもの”を平文のまま直接表示」する（getLiveStaticSrc／shouldAppendStaticTail）。これにより
- *   crossOriginの成否に関係なく、静止だけ先に進んだ時は末尾に「今の静止サムネ」が入り最新を必ず映す。
- *   末尾スロットの要否は URL文字列一致ではなく「静止がライブサムネを表示中か（error fallback中でないか）」
- *   「最新blobより先へ進んだか」の状態で決めるため providerType(user/channel) 非依存（固定画像/loading.gif
- *   の混入・channelでの恒常無効化を防ぐ）。
+ *   ②ON時、①はプリロードを crossOrigin で読んで `ingestAnimatedThumbnailFrame` へ渡し、
+ *   **その戻り値（コマ化した画像そのもの）を静止サムネの表示にも使う**。
+ *
+ *   🔴 **「静止サムネ＝最新コマ」は判定ではなく構造で保証すること。** 以前は①が
+ *   `img.src = <取得URL>` として**もう1回ダウンロードし直して**いた。同じURLでも別リクエストなので、
+ *   2回の間にスクショが1枚進むと「画面に出ている絵がアニメのどのコマにも無い」状態になる。しかも
+ *   末尾スロットの発火条件が URL文字列比較だったため、URLが同一のこのケースだけ**構造的にすり抜けて**
+ *   いた（doc/09 項目AV。2026-07-31 に実ブラウザで再現を確認）。同じ画像を出す＝比較そのものを不要にする。
+ *   副次的に、②ON時のライブサムネ取得が1周期2回→1回になる。
+ *
+ *   給餌できない時（CORS汚染・機能OFF・toBlob失敗）は①が従来どおりURLで表示し、コマ化はされない。
+ *   その場合に最新を映すのが末尾スロット（getLiveStaticSrc／shouldAppendStaticTail）で、要否は
+ *   **フレーム識別子(seq)の一致**で決める（URL文字列は見ない＝channelのURL不変でも正しく働く）。
  */
 
-// programId(数値文字列) -> { frames: [{ url, sig, blob }], lastSig, lastSrcUrl }
+// programId(数値文字列) -> { frames: [{ url, sig, blob, seq }], lastSig }
 const buffers = new Map()
 // アニメ表示中に eviction された blob URL は、表示中フレームを消さないよう遅延revokeする
 const pendingRevokes = new Set()
-// ホバー即キャプチャのスロットル（同一カードは直近この時間内は再取得しない）
-const HOVER_CAPTURE_THROTTLE_MS = 3000
+// フレームの通し番号。**バッファをまたいで単調増加させ、決して再利用しない。**
+// 静止サムネ側は「今出している絵のseq」を dataset に持ち、末尾スロットの要否をこの一致で判定する。
+// バッファごとの連番にすると、IndexedDBからの復元で過去のseqと衝突して「同じ絵」と誤判定しうる。
+let frameSeq = 0
 // 保存フレームの最大幅（縮小して drawImage/エンコード負荷とストレージを軽減。表示は小さいので十分）
 const MAX_FRAME_W = 480
 
@@ -49,31 +55,24 @@ let captureTimer = null
 let captureUnsupported = false
 
 // ---- 計測（デバッグ用・一本化の効き目確認のため） ----
-// window.showAnimThumbStats() でコンソール確認。給餌方式(①一本化)が効いているかを見る。
-//   - ingested = ①から再取得なしで受け取ったフレーム数（一本化で二重を消した分。これが主役になるのが正常）
-//   - fetches  = ②が自前でネットへ出した回数（ホバー即時が主。定期は0が正常）
-//   - taintStops = crossOrigin 給餌が汚染で失敗した回数（0が正常。出ると①は平文へ自動フォールバック）
+// window.showAnimThumbStats() でコンソール確認。
+//   - ingested = ①から再取得なしで受け取ったフレーム数（②は自前取得しないのでこれが全て）
+//   - taintStops = crossOrigin 給餌が汚染で失敗した回数（0が正常。出ると①はURL表示へフォールバック）
 //   - dup破棄率  = 解析したが直前と同じで捨てた割合（ニコ生更新が最速20秒＝想定内。間隔短縮/延長の判断には使わない）
 // ON時のみ意味を持つ（OFF時は一切動作しない）。計測は enable のたびにリセット。
-const STATS_WINDOW_MS = 60000 // 「直近1分」の集計窓
+// ※ 自前取得(fetches/periodic/hover/errors)の計数は、②の自前取得経路を撤去した時点で
+//   どこからも加算されなくなったため削除した（常に0を表示するだけの死にコードだった）。
 const stats = {
     startedAt: 0,
-    fetches: 0,       // ②が自前でネットワークへ出した取得回数（captureFrame＝主にホバー）
-    periodic: 0,      // うち定期(通常は0＝①給餌に一本化済み)
-    hover: 0,         // うちホバー即時
-    ingested: 0,      // ①(通常サムネ更新)から受け取ったフレーム数（再取得なし＝二重解消分）
+    ingested: 0,      // ①(通常サムネ更新)から受け取ったフレーム数
     loaded: 0,        // 解析まで到達した画像数(storeFrameFromImage)
-    errors: 0,        // ②自前取得の読み込み失敗(onerror)
     stored: 0,        // 新規フレームとして保存(署名が変化)
     dupDiscarded: 0,  // 読めたが直前と同じで破棄(重複)
-    taintStops: 0,    // CORS汚染で取得停止（①は自動で平文へ戻る）
-    recent: [],       // 直近の②自前取得タイムスタンプ(req/分算出用)
+    taintStops: 0,    // CORS汚染で取得停止（①はURL表示へ戻る）
 }
 function resetStats() {
     stats.startedAt = Date.now()
-    stats.fetches = stats.periodic = stats.hover = stats.ingested = 0
-    stats.loaded = stats.errors = stats.stored = stats.dupDiscarded = stats.taintStops = 0
-    stats.recent = []
+    stats.ingested = stats.loaded = stats.stored = stats.dupDiscarded = stats.taintStops = 0
 }
 
 // ホバー状態（カーソル下のカードと、アニメ再生状態を分離）
@@ -101,18 +100,11 @@ function getContainer() {
     return document.getElementById('liveProgramContainer')
 }
 
-// サイドバーが読み込み中（更新ボタンにローディング表示）かどうか。
-// 初回ロードや更新の重い処理中はキャプチャを控え、動画プレーヤーへの負荷・通信競合を避ける。
-function isSidebarLoading() {
-    const btn = document.getElementById('reload_programs')
-    return !!(btn && btn.classList.contains('loading'))
-}
-
 // バッファを取得（無ければ生成）。hydrated=IndexedDBからの復元済みフラグ。
 function getOrCreateBuffer(id) {
     let buf = buffers.get(id)
     if (!buf) {
-        buf = { frames: [], lastSig: null, lastSrcUrl: null, hydrated: false, hydrating: null }
+        buf = { frames: [], lastSig: null, hydrated: false, hydrating: null }
         buffers.set(id, buf)
     }
     return buf
@@ -136,7 +128,9 @@ function ensureHydrated(id) {
             && typeof rec.updatedAt === 'number' && (Date.now() - rec.updatedAt) < PERSIST_TTL_MS) {
             const restored = []
             for (const f of rec.frames) {
-                if (f && f.blob) restored.push({ url: URL.createObjectURL(f.blob), sig: f.sig, blob: f.blob })
+                // seq は保存せず復元時に採番し直す。過去セッションのseqを持ち込むと、
+                // 静止サムネ側に残っている dataset.thumbSeq と偶然一致して「同じ絵」と誤判定しうる。
+                if (f && f.blob) restored.push({ url: URL.createObjectURL(f.blob), sig: f.sig, blob: f.blob, seq: ++frameSeq })
             }
             if (restored.length) {
                 b.frames = restored.slice(-FRAME_COUNT)
@@ -207,14 +201,20 @@ function signatureDiffers(a, b) {
 
 // ---- 読み込み済み画像をフレーム化（重複排除して保持） ----
 // ①からの給餌(ingestAnimatedThumbnailFrame)の後半処理。b は呼び出し側が用意したバッファ。
+//
+// 戻り値: `{ url, seq }`（①が静止サムネに表示する画像）または null（表示はURLで、の意）。
+//   - `url` は**この呼び出し専用に作った object URL**。所有者は①で、差し替え時に①が revoke する。
+//     リングバッファ側の URL を貸すと eviction や機能OFFの revoke で表示中の画像を消してしまう。
+//   - 重複で保存しなかった時は**既存の最新コマ**を返す。署名が同じ＝見た目は同一なので、
+//     「静止サムネは常にバッファ内の最新コマそのもの」という不変条件を保てる。
 function storeFrameFromImage(id, img, b) {
     stats.loaded++
-    // このコマを作った取得元URL（①がapplySuccessで静止imgに入れるURLと同一）。
-    // 再生時「今の静止src === 最新コマのURL」なら両者は同じ画像なので末尾スロットを足さない判定に使う。
-    const srcUrl = (img && (img.currentSrc || img.src)) || null
     const sig = computeSignature(img)
-    if (!sig) { if (captureUnsupported) stats.taintStops++; return }
-    if (!signatureDiffers(sig, b.lastSig)) { stats.dupDiscarded++; return } // 重複 → 破棄
+    if (!sig) { if (captureUnsupported) stats.taintStops++; return Promise.resolve(null) }
+    if (!signatureDiffers(sig, b.lastSig)) {   // 重複 → 保存はしないが、表示は最新コマを使う
+        stats.dupDiscarded++
+        return Promise.resolve(displayHandleOf(b))
+    }
 
     // toBlobは非同期のため、キャプチャcanvasは共有せず都度生成する（競合防止）。
     // 最大幅 MAX_FRAME_W まで縮小して描画・エンコード負荷とサイズを抑える。
@@ -225,48 +225,62 @@ function storeFrameFromImage(id, img, b) {
     c.width = Math.max(1, Math.round(nw * scale))
     c.height = Math.max(1, Math.round(nh * scale))
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
-    c.toBlob(async (blob) => {
-        if (!blob || !enabled) return
-        // 追加の前に、IndexedDBの保存フレームを取り込む（上書き・欠落防止）
-        await ensureHydrated(id)
-        const b2 = buffers.get(id)
-        if (!b2 || !enabled) return
-        // 復元後の最新フレームとの重複を再チェック
-        if (!signatureDiffers(sig, b2.lastSig)) return
-        const objUrl = URL.createObjectURL(blob)
-        b2.frames.push({ url: objUrl, sig, blob })
-        b2.lastSig = sig
-        b2.lastSrcUrl = srcUrl // 最新コマの取得元URL（末尾スロット重複判定に使う）
-        stats.stored++
-        while (b2.frames.length > FRAME_COUNT) {
-            const old = b2.frames.shift()
-            // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延し、
-            // shift で実blobの位置が1つ前へ詰まる分 animIndex も戻して再生位置のズレ（コマ飛び）を防ぐ。
-            // ただし末尾の静止スロット(index === frames.length)は shift で動かないので、そこに居る時は戻さない。
-            if (animCard && animCard.id === id) {
-                pendingRevokes.add(old.url)
-                if (animIndex > 0 && animIndex < b2.frames.length) animIndex--
-            } else {
-                URL.revokeObjectURL(old.url)
+    return new Promise((resolve) => {
+        c.toBlob(async (blob) => {
+            if (!blob || !enabled) { resolve(null); return }
+            // 追加の前に、IndexedDBの保存フレームを取り込む（上書き・欠落防止）
+            await ensureHydrated(id)
+            const b2 = buffers.get(id)
+            if (!b2 || !enabled) { resolve(null); return }
+            // 復元後の最新フレームとの重複を再チェック（重複なら既存の最新コマを表示に使う）
+            if (!signatureDiffers(sig, b2.lastSig)) { resolve(displayHandleOf(b2)); return }
+            const objUrl = URL.createObjectURL(blob)
+            b2.frames.push({ url: objUrl, sig, blob, seq: ++frameSeq })
+            b2.lastSig = sig
+            stats.stored++
+            while (b2.frames.length > FRAME_COUNT) {
+                const old = b2.frames.shift()
+                // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延し、
+                // shift で実blobの位置が1つ前へ詰まる分 animIndex も戻して再生位置のズレ（コマ飛び）を防ぐ。
+                // ただし末尾の静止スロット(index === frames.length)は shift で動かないので、そこに居る時は戻さない。
+                if (animCard && animCard.id === id) {
+                    pendingRevokes.add(old.url)
+                    if (animIndex > 0 && animIndex < b2.frames.length) animIndex--
+                } else {
+                    URL.revokeObjectURL(old.url)
+                }
             }
-        }
-        persistBuffer(id) // IndexedDBへ保存（fire-and-forget）
-        // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
-        tryStartAnim()
-    }, 'image/jpeg', 0.8)
+            persistBuffer(id) // IndexedDBへ保存（fire-and-forget）
+            // ホバー保持中のカードで2枚目が貯まったら、その場でアニメを開始する
+            tryStartAnim()
+            resolve(displayHandleOf(b2))
+        }, 'image/jpeg', 0.8)
+    })
+}
+
+// 静止サムネ表示用のハンドル（最新コマの blob から**新しい object URL** を作って渡す）。
+// リングバッファ側の URL とは別物なので、eviction や機能OFFの revoke に巻き込まれない。
+function displayHandleOf(b) {
+    const newest = b && b.frames.length ? b.frames[b.frames.length - 1] : null
+    if (!newest || !newest.blob) return null
+    return { url: URL.createObjectURL(newest.blob), seq: newest.seq }
 }
 
 // ---- ①(通常サムネ更新)が crossOrigin で読み込んだ画像を受け取り、再取得せずフレーム化する ----
-// これにより「最新サムネを①②が別々に取得する二重通信」をなくす（給餌方式）。
-// ①は各カードのプリロード成功時に呼ぶ。ここでは自前取得しない（stats.fetchesは増えない）。
+// 戻り値は「①が静止サムネに出すべき画像」（storeFrameFromImage 参照）。null なら①はURLで表示する。
+// ①は各カードのプリロード成功時に呼ぶ。ここでは自前取得しない。
 export function ingestAnimatedThumbnailFrame(id, img) {
     // 可視状態でのガードはしない。給餌は表示用に読み込み済みの画像を使い回すだけ（新規ネット取得なし＝
     // 署名/エンコードのみで軽い）。①の描画は requestAnimationFrame 経由なので非表示中はブラウザ側で
     // 自然停止し、非表示中はそもそもここへほぼ到達しない。
-    if (!enabled || captureUnsupported || !id || !img) return
+    if (!enabled || captureUnsupported || !id || !img) return Promise.resolve(null)
     stats.ingested++
     const b = getOrCreateBuffer(id) // ①は現在DOMにある番組のみ渡すのでバッファを用意してよい
-    storeFrameFromImage(id, img, b)
+    try {
+        return storeFrameFromImage(id, img, b)
+    } catch (_e) {
+        return Promise.resolve(null) // 何があっても①の表示は止めない（URL表示へフォールバック）
+    }
 }
 
 // ①が「crossOriginで読んで②へ給餌するか」を判断するためのフラグ。
@@ -346,17 +360,25 @@ function getLiveStaticSrc(card) {
     return im.currentSrc || im.src || null
 }
 // 末尾スロット（＝今の静止サムネを最新コマとして1枚足す安全網）を付けるべきか。
-// 付けるのは「静止がライブサムネを表示していて、かつ最新blobの出所URLと違う」＝crossOrigin給餌が
-// 失敗/遅延して静止だけ先に進んだ時だけ。これで最新を必ず映す。判定は URL文字列一致ではなく
-// 「ライブか」「先へ進んだか」の状態で行うため providerType(user/channel) 非依存。
-// - 非ライブ(fallback)中は付けない（固定画像/loading.gif の混入を防ぐ＝最新blobを最新扱い）。
-// - 静止＝最新blobと同一URL（追随できている通常時）も付けない（同一画像の無変化フェード＝空打ちを避ける）。
+//
+// 判定は**フレーム識別子(seq)の一致**だけで行う。①が給餌の戻り値をそのまま静止サムネに出した時、
+// その seq を `img.dataset.thumbSeq` に書いてくる。それが最新コマと一致していれば
+// 「静止サムネ＝最新コマ（同じ絵）」が確定しているので足さない。それ以外は**安全側に倒して足す**。
+//
+// 🔴 **URL文字列で比較しないこと。** 以前は「静止のsrc ≠ 最新コマの取得元URL」で判定していたが、
+//    ①が同じURLをもう一度ダウンロードして表示していたため、URLは同じなのに中身が違う（2回の取得の間に
+//    スクショが進んだ）ケースを構造的に見逃していた（doc/09 項目AV）。channel のURL不変で
+//    末尾スロットが恒常無効になる問題（項目Yの残ギャップ）も、この方式なら起きない。
+// - 非ライブ(error fallback)中は付けない（固定画像/loading.gif の混入を防ぐ）。
 function shouldAppendStaticTail(b, card) {
     if (!b.frames.length) return false
     const live = getLiveStaticSrc(card)
     if (!live) return false           // fallback中 → 最新blobを最新扱い
-    if (!b.lastSrcUrl) return true    // hydrate直後等でblob出所不明 → 現在の静止(ライブ)を最新として足す
-    return live !== b.lastSrcUrl       // 静止がblobより先へ進んだ時だけ末尾に足す
+    const im = card.querySelector('.program_thumbnail_img')
+    const shownSeq = im && im.dataset ? Number(im.dataset.thumbSeq || 0) : 0
+    const newest = b.frames[b.frames.length - 1]
+    if (shownSeq && newest && shownSeq === newest.seq) return false // 静止＝最新コマ（同じ絵）
+    return true
 }
 // 再生コマ数。通常時＝blob枚数（末尾スロットなし）。静止だけ先へ進んだ時のみ ＋1（末尾＝今の静止サムネ）。
 function playCount(b, card) {
@@ -502,23 +524,19 @@ function showAnimThumbStats() {
     const now = Date.now()
     const elapsed = stats.startedAt ? (now - stats.startedAt) / 1000 : 0
     const mins = elapsed / 60
-    stats.recent = stats.recent.filter((t) => now - t < STATS_WINDOW_MS)
     const ingPerMin = mins > 0 ? stats.ingested / mins : 0
-    const selfPerMin = mins > 0 ? stats.fetches / mins : 0
     const dupRate = stats.loaded ? (stats.dupDiscarded / stats.loaded) * 100 : 0
     const container = getContainer()
     const cards = container ? container.querySelectorAll('.program_container').length : 0
-    console.log('=== 動くサムネ 取得統計（②・①給餌方式） ===')
+    console.log('=== 動くサムネ 取得統計（①給餌方式） ===')
     console.log(`状態: ${enabled ? 'ON' : 'OFF（最後の計測値）'} / 番組カード数: ${cards} / バッファ保持: ${buffers.size}`)
     console.log(`経過: ${elapsed.toFixed(0)}秒 (${mins.toFixed(1)}分)`)
     console.log(`①給餌(通常更新から/再取得なし): ${stats.ingested}回  平均: ${ingPerMin.toFixed(1)}回/分`)
-    console.log(`②自前取得(ネット/主にホバー): ${stats.fetches}回  = 定期${stats.periodic} + ホバー${stats.hover}  平均: ${selfPerMin.toFixed(1)}回/分（直近1分${stats.recent.length}）`)
     console.log(`フレーム化: 解析${stats.loaded}  新規保存${stats.stored}  重複破棄${stats.dupDiscarded}（約${dupRate.toFixed(0)}%）`)
-    console.log(`②自前取得の失敗(onerror): ${stats.errors}回`)
-    if (stats.taintStops) console.warn(`⚠️ CORS汚染(tainted): ${stats.taintStops}回 → ①は自動で平文取得へフォールバック（表示は維持）`)
-    console.log('— 一本化の効き目 —')
-    console.log('・「①給餌」が主で「②自前取得」がホバー分だけなら、最新サムネの二重取得は解消できている。')
-    console.log('・「CORS汚染」が0なら crossOrigin 給餌は安定。出た場合のみ①が平文へ自動フォールバックし表示を守る。')
+    if (stats.taintStops) console.warn(`⚠️ CORS汚染(tainted): ${stats.taintStops}回 → ①はURL表示へフォールバック（表示は維持）`)
+    console.log('— 効き目 —')
+    console.log('・②は自前取得しない。静止サムネも①が給餌した画像そのものを出すので、1周期のライブサムネ取得は1回。')
+    console.log('・「CORS汚染」が0なら crossOrigin 給餌は安定。出た場合のみ①がURL表示へ自動フォールバックし表示を守る。')
     return { ...stats }
 }
 // モジュール読込時に無条件で公開（showApiStatsと同様）。ON前でも呼べば「まだ計測なし」を返す。
