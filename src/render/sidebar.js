@@ -164,12 +164,6 @@ export function applyProgramInfoToCard(card, data) {
             img.src = best
             img.dataset.thumbLive = '0' // ②のコマではない（最新コマのフリをさせない）
             delete img.dataset.thumbSeq
-            // 🧪診断（確認後に撤去）: どちらの経路で最初に絵が出たか
-            if (!img.dataset.firstShownAt) {
-                img.dataset.firstShownAt = String(Date.now())
-                img.dataset.firstShownBy = 'direct'
-                reportNewCardLatency(img)
-            }
         }
     }
 
@@ -285,15 +279,6 @@ export function makeProgramElement(data, loadingImageURL) {
     // 繋ぎのアイコン/ローディング画像を「ライブサムネ」と誤認させない印。動くサムネの末尾スロットが
     // 最新コマのフリでこれを混ぜないようにする（サムネ更新が成功したら applySuccess が '1' に戻す）。
     if (!isLiveSrc) thumbnailImg.dataset.thumbLive = '0'
-    // 🧪診断（確認後に撤去）: カードが現れた時刻。「出現→初回表示」の実測に使う。
-    thumbnailImg.dataset.bornAt = String(Date.now())
-    // 🧪診断: **サムネURLを持たずにアイコンで立ったカード**の印。利用者が報告している
-    // 「新着カードがアイコンのまま、かなり待つと出る」はこの種類のカードでしか起きない。
-    // ここを目印にして、そのカードだけ出現→表示の実測を1行出す。
-    if (!isLiveSrc) {
-        thumbnailImg.dataset.iconStart = '1'
-        thumbnailImg.dataset.bornSource = (data && data._source) || 'unknown'
-    }
     // 画像読み込み失敗時のフォールバック（data-src → loading.gif）を配線
     thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)
@@ -359,60 +344,6 @@ function handleThumbnailError() {
 // feed = { isEnabled(): boolean, ingest(cardId, HTMLImageElement): Promise<{url,seq}|null> }
 let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
-
-/**
- * 🧪診断（確認後に撤去）: アイコンで立った新着カードが、実際に何秒でサムネに変わったかを1行出す。
- *
- * 利用者の報告は「新着カードがアイコンのまま、かなり待てば出る」。**これは新着カードでしか
- * 起きないので、既に表示済みのカードを何件数えても再現しない**（実際にそれで「再現せず」と
- * 誤報告した）。押す操作を要求せず、起きた時に勝手に記録が残るようにする。
- */
-function reportNewCardLatency(img) {
-    if (!img || !img.dataset || img.dataset.iconStart !== '1') return
-    if (img.dataset.latencyReported === '1') return
-    const born = Number(img.dataset.bornAt || 0)
-    const shown = Number(img.dataset.firstShownAt || 0)
-    if (!born || !shown) return
-    img.dataset.latencyReported = '1'
-    const card = typeof img.closest === 'function' ? img.closest('.program_container') : null
-    // 「追撃が走らなかった」時に、**サムネループがそのカードに到達したのか**を分けるのが要点。
-    //   tick=未着手 → ループがこのカードを一度も選んでいない（期限/素通りの問題）
-    //   tick=N秒   → 選ばれてはいる（＝追撃の中で弾かれた）
-    const tickAt = Number(img.dataset.tickAt || 0)
-    const tick = tickAt ? `${((tickAt - born) / 1000).toFixed(1)}秒` : '未着手'
-    const loop = loopStatsFn ? loopStatsFn() : null
-    const loopText = loop
-        ? `ループ: 発火${loop.fire} 処理${loop.done} 素通り(裏${loop.idleBg}/閉${loop.idleClosed}) 対象無${loop.noTarget} 重なり${loop.busy}`
-        : 'ループ: 不明'
-    console.log(`🧪[新着サムネ] lv${(card && card.id) || '?'} アイコンで出現→表示まで `
-        + `${((shown - born) / 1000).toFixed(1)}秒`
-        + `（種=${img.dataset.bornSource || '?'} tick=${tick} 追撃=${img.dataset.chase || '未実行'} 経路=${img.dataset.firstShownBy || '?'}）`
-        + `\n            ${loopText}`)
-}
-
-// 🧪診断（確認後に撤去）: サムネループの稼働状況を取りにいくためのフック。
-// UpdateManager 側の数字を、表示が確定した瞬間に一緒に出したいだけの配線。
-let loopStatsFn = null
-export function setLoopStats(fn) { loopStatsFn = fn }
-
-// 🧪診断（確認後に撤去）: プリロードの結末を数える。
-// 「サムネが出ない」時に、取得が始まっていないのか・失敗しているのか・返ってこないのかを
-// 区別できないと原因に辿り着けない。表示状態のスナップショットだけでは、
-// **撮った瞬間にまだ読み込み中**なのか**失敗して止まっている**のかが見分けられない。
-const thumbProbe = {
-    started: 0,      // プリロード開始
-    ok: 0,           // 1回で読めた
-    crossFail: 0,    // crossOrigin で失敗（②ON時のみ発生しうる）
-    plainOk: 0,      // 平文で読み直して成功
-    plainFail: 0,    // 平文でも失敗（＝本当に取れていない）
-    ingestTimeout: 0,// ②への給餌が上限内に返らず打ち切った
-    skipTtl: 0,      // TTL でスキップ
-    skipBackoff: 0,  // バックオフでスキップ
-    noUrl: 0,        // 取得URLが決まらず静止サムネ経路へ
-}
-export function getThumbProbeStats() {
-    return { ...thumbProbe, feedEnabled: !!(animThumbFeed && animThumbFeed.isEnabled()) }
-}
 
 /**
  * 給餌が時間内に返らなかったら1回だけ警告する（鳴る罠）。
@@ -598,7 +529,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             const { nextUrl, key } = computeNext(info)
             if (!nextUrl) {
-                thumbProbe.noUrl++ // 🧪診断
                 syncStaticThumb(img) // 更新対象外の番組は、ここだけが静止サムネを出す経路
                 continue
             }
@@ -607,7 +537,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             if (!force) {
                 const lastSuccessAt = Number(img.dataset.lastSuccessAt || 0)
                 if (img.dataset.key === key && lastSuccessAt && (now - lastSuccessAt) < thumbnailTtlMs) {
-                    thumbProbe.skipTtl++ // 🧪診断
                     continue
                 }
             }
@@ -615,12 +544,11 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // バックオフ: 失敗が続いている間は次回許可時刻までスキップ
             if (!force) {
                 const nextTryAt = Number(img.dataset.nextTryAt || 0)
-                if (nextTryAt && now < nextTryAt) { thumbProbe.skipBackoff++; continue } // 🧪診断
+                if (nextTryAt && now < nextTryAt) continue
             }
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
             pendingImages++
-            thumbProbe.started++ // 🧪診断
             const urlForAttempt = key.startsWith('u|') ? appendCacheParam(nextUrl, now) : nextUrl
             // 成功時の共通処理（表示差替え＋成功記録）。
             // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
@@ -631,12 +559,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 img.dataset.errors = '0'
                 img.dataset.nextTryAt = '0'
                 img.dataset.lastSuccessAt = String(Date.now())
-                // 🧪診断（確認後に撤去）: 初回表示の時刻。bornAt との差が「出現→サムネが出るまで」。
-                if (!img.dataset.firstShownAt) {
-                    img.dataset.firstShownAt = String(Date.now())
-                    img.dataset.firstShownBy = 'loop'
-                    reportNewCardLatency(img)
-                }
                 // 静止imgは「ライブサムネ」を表示中。動くサムネの末尾スロット判定に使う
                 // （error フォールバックで固定画像/loading.gif になっていない印）。
                 img.dataset.thumbLive = '1'
@@ -655,7 +577,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             if (feeding) pre.crossOrigin = 'anonymous'
             pre.onload = () => {
                 pendingImages--
-                thumbProbe.ok++ // 🧪診断
                 if (feeding) {
                     // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
                     // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
@@ -668,7 +589,6 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                     const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
                     const guard = setTimeout(() => {
                         if (done) return
-                        thumbProbe.ingestTimeout++ // 🧪診断
                         warnIngestStall()
                         show(null)
                     }, animIngestWaitMaxMs)
@@ -684,15 +604,13 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             pre.onerror = () => {
                 if (feeding) {
                     // crossOriginで失敗 → 表示だけは平文で確保（②へは渡さない）。pendingは平文側で解消。
-                    thumbProbe.crossFail++ // 🧪診断
                     const plain = new Image()
-                    plain.onload = () => { pendingImages--; thumbProbe.plainOk++; applySuccess(null); maybeSettled() } // 🧪診断
-                    plain.onerror = () => { pendingImages--; thumbProbe.plainFail++; applyBackoff(); maybeSettled() } // 🧪診断
+                    plain.onload = () => { pendingImages--; applySuccess(null); maybeSettled() }
+                    plain.onerror = () => { pendingImages--; applyBackoff(); maybeSettled() }
                     plain.src = urlForAttempt
                     return
                 }
                 pendingImages--
-                thumbProbe.plainFail++ // 🧪診断（②OFF時はここが唯一の失敗経路）
                 applyBackoff()
                 maybeSettled()
             }

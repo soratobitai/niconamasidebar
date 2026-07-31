@@ -1,7 +1,7 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, resolveLiveThumbnailBaseUrl, getThumbProbeStats, setLoopStats } from '../render/sidebar.js';
+import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
@@ -28,8 +28,6 @@ export class UpdateManager {
         this.options = options;
         this.elems = elems;
         this.loadingImageURL = loadingImageURL;
-        // 🧪診断（確認後に撤去）: 新着カードの記録にループの稼働状況を添えるための配線
-        try { setLoopStats(() => ({ fire: 0, done: 0, idleBg: 0, idleClosed: 0, noTarget: 0, busy: 0, ...(this._loopCounts || {}) })); } catch (_e) { /* noop */ }
 
         // 重複実行防止フラグ
         this.isPerformingManualUpdate = false;
@@ -250,14 +248,12 @@ export class UpdateManager {
      * 次の期限にすることで表現される。タイマーの本数とは無関係なので、1本のループでも保たれる。
      */
     async _thumbTick() {
-        const _t0 = Date.now(); // 🧪診断
         this._thumbLoopTimer = null; // 自分は発火済み
         if (this._thumbLoopStopped) return;
         // 先行の tick が await 中なら重ねない。重なると同じ番組を連続更新して暴走する。
         // （先行側が finally で必ず張り直すので、ここは何もせず戻ってよい）
-        if (this._thumbTickBusy) { this._probeLoop('skip:busy'); return; }
+        if (this._thumbTickBusy) return;
         this._thumbTickBusy = true;
-        this._probeLoop('fire');
 
         // 何もできずに素通りした回か。素通り時は「いちばん早い期限まで」で再スケジュールしてはいけない。
         // 閉じている間・背景タブの間も _thumbDueAt の期限は過去のまま残るので、
@@ -266,10 +262,10 @@ export class UpdateManager {
         let idled = false;
         try {
             // 閉じている間は更新しない（旧実装の stopThumbnailUpdate 相当。ループは生かしたまま素通り）
-            if (!this._isSidebarOpen()) { idled = true; this._probeLoop('idle:closed'); return; }
+            if (!this._isSidebarOpen()) { idled = true; return; }
             // 背景タブは rAF が止まり onSettled が来ない＝更新しても1枚も反映できない。
             // ガード40秒の空回しを避けるため素通りする。前景復帰後の一斉更新は performManualUpdate が担う。
-            if (this._isBackgroundTab()) { idled = true; this._probeLoop('idle:background'); return; }
+            if (this._isBackgroundTab()) { idled = true; return; }
 
             this._syncThumbDueAt(); // カードの増減を期限表へ反映
 
@@ -280,19 +276,12 @@ export class UpdateManager {
                 if (this._thumbInFlight.has(id)) continue; // 取得中の番組は選ばない
                 if (due <= now && due < oldest) { oldest = due; target = id; }
             }
-            if (target === null) { this._probeLoop('no-target'); return; }
+            if (target === null) return;
 
             const container = document.getElementById('liveProgramContainer');
             const card = container ? document.getElementById(target) : null;
             if (!container) { idled = true; return; } // コンテナごと消えている＝様子見
             if (!card || !container.contains(card)) { this._thumbDueAt.delete(target); return; }
-
-            // 🧪診断（確認後に撤去）: このカードにループが到達した時刻。
-            // 「追撃が走らなかった」時に、ループが選んでいないのか・選んだ上で弾かれたのかを分ける。
-            try {
-                const _im = card.querySelector && card.querySelector('.program_thumbnail_img');
-                if (_im && _im.dataset && !_im.dataset.tickAt) _im.dataset.tickAt = String(Date.now());
-            } catch (_e) { /* noop */ }
 
             // 🔴 **ここで完了を待たないこと。**
             //
@@ -307,15 +296,11 @@ export class UpdateManager {
             // 各番組の期限は**その番組の取得が終わった時点＋20秒**で置き直す。これはこの下の
             // 完了ハンドラの仕事であり、ループ全体が止まる必要はない。
             this._thumbInFlight.add(target);
-            const _tc = Date.now(); // 🧪診断
             (async () => {
                 try {
                     await this._fetchLiveThumbIfPendingYoung(target); // A1統合（空＆若い番組だけ詳細API追撃）
-                    const _tu = Date.now(); // 🧪診断
                     await this._updateOneThumbnailAndWait(target);    // <img>更新（この番組の読み込み完了まで）
-                    // 🧪診断: 所要が「追撃」なのか「画像の取得」なのか、ここでしか分けられない
-                    this._probeLoop(`done id=${target} 追撃=${((_tu - _tc) / 1000).toFixed(1)}s 取得=${((Date.now() - _tu) / 1000).toFixed(1)}s`);
-                } catch (_e) { this._probeLoop(`error id=${target}`); }
+                } catch (_e) { /* 個別失敗は無視して次へ */ }
                 this._thumbInFlight.delete(target);
                 // 「完了した時点」から次の期限を数え直す＝作業時間ぶん自然にドリフトする。
                 // カードが消えていたら期限も消す（復活時は _syncThumbDueAt が配り直す）。
@@ -332,10 +317,7 @@ export class UpdateManager {
             this._thumbTickBusy = false;
             // 素通りした回は必ず1周期空ける（上の idled のコメント参照）。
             // 処理できた回だけ「いちばん早い期限まで」で詰める＝期限切れが複数あれば連続で捌ける。
-            const _next = idled ? this._currentThumbCycleMs() : this._thumbNextDelayMs();
-            // 🧪診断: tick 全体で何秒使い、次を何秒後に張ったか。ここが空くならスケジュール側の問題
-            this._probeLoop(`end 所要=${((Date.now() - _t0) / 1000).toFixed(1)}s 次=${(_next / 1000).toFixed(1)}s後`);
-            this._scheduleThumbTick(_next);
+            this._scheduleThumbTick(idled ? this._currentThumbCycleMs() : this._thumbNextDelayMs());
         }
     }
 
@@ -372,35 +354,21 @@ export class UpdateManager {
      * @param {string} id 番組ID（数値文字列・lvなし）
      */
     async _fetchLiveThumbIfPendingYoung(id) {
-        // 🧪診断（確認後に撤去）: 追撃が「走ったのか・弾かれたのか・当たったのか」を
-        // そのカードに残す。新着カードがアイコンのままになる時、ここが弾かれているのか
-        // 詳細APIが空を返しているのかで原因がまったく違う。
-        const mark = (v) => {
-            try {
-                const el = document.getElementById(String(id));
-                const im = el && el.querySelector ? el.querySelector('.program_thumbnail_img') : null;
-                if (im && im.dataset) im.dataset.chase = v;
-            } catch (_e) { /* noop */ }
-        };
         const infos = getProgramInfosFromStorage();
-        if (!Array.isArray(infos)) { mark('skip:storage無'); return; }
+        if (!Array.isArray(infos)) return;
         const info = infos.find((i) => i && i.id === `lv${id}`);
-        if (!info || info.providerType !== 'user' || info.isMemberOnly) { mark('skip:対象外'); return; }
+        if (!info || info.providerType !== 'user' || info.isMemberOnly) return;
         const hasLive = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle;
-        if (hasLive || info.thumbnailUrl) { mark('skip:URL既取得'); return; } // 既にライブサムネあり＝追撃不要
+        if (hasLive || info.thumbnailUrl) return; // 既にライブサムネあり＝追撃不要
         // beginAt ゲート：開始から newProgramFastPollMs 以内の若い番組だけ追撃（古い/不明は追わない）
         const beginAt = info.onAirTime && info.onAirTime.beginAt;
         const startMs = beginAt ? Date.parse(beginAt) : NaN;
-        if (!Number.isFinite(startMs) || (Date.now() - startMs) >= newProgramFastPollMs) { mark('skip:若さゲート'); return; }
-        const _t0 = Date.now(); // 🧪診断
+        if (!Number.isFinite(startMs) || (Date.now() - startMs) >= newProgramFastPollMs) return;
         try {
             const detail = await fetchProgramInfo(id);
-            if (!detail) { mark(`失敗(${((Date.now() - _t0) / 1000).toFixed(1)}s)`); return; }
+            if (!detail) return;
             const ss = detail.liveScreenshotThumbnailUrls;
             const cand = (ss && (ss.middle || ss.large || ss.small)) || '';
-            // 🧪診断: 詳細APIが「まだスクショを持っていない」のか「取れた」のかを分ける。
-            // 前者なら待つしかない（ニコ生側の都合）、後者なら以降は拡張側の問題。
-            mark(`${isLiveScreenshotUrl(cand) ? '取得' : '詳細APIも空'}(${((Date.now() - _t0) / 1000).toFixed(1)}s)`);
             if (isLiveScreenshotUrl(cand)) {
                 // await を跨いだ stale スナップショットの全置換だと、その間にスクレイプが入れた最新の
                 // 視聴者数等を巻き戻す(lost update)。サムネ欄だけを最新レコードに再read→マージする。
@@ -562,13 +530,6 @@ export class UpdateManager {
                 this.updateThumbnail(true, () => { clearTimeout(guard); finish(); });
             });
 
-            // 🧪診断（確認後に撤去）: 2回撮る。
-            // ⚠️ 1回目だけでは判断できない。force 一斉更新は**実測15秒級**（doc/09 項目AC-1）なので、
-            //    3秒後の写真は「まだ読み込み中」と「失敗して止まっている」を区別できない。
-            //    最初の診断はこれで全件が異常に見え、危うく誤診するところだった。
-            setTimeout(() => this._dumpThumbDiagnostics('押した3秒後'), 3000);
-            setTimeout(() => this._dumpThumbDiagnostics('押した40秒後'), 40000);
-
             // 最低1秒のローディング時間を確保して終了（自分が持ち主の時だけ）
             if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
 
@@ -581,104 +542,6 @@ export class UpdateManager {
             if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
         } finally {
             this.isPerformingManualUpdate = false;
-        }
-    }
-
-    /**
-     * 🧪診断（確認後に撤去）: サムネ表示状態の一括ダンプ。
-     *
-     * 「更新ボタンを押しても出ないが、ページ再読込では出る」がどの段で滑っているかを、
-     * コマンド入力なしで1回のボタン押下から特定するためのもの。判断に要る材料だけを出す:
-     *   store   … storage が持っているURL（＝ページ再読込で出る絵）。空ならURL未取得
-     *   img     … いま <img> が出している絵
-     *   出現→表示 … カードが現れてからサムネが出るまでの秒数（本来の目的の実測値）
-     *   経路    … direct（その場更新の直接表示）か loop（サムネ更新ループ）か
-     *   err/次retry/最終成功/live … プリロード経路の内部状態
-     */
-    /**
-     * 🧪診断（確認後に撤去）: サムネループの出来事をそのまま記録する（判断はしない）。
-     *
-     * 状態のスナップショットだけでは「取得が遅い」のか「tick が発火していない」のかが分からない。
-     * 判定式で当てにいって2回外している（blob URL を不一致と数える等）ので、ここでは**事実だけ**残す。
-     */
-    _probeLoop(event) {
-        if (!this._loopProbe) this._loopProbe = [];
-        this._loopProbe.push({ t: Date.now(), event });
-        if (this._loopProbe.length > 60) this._loopProbe.shift();
-        // 集計も同時に持つ。新着カードの表示が確定した瞬間に「ループがそもそも動いていたか」を
-        // 一緒に出すため（1行の記録だけで、期限の問題か素通りの問題かを分けたい）。
-        const c = this._loopCounts || (this._loopCounts = { fire: 0, done: 0, idleBg: 0, idleClosed: 0, noTarget: 0, busy: 0 });
-        if (event === 'fire') c.fire++;
-        else if (event.startsWith('done')) c.done++;
-        else if (event === 'idle:background') c.idleBg++;
-        else if (event === 'idle:closed') c.idleClosed++;
-        else if (event === 'no-target') c.noTarget++;
-        else if (event === 'skip:busy') c.busy++;
-    }
-
-    _dumpThumbDiagnostics(label) {
-        try {
-            const container = document.getElementById('liveProgramContainer');
-            if (!container) return;
-            const infos = getProgramInfosFromStorage() || [];
-            const byId = new Map(infos.map((i) => [i.id, i]));
-            const now = Date.now();
-            // ⚠️ 比較から `?cache=` を外す。ここを外さないと「ループが付けたキャッシュバスター」と
-            //    「URLが違う」を区別できず、全件が異常に見える（最初の診断で実際にそうなった）。
-            const bare = (u) => String(u || '').replace(/[?&]cache=\d+/, '');
-            const secs = (t) => (t ? ((now - Number(t)) / 1000).toFixed(1) + 's' : '-');
-            const rows = [];
-            for (const card of Array.from(container.children)) {
-                if (!card || !card.id || typeof card.querySelector !== 'function') continue;
-                const img = card.querySelector('.program_thumbnail_img');
-                if (!img) continue;
-                const info = byId.get(`lv${card.id}`);
-                const store = info ? (resolveLiveThumbnailBaseUrl(info) || info.thumbnailUrl || '') : '';
-                const born = Number(img.dataset.bornAt || 0);
-                const shown = Number(img.dataset.firstShownAt || 0);
-                const due = this._thumbDueAt.get(card.id);
-                rows.push({
-                    id: card.id,
-                    type: info ? info.providerType : 'no-store',
-                    hasStoreUrl: !!store,
-                    // ⚠️ blob URL は「動くサムネのコマを表示中」＝正常（項目AV）。
-                    //    これを storage のURLと突き合わせると**必ず不一致**になり、正常なカードが
-                    //    全部異常に見える（最初の版で実際にそうなり、19件中19件が要調査になった）。
-                    isFrame: /^blob:/.test(String(img.src)),
-                    match: /^blob:/.test(String(img.src)) || (!!store && bare(img.src) === bare(store)),
-                    showingIcon: !/^blob:/.test(String(img.src))
-                        && !/screenshot|listing-thumbnail/.test(String(img.src)),
-                    firstShown: born && shown ? ((shown - born) / 1000).toFixed(1) + 's' : (born ? 'NEVER' : '-'),
-                    by: img.dataset.firstShownBy || '-',
-                    live: img.dataset.thumbLive || '(unset)',
-                    err: img.dataset.errors || '0',
-                    retryIn: img.dataset.nextTryAt && Number(img.dataset.nextTryAt) > now
-                        ? ((Number(img.dataset.nextTryAt) - now) / 1000).toFixed(0) + 's' : '-',
-                    lastOk: secs(img.dataset.lastSuccessAt),
-                    dueIn: due ? ((due - now) / 1000).toFixed(0) + 's' : 'none',
-                });
-            }
-            const st = getThumbProbeStats();
-            // 🔴 console.table はコピペすると崩れる（利用者環境で実際に列が落ちた）。**平文で出す。**
-            const line = (r) => `  ${r.id} ${r.type.padEnd(7)} 絵=${r.isFrame ? 'コマ' : (r.showingIcon ? 'アイコン' : 'URL')}`
-                + ` match=${r.match ? 'Y' : 'N'} shown=${r.firstShown}/${r.by} live=${r.live} err=${r.err}`
-                + ` retry=${r.retryIn} lastOk=${r.lastOk} due=${r.dueIn}`;
-            const overdue = rows.filter((r) => r.dueIn !== 'none' && r.dueIn.startsWith('-'));
-            const probe = (this._loopProbe || []).map((e) => `  -${((now - e.t) / 1000).toFixed(1)}s ${e.event}`);
-            const out = [
-                `🧪[サムネ診断/${label}] カード${rows.length}件 / アイコンのまま${rows.filter((r) => r.showingIcon).length}件`
-                + ` / 期限切れ${overdue.length}件`,
-                `  動くサムネ=${st.feedEnabled ? 'ON' : 'OFF'}  プリロード: 開始${st.started} 成功${st.ok}`
-                + ` / CORS失敗${st.crossFail}→平文成功${st.plainOk}・平文も失敗${st.plainFail}`
-                + ` / 給餌打切${st.ingestTimeout} / skip(TTL${st.skipTtl} backoff${st.skipBackoff} URL無${st.noUrl})`,
-                '  --- ループの出来事（新しいものが下・カッコ内は何秒前か） ---',
-                ...(probe.length ? probe : ['  (記録なし)']),
-                '  --- 全件 ---',
-                ...rows.map(line),
-            ].join('\n');
-            console.log(out);
-        } catch (e) {
-            console.warn('🧪[サムネ診断] 失敗:', e);
         }
     }
 
