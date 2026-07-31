@@ -30,8 +30,18 @@ function openDB() {
                 db.createObjectStore(STORE, { keyPath: 'id' })
             }
         }
-        req.onsuccess = () => resolve(req.result)
+        req.onsuccess = () => {
+            const db = req.result
+            // 🔴 **別タブがバージョンを上げようとしたら接続を手放すこと。**
+            // 掴んだままだと相手の open が blocked で止まり、こちらの読み書きも道連れになる。
+            // 利用者は視聴ページを複数タブ開くので、ここは現実に起きうる（doc/09 項目BA）。
+            db.onversionchange = () => { try { db.close() } catch (_e) { /* noop */ } dbPromise = null }
+            db.onclose = () => { dbPromise = null }
+            resolve(db)
+        }
         req.onerror = () => reject(req.error)
+        // onblocked を拾わないと、**どちらのハンドラも呼ばれずこの Promise が永久に未解決**になる。
+        req.onblocked = () => reject(new Error('IndexedDB open blocked'))
     })
     // 失敗時は次回リトライできるよう promise をリセット
     dbPromise.catch(() => { dbPromise = null })
@@ -71,6 +81,11 @@ export async function loadFrames(id) {
             const req = tx.objectStore(STORE).get(id)
             req.onsuccess = () => resolve(req.result || null)
             req.onerror = () => reject(req.error)
+            // ⚠️ トランザクションが中断した時（別タブのバージョン変更・接続断など）は
+            // req のハンドラが**どちらも呼ばれない**。ここを拾わないと Promise が永久に未解決になり、
+            // 呼び出し元（ensureHydrated → 給餌）が返らなくなる（doc/09 項目BA）。
+            tx.onabort = () => reject(tx.error || new Error('tx aborted'))
+            tx.onerror = () => reject(tx.error || new Error('tx error'))
         })
     } catch (_e) {
         return null

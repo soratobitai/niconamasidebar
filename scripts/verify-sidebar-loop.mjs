@@ -458,6 +458,32 @@ async function newProgramThumb() {
         h.restore()
     }
 
+    // --- ③ 動くサムネへの給餌が返ってこなくても、静止サムネの表示は止まらない ---
+    {
+        const sb = await import(new URL('../src/render/sidebar.js', import.meta.url).href)
+        const { animIngestWaitMaxMs } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [apiProgram({ id: 'lv888', beginAtMs: T })]
+        await run()
+        const img = h.dom.getById('888').querySelector('.program_thumbnail_img')
+        img.src = 'https://old/thumb.jpg'   // 前の絵を表示中ということにする
+
+        // 給餌フックが**永久に返らない**（IndexedDB が応答しない環境の再現）
+        sb.setAnimThumbnailFeed({ isEnabled: () => true, ingest: () => new Promise(() => {}) })
+        try {
+            await new Promise((resolve) => um.updateThumbnail(true, resolve))
+            await sleep(animIngestWaitMaxMs + 200)
+            check('AZ ③ 🔴 給餌が返らなくても静止サムネは表示される（更新ボタンが効かない事故の防止）',
+                img.src.includes('/screenshot/'), img.src)
+        } finally {
+            sb.setAnimThumbnailFeed(null)
+            h.restore()
+        }
+    }
+
     // --- ② notifybox だけの新番組も storage に載る（＝ライブサムネの追撃が始められる） ---
     {
         const h = buildRenderHarness({ programsSort: 'newest' })

@@ -228,6 +228,25 @@ export function createElement(tag = 'div') {
     return el
 }
 
+/**
+ * `new Image()`（サムネのプリロード）のモック。
+ *
+ * `src` を入れると次のタスクで onload を呼ぶ。`globalThis.__mockImageFail(url)` が真を返す時だけ
+ * onerror を呼ぶ。サムネ更新ループはこのプリロードの成否で分岐するので、これが無いと
+ * **表示経路を高速検証で一切通せない**（e2e でしか触れない領域になり、壊しても気付けない）。
+ */
+class MockImage {
+    constructor() { this.onload = null; this.onerror = null; this.crossOrigin = null; this._src = '' }
+    get src() { return this._src }
+    set src(v) {
+        this._src = String(v)
+        setTimeout(() => {
+            const fail = typeof globalThis.__mockImageFail === 'function' && globalThis.__mockImageFail(this._src)
+            if (fail) { if (this.onerror) this.onerror() } else if (this.onload) this.onload()
+        }, 0)
+    }
+}
+
 export function createDocumentFragment() {
     const f = createElement('#fragment')
     f._isFragment = true
@@ -241,6 +260,7 @@ export function createDocumentFragment() {
 export function installMockDom() {
     const prevDocument = globalThis.document
     const prevRaf = globalThis.requestAnimationFrame
+    const prevImage = globalThis.Image
     const prevCaf = globalThis.cancelAnimationFrame
 
     const root = createElement('body')
@@ -275,6 +295,8 @@ export function installMockDom() {
         removeEventListener: () => {},
     }
 
+    globalThis.Image = MockImage
+
     const rafIds = new Set()
     globalThis.requestAnimationFrame = (fn) => {
         const t = setTimeout(() => { rafIds.delete(t); fn(Date.now()) }, 0)
@@ -296,6 +318,7 @@ export function installMockDom() {
             rafIds.clear()
             globalThis.document = prevDocument
             globalThis.requestAnimationFrame = prevRaf
+            globalThis.Image = prevImage
             globalThis.cancelAnimationFrame = prevCaf
         },
     }

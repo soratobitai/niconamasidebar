@@ -47,6 +47,13 @@ export const autoNextCountdownMs = 10000; // 10秒
 // 更新間隔（30〜180秒）が変わっても手触りが揃うよう、係数は α = 1 - exp(-Δt/τ) で時間から計算する。
 export const momentumTauMs = 180000; // 3分
 
+// 静止サムネの表示が「動くサムネへの給餌」の完了を待つ上限。
+// 🔴 **表示を②（動くサムネ）に依存させないための上限であって、性能調整ではない。**
+// ②は IndexedDB を触るため、別タブとの競合などで応答が返らないことがありうる。返らないと
+// applySuccess が呼ばれず、**そのカードのサムネがページ再読込まで固まる**（doc/09 項目BA）。
+// 間に合わなければURL表示へ倒す。②のコマ化は裏で続くので、次の周期で追いつく。
+export const animIngestWaitMaxMs = 2000; // 2秒
+
 // 動くサムネ（ホバー中のみ）関連
 export const animatedThumbnailFrameCount = 5;            // 保持する直近フレーム数（リングバッファ）
 export const animatedThumbnailCaptureIntervalMs = 20000; // 定期メンテ(消えた番組のバッファ解放)周期。フレーム取得は①給餌へ一本化済み

@@ -1,4 +1,4 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { initialMomentum, totalEngagement } from '../utils/momentum.js'
 
@@ -312,6 +312,23 @@ let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
 
 /**
+ * 給餌が時間内に返らなかったら1回だけ警告する（鳴る罠）。
+ *
+ * 上限で倒しているので**表示は無事**だが、②のコマ化が詰まっているサインではある。
+ * 黙って倒すと「動くサムネだけ動かない」に気付けないので、1回だけ鳴らす。
+ */
+let ingestStallWarned = false
+function warnIngestStall() {
+    if (ingestStallWarned) return
+    ingestStallWarned = true
+    console.warn(
+        `[サムネ] 動くサムネへの給餌が ${animIngestWaitMaxMs}ms 以内に返りませんでした。`
+        + '静止サムネはURLで表示します（表示は無事）。動くサムネのコマが貯まらない場合は'
+        + ' IndexedDB（別タブとの競合など）を疑ってください。'
+    )
+}
+
+/**
  * 静止サムネの表示を確定する。②から画像を受け取れた時はそれを出し、無ければ取得URLを出す。
  *
  * 🔴 **②ON時に URL で表示し直さないこと。** 同じURLでも別リクエストになるため、2回の取得の間に
@@ -530,10 +547,22 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                     // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
                     // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
                     // 表示確定が toBlob のぶん数十ms遅れるが、pending/settled はここで先に解消しておく。
+                    //
+                    // 🔴 **表示を②の完了に依存させないこと。** ②は IndexedDB を触るので、別タブとの
+                    // 競合などで応答が返らないことがありうる。返らないと applySuccess が呼ばれず、
+                    // **そのカードのサムネがページ再読込まで固まる**（更新ボタンも効かない＝doc/09 項目BA）。
+                    // 上限を切ってURL表示へ倒す。②のコマ化は裏で続くので次の周期で追いつく。
+                    let done = false
+                    const show = (frame) => { if (!done) { done = true; applySuccess(frame) } }
+                    const guard = setTimeout(() => {
+                        if (done) return
+                        warnIngestStall()
+                        show(null)
+                    }, animIngestWaitMaxMs)
                     // Promise.resolve で包むのは、フックの実装が同期値を返しても表示が止まらないようにするため
                     Promise.resolve(animThumbFeed.ingest(card.id, pre))
-                        .then((frame) => applySuccess(frame))
-                        .catch(() => applySuccess(null))
+                        .then((frame) => { clearTimeout(guard); show(frame) })
+                        .catch(() => { clearTimeout(guard); show(null) })
                 } else {
                     applySuccess(null)
                 }
