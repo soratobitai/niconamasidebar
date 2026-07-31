@@ -16,7 +16,7 @@
 | 機能 | input name | value（ラベル） | 保存キー | 既定 | UI生成 | 反映 |
 |------|-----------|----------------|---------|------|--------|------|
 | 表示順序 | `programsSort` | `newest`(新着順)/`active`(人気順) | `programsSort` | `'newest'` | sidebar.js | onChanged＋即DOMソート |
-| 自動更新間隔 | `updateProgramsInterval` | `60`/`120`/`180`秒 | `updateProgramsInterval` | `'120'` | sidebar.js | onChanged→開いていれば `resetSidebarSchedule` |
+| 自動更新間隔 | `updateProgramsInterval` | `30`/`60`/`120`/`180`秒 | `updateProgramsInterval` | `'120'` | sidebar.js | onChanged→開いていれば `resetSidebarSchedule` |
 | オートオープン | `autoOpen` | `1`(ON)/`2`(OFF)/`3`(状態記憶) | `autoOpen` | `'3'` | sidebar.js | 初期判定（次回ロードで有効） |
 | 自動移動 | `autoNextProgram` | `on`/`off` | `autoNextProgram` | `'off'` | sidebar.js | onChanged→watcher start/stop |
 | 動くサムネ（β版） | `animatedThumbnail` | `on`/`off` | `animatedThumbnail` | `'off'` | sidebar.js | onChanged→`setAnimatedThumbnailEnabled` |
@@ -56,7 +56,7 @@
   詳細を先に storage へ upsert（`fetchFollowedProgramsViaPage` → `upsertProgramInfos`）してから、
   リストと突き合わせてカードを組み、`programsSort` でソート → カウント更新。詳細がカード生成時点で揃っているので**初回描画から人気度が確定**する。失敗時 `#api_error`。
 - **詳細取得はフロントAPIに一本化**: 従来の「1番組=詳細API×N」＋レート制限キューは廃止（`queue.js` / `ProgramInfoQueue` 削除）。フロントAPIを通常1リクエスト（100件超はページングで数リクエスト）叩いて全放送中フォロー番組の詳細を取得する。→ [04-data-flow](./04-data-flow.md) / [05-external-api](./05-external-api.md)
-- 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢60/120/180）。変更時、開いていれば `resetSidebarSchedule`。
+- 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢30/60/120/180）。変更時、開いていれば `resetSidebarSchedule`。
 
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`（比較器は `utils/programOrder.js`）。`active`=`active-point`降順（人気順）、`newest`=**`beginAt` 降順**（新着順。`data-api-index` 昇順として実装）。

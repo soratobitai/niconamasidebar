@@ -111,7 +111,7 @@
     - 新規/削除カードは `_refreshThumbSchedule()` → `_syncThumbDueAt()`（`updateSidebar` 末尾で呼ぶ）が期限表を追従させる。停止は `destroyThumbnailLoop()`（`cleanup`＝ページ離脱**のみ**。サイドバーを閉じても止めない）。
     - タブが非表示（`document.hidden`）の間は**画像更新を行わず次の期限だけ置き直す**（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う（フェーズ6）。
 
-### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で60/120/180秒）
+### 5.2 sidebar（既定 `updateProgramsInterval`＝120秒・自己再帰 setTimeout。設定で30/60/120/180秒）
 36. `startSidebarLoop()` / `_sidebarTick()` … setup で1回だけ開始する**常設ループ**。**最初の実行も1周期後**（即時ではない）。毎回 `isOpen`→期限→`isLoading()` を判定して素通りし、通れば `updateSidebar()`（notifybox＋フォローAPI）→ 最低1秒ローディング。次回期限は**この回が終わった時点＋1周期**（＝実周期は interval＋作業時間）。停止は `destroySidebarLoop()`（ページ離脱時）のみで、**閉じても止めない**（閉じている間は tick が素通りする）。**サムネ<img>の全件同時更新は撤去**（一斉感を無くすため）。サムネ反映は各番組の期限表に任せ、新規/削除カードは `updateSidebar` 末尾の `_refreshThumbSchedule` → `_syncThumbDueAt` が拾う。
     - **タブが非表示でもスキップしない**（可視ガードは 655df9c で撤去済み）。サイドバーが開いている限り裏タブでもリスト取得を続ける。`document.hidden` を見るのは 5.1 の thumbnail 側だけ。
     - **別更新が進行中(`isLoading()`)の周期もスキップ**して次回へ（手動更新との二重取得・セッション上書き防止）。

@@ -60,7 +60,8 @@
 | `#optionContainer #optionForm` | 設定フォーム本体。**`max-width:440px` ＋ `margin:0 auto`** で幅を頭打ち＆**左右中央**（サイドバーが右へ無制限に広がってもフォームは中央の読みやすい幅、ヘッダーだけ全幅） |
 | `.settings_header` / `.settings_close` | 「設定」見出し行＋閉じる `×` ボタン（× or Esc で番組リストへ戻る） |
 | `.opt-section` / `.opt-label` | 設定1項目のブロックと見出し |
-| `.opt-segment` / `.opt-segment input[type=radio]` / `.opt-segment label` | **セグメント型選択**。ラジオは `display:none`、隣接ラベルをボタン化、`input:checked + label` を `--sb-accent` で反転（name/value は従来どおりで保存ロジック無改修） |
+| `.opt-segment` / `.opt-segment input[type=radio]` / `.opt-segment label` | **セグメント型選択**（`display:flex`）。ラジオは `display:none`、隣接ラベルをボタン化、`input:checked + label` を `--sb-accent` で反転（name/value は従来どおりで保存ロジック無改修） |
+| `.opt-segment-4`（自動更新間隔の4択のみ） | 4つ横並びは狭いサイドバー幅に入らないため、この1つだけ **grid**（`repeat(auto-fit, minmax(56px,1fr))`）にする。flex のまま折り返すと**最終行の1個だけが全幅に伸びる**（実測: 幅180pxで 43/43/43/140px）。grid ならあふれた分も同じ幅で次行へ落ちる。実測の列数: サイドバー幅 180px→2列 / 260px→3列 / 300px以上→4列（既定幅360pxは1行） |
 | `.opt-title-with-help` / `.help-wrap` / `.help-icon` / `.help-tooltip` | 「?」ヘルプ（hover/focus 表示）。ツールチップは**見出し行(`position:relative`)基準・`width:100%`** でサイドバー幅内に収める（`.help-wrap` に position を付けない） |
 | `.opt-beta-badge` | 🧪 見出し横の「β版」バッジ（動くサムネ設定用の黄色い小バッジ） |
 | `input[name="sidebarTheme"]`（`.opt-segment`） | テーマ切替セグメント（`#optionForm` **末尾**） |

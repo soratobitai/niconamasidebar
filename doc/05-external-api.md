@@ -64,7 +64,7 @@
 
 ### 1-3. 呼び出し制御
 - **リスト＋詳細を毎サイクル同時取得**: `updateSidebar` が `Promise.all([fetchLivePrograms(100), _refreshDetailsViaScrape()])` を実行。取得結果は**和集合**にする（`_mergeSources`）。前者は notifybox（`data.notifybox_content`）、後者はフォロー中ページ・フロントAPI（`_refreshDetailsViaScrape` 内で `fetchFollowedProgramsViaPage` を呼ぶ）→ `upsertProgramInfos` で storage へ全件一括 upsert。
-- **周期**: `updateProgramsInterval`（既定120秒、選択肢60/120/180）ごと＋手動更新（初回ロード・更新ボタン・タブ復帰・サイドバー再オープン）。⚠️ **裏タブでもスキップしない**（`visibilitychange` ハンドラは存在しない。655df9c で撤去済み）。
+- **周期**: `updateProgramsInterval`（既定120秒、選択肢30/60/120/180）ごと＋手動更新（初回ロード・更新ボタン・タブ復帰・サイドバー再オープン）。⚠️ **裏タブでもスキップしない**（`visibilitychange` ハンドラは存在しない。655df9c で撤去済み）。
 - **キュー廃止**: 詳細はキューを使わずフロントAPIのページングで全件取得するため、レート制限・`processInterval`・`maxRequestsPerSecond`・新番組の30秒先行スキャンは**いずれも撤去済み**。API監視デバッグ（`window.apiCallCounter` / `window.showApiStats`）も撤去。番組ごとの詳細API呼び出しは**穴の補完**（`fillMissingDetails`、上限30/サイクル）に限定して残る。
 
 ---
@@ -148,7 +148,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 
 **オプションフォームの input**（`#optionForm`）:
 - `input[name="programsSort"]` = `newest`/`active`
-- `input[name="updateProgramsInterval"]` = `60`/`120`/`180`
+- `input[name="updateProgramsInterval"]` = `30`/`60`/`120`/`180`（id は値ベース: `#updateProgramsInterval30` など）
 - `input[name="autoOpen"]` = `1`(ON)/`2`(OFF)/`3`(状態記憶)
 - `input[name="autoNextProgram"]` = `on`/`off`
 
@@ -161,7 +161,7 @@ div.program_container[id=<数値ID>, active-point=<数値>]
 |------|--------|----|--------|
 | `programsSort` | `'newest'` | `newest`/`active` | optionsHandler |
 | `autoOpen` | `'3'` | `1`/`2`/`3` | optionsHandler |
-| `updateProgramsInterval` | `'120'`（秒） | `60`/`120`/`180` | optionsHandler |
+| `updateProgramsInterval` | `'120'`（秒） | `30`/`60`/`120`/`180` | optionsHandler |
 | `sidebarWidth` | `360` | 数値(px) | `setSidebarWidth`（ドラッグ確定） |
 | `sidebarTheme` | `'light'` | `dark`/`light` | `setSidebarTheme`（設定パネル末尾のテーマトグル） |
 | `isOpenSidebar` | `false` | boolean | `setIsOpenSidebar`（開閉トグル） |

@@ -606,10 +606,14 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         自動更新
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。</span></span>
                                     </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="updateProgramsInterval1" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval1">60秒</label>
-                                        <input type="radio" id="updateProgramsInterval2" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval2">120秒</label>
-                                        <input type="radio" id="updateProgramsInterval3" name="updateProgramsInterval" value="180"><label for="updateProgramsInterval3">180秒</label>
+                                    <!-- id は値ベース（旧: updateProgramsInterval1〜3 の連番）。選択肢を増やした時に
+                                         連番だと意味がずれ、検証スクリプトの「60秒に設定できた」が黙って別の値を
+                                         押すようになるため。増減しても意味が動かない値ベースにしてある。 -->
+                                    <div class="opt-segment opt-segment-4">
+                                        <input type="radio" id="updateProgramsInterval30" name="updateProgramsInterval" value="30"><label for="updateProgramsInterval30">30秒</label>
+                                        <input type="radio" id="updateProgramsInterval60" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval60">60秒</label>
+                                        <input type="radio" id="updateProgramsInterval120" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval120">120秒</label>
+                                        <input type="radio" id="updateProgramsInterval180" name="updateProgramsInterval" value="180"><label for="updateProgramsInterval180">180秒</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">

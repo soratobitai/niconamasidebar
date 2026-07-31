@@ -145,10 +145,10 @@ check('拡張が実際に動作し、差し替えたAPIの内容でカードを�
 
 // 更新間隔を最短の60秒に（既定120秒だと検証が長くなりすぎる）
 await page.click('#setting_options'); await page.waitForTimeout(500)
-await page.click('label[for="updateProgramsInterval1"]'); await page.waitForTimeout(500)
+await page.click('label[for="updateProgramsInterval60"]'); await page.waitForTimeout(500)
 await page.click('#settings_close'); await page.waitForTimeout(500)
 check('更新間隔を60秒に設定できた',
-    await page.evaluate(() => !!document.querySelector('#updateProgramsInterval1')?.checked))
+    await page.evaluate(() => !!document.querySelector('#updateProgramsInterval60')?.checked))
 
 // ============================================================
 // D3（実機版）: 閉じた状態で起動 → 開くと定期取得が動き出すか

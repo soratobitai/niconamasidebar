@@ -436,6 +436,20 @@ body.nicosidebar-light {
     user-select: none;
     transition: background 0.15s, color 0.15s;
 }
+/* 4択のセグメント（自動更新間隔: 30/60/120/180秒）だけ grid にする。
+   ラベルは white-space:nowrap なので、狭いサイドバー幅では4つ横並びが入らない。
+   flex のまま折り返すと**最終行の1個だけが全幅に伸びて**不格好になる（実測: 幅180pxで 43/43/43/140px）。
+   grid の auto-fit なら入るぶんだけ列を作り、あふれた分も同じ幅のまま次の行へ落ちる。
+   実測（サイドバー幅→列数）: 180px→2列(2×2) / 260px→3列 / 300px以上→4列（既定幅360pxは4列）。
+   2〜3択の他のセグメント（flex）には影響しない。 */
+#optionContainer .opt-segment-4 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
+}
+#optionContainer .opt-segment-4 label {
+    padding-left: 2px;
+    padding-right: 2px;
+}
 #optionContainer .opt-segment label:hover {
     background: rgba(128, 128, 128, 0.14);
 }

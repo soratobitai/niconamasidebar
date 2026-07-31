@@ -201,7 +201,7 @@ LoadingManager.js   ─> （import なし。AppState はコンストラクタ注
 
 | タイマー | 間隔 | 何をするか | 実装 |
 |---------|------|-----------|------|
-| **sidebar** | `updateProgramsInterval` 秒（既定120／設定60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager._sidebarTick`（常設ループ） → `updateSidebar` |
+| **sidebar** | `updateProgramsInterval` 秒（既定120／設定30・60・120・180） | notifybox（リスト）とフォロー中ページの公開フロントJSON API（詳細）を**並列取得**し、詳細を storage へ upsert してから DOM を差分更新＋ソート | `UpdateManager._sidebarTick`（常設ループ） → `updateSidebar` |
 | **thumbnail** | 番組ごとに独立（基準 `updateThumbnailInterval` 秒＝既定20＋その回の作業時間） | **常設ループ1本**（`_thumbLoopTimer`）＋番組ごとの期限表（`_thumbDueAt` Map: id→次に更新してよい時刻）。`_thumbTick` が期限の来た1件を更新し、**完了してから** 20秒先へ期限を置き直す＝周期20秒＋作業時間で自然ドリフト。起動は setup で1回（`startThumbnailLoop`）、停止はページ離脱のみ（`destroyThumbnailLoop`）。**サイドバーを閉じても止まらず、tick が素通りする**。空＆若い（放送開始から `newProgramFastPollMs`=3分以内）user番組だけ各サイクルで詳細APIを1回追撃（`_fetchLiveThumbIfPendingYoung`）。動くサムネ②もここでプリロードした画像から給餌 | `UpdateManager.startThumbnailLoop` → `_refreshThumbSchedule` → `_thumbTick` |
 | **autoNext**（自動移動） | イベント駆動 | 視聴中番組の終了を DOM 監視し、条件を満たせばモーダル→カウントダウン→次番組へ遷移。変更なし | `AutoNextManager.startWatcher` → `observeProgramEnd` |
 
