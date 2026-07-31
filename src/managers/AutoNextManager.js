@@ -1,5 +1,5 @@
 import { observeProgramEnd } from '../services/status.js';
-import { autoNextListWaitMaxMs } from '../config/constants.js';
+import { autoNextListWaitMaxMs, autoNextCountdownMs } from '../config/constants.js';
 
 /**
  * 自動次番組機能の管理
@@ -160,24 +160,6 @@ export class AutoNextManager {
     }
 
     /**
-     * 進行中のカウントダウンを取り消して、次の番組終了をまた検知できる状態へ戻す。
-     *
-     * ⚠️ **タイマーだけを止めてはいけない**（doc/09 項目AF）。
-     * `appState.timers.autoNext` を外から `clearTimer` するだけだと、カウントダウンは止まるが
-     * `autoNext.scheduled` が true のまま残り、モーダルも出しっぱなしになる。
-     * `scheduled` は `observeProgramEnd` のコールバック先頭で多重進入を弾く条件に使われているため、
-     * **以後そのページでは自動移動が二度と動かない**（リセットするのは stopWatcher だけで、
-     * 閉パスからは呼ばれない）。タイマー・フラグ・モーダルは必ず3点セットで戻すこと。
-     */
-    cancelScheduledNavigation() {
-        this._clearAutoNextTimer();
-        this.hideModal();
-        this.appState.autoNext.scheduled = false;
-        this.appState.autoNext.selectingNext = false;
-        this.appState.autoNext.canceled = false;
-    }
-
-    /**
      * 自動次番組への遷移をスケジュール
      * @param {string} nextHref - 遷移先URL
      * @param {Object} preview - プレビュー情報
@@ -185,8 +167,15 @@ export class AutoNextManager {
     scheduleNavigation(nextHref, preview) {
         // 既存のカウントダウンが生きていれば停止
         this._clearAutoNextTimer();
-        
-        let remaining = 10;
+
+        // 🔴 **残り時間は「期限」で持つこと。1秒ずつ引き算しないこと。**
+        // Chrome は5分以上隠れている無音タブのタイマーを1分に1回まで間引く。番組が終われば音も
+        // 止まるので、自動移動が効いてほしい場面がちょうどその条件に当てはまる。引き算方式だと
+        // 10回数えるのに最大10分かかり、戻ってきたら「3秒後に移動します」で止まって見える。
+        // 期限で持てば、間引かれても次に目が覚めた1回で期限超過を検出して遷移できる（誤差は最大1分程度）。
+        // ⚠️ `visibilitychange` で叩き起こす手もあるが、この拡張は**リスナーを1つも持たない**方針で
+        //    （verify:loop の D6 が機械で担保している）、ここで例外を作らない。
+        const deadlineAt = Date.now() + autoNextCountdownMs;
         this.appState.autoNext.canceled = false;
         
         // サムネクリックで即移動（カウントダウンを待たず nextHref へ）。タイマー停止→遷移。
@@ -198,25 +187,25 @@ export class AutoNextManager {
             try { location.assign(nextHref); } catch (_e) {}
         };
 
-        this.showModal(remaining, preview, () => {
+        this.showModal(Math.round(autoNextCountdownMs / 1000), preview, () => {
             this._clearAutoNextTimer();
             this.appState.autoNext.scheduled = true;
         }, goNow);
-        
+
         const modal = this.ensureModal();
         const countEl = modal.querySelector('#auto_next_count');
-        
+
         const timer = setInterval(() => {
-            remaining -= 1;
-            if (countEl) countEl.textContent = String(Math.max(0, remaining));
-            
+            const remainingMs = deadlineAt - Date.now();
+            if (countEl) countEl.textContent = String(Math.max(0, Math.ceil(remainingMs / 1000)));
+
             if (this.appState.autoNext.canceled) {
                 this._clearAutoNextTimer();
                 this.hideModal();
                 return;
             }
-            
-            if (remaining <= 0) {
+
+            if (remainingMs <= 0) {
                 this._clearAutoNextTimer();
                 this.hideModal();
                 if (!this.appState.autoNext.canceled) {
@@ -224,7 +213,7 @@ export class AutoNextManager {
                 }
             }
         }, 1000);
-        
+
         this.appState.setTimer('autoNext', timer);
     }
 

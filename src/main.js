@@ -353,24 +353,20 @@ const cleanup = () => {
     hideAutoNextModal();
 }
 
-// サイドバーを閉じた時に止めるもの
-//
-// サイドバー更新の常設ループはここでは止めない。閉じている間は _sidebarTick が
-// appState.sidebar.isOpen を見て素通りするので、取得は走らない（＝挙動は従来と同じ）。
-// ここで止めてしまうと、閉じた状態で起動する既定経路（main.js の handleSidebarOpenStateChange(false)）
-// でループが即死し、二度と復活しない（作り直す関数がもう無い）。
-//
-// autoNext のクリアは「閉じたら自動移動のカウントダウンも止まる」という既存挙動なので必ず残すこと。
-function stopAllTimers() {
-    // 自動移動のカウントダウンを取り消す。
-    // ⚠️ `appState.clearTimer('autoNext')` だけで済ませてはいけない。タイマーは止まっても
-    // `autoNext.scheduled` が true のまま残り、以後そのページで自動移動が二度と動かなくなる
-    // （doc/09 項目AF）。タイマー・フラグ・モーダルを3点セットで戻す必要がある。
-    if (autoNextManager) autoNextManager.cancelScheduledNavigation();
-    else appState.clearTimer('autoNext'); // Manager 未生成（初期化前）でも最低限タイマーは止める
-}
-
 // 開いたときに即時更新しつつ、各タイマーを開始
+//
+// 🔴 **閉じた時に止めるものは何も無い**（2026-07-31・利用者判断で変更。doc/09 項目AX）。
+//
+//   - 更新ループ2本（リスト／サムネ）は常設で、閉じている間は各 tick が isOpen を見て素通りする。
+//     ここで止めると、閉じた状態で起動する既定経路でループが即死して二度と復活しない。
+//   - 自動移動のカウントダウンも**止めない**。以前は閉じると取り消していたが、
+//     モーダルは body 直下にあってサイドバーの外なので、閉じてもカウントダウンは見えている。
+//     それが黙って中止されるうえ、`chrome.storage.onChanged` 経由で**別タブの開閉でも中止**されていた
+//     （視聴中のタブは何も操作していないのに止まる）。
+//
+// ⚠️ **ここに自動移動を止める処理を戻さないこと。** 戻すなら `clearTimer('autoNext')` だけでは
+//    いけない（`scheduled` が残って以後そのページで自動移動が二度と動かない＝項目AF）。
+//    verify:loop が「閉パスが autoNext に触っていないこと」を機械で見ている。
 async function handleSidebarOpenStateChange(open) {
     if (open) {
         // 更新ループ2本はどちらも常設なので「開始」は不要。閉じている間は各 tick が
@@ -394,9 +390,8 @@ async function handleSidebarOpenStateChange(open) {
                 performManualUpdate();
             }
         }, 100); // 100ms後にチェック
-    } else {
-        stopAllTimers();
     }
+    // else: 閉じた時にすることは無い（上のコメント参照）
 }
 
 // サイドバー定期取得の位相リセット（常設ループはこれで作り直されない）

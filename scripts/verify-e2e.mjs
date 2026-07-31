@@ -4,7 +4,7 @@
  *   npm run verify:e2e
  *
  * 本物の Chrome に dist/ の拡張を読ませ、視聴ページとAPIの応答だけこちらで差し替える。
- * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約9分。
+ * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約7分。
  * 検証用の一時プロファイルで起動するので、普段使いの Chrome には影響しない。
  *
  * 【前提】`npm i` 済み（playwright-core）＋ `npm run build` 済み（dist/ が最新であること）。
@@ -192,12 +192,12 @@ const cards = await page.locator('#liveProgramContainer > *').count()
 check('拡張が実際に動作し、差し替えたAPIの内容でカードを描画する', cards === PROGRAMS.length,
     `カード ${cards} 件（期待 ${PROGRAMS.length} 件）`)
 
-// 更新間隔を最短の60秒に（既定120秒だと検証が長くなりすぎる）
+// 更新間隔を最短の30秒に（既定120秒だと検証が長くなりすぎる。観測時間はこの値から逆算している）
 await page.click('#setting_options'); await page.waitForTimeout(500)
-await page.click('label[for="updateProgramsInterval60"]'); await page.waitForTimeout(500)
+await page.click('label[for="updateProgramsInterval30"]'); await page.waitForTimeout(500)
 await page.click('#settings_close'); await page.waitForTimeout(500)
-check('更新間隔を60秒に設定できた',
-    await page.evaluate(() => !!document.querySelector('#updateProgramsInterval60')?.checked))
+check('更新間隔を30秒に設定できた',
+    await page.evaluate(() => !!document.querySelector('#updateProgramsInterval30')?.checked))
 
 // ============================================================
 // D3（実機版）: 閉じた状態で起動 → 開くと定期取得が動き出すか
@@ -210,16 +210,22 @@ await page.waitForSelector('#sidebar', { state: 'attached', timeout: 20000 })
 await page.waitForTimeout(2000)
 check('D3 前提: 再読み込み後はサイドバーが閉じている', !(await isOpen()))
 
+// 観測時間は更新間隔（30秒）から逆算した値。60秒設定だった頃は 90秒/150秒 待っていた。
+//   - 閉じている間: 壊れていれば30秒間隔で1〜2回飛ぶので、45秒あれば「0回」で捕まえられる。
+//   - 開いた後: 開いた直後の手動更新のあと、およそ32秒後・64秒後に定期取得が走る（周期は
+//     「作業完了後に30秒」なので少し後ろへずれる）。80秒待てば2回そろい、余裕は約16秒。
+// ⚠️ ここを縮めるなら、必ず「何秒後に何回走るか」を数えてからにすること。余裕を削りすぎると
+//    実装は正しいのに落ちる「偽のNG」になり、検証への信頼が下がる。
 hits = []
-log('   閉じたまま 90秒 観測中…')
-await page.waitForTimeout(90000)
+log('   閉じたまま 45秒 観測中…')
+await page.waitForTimeout(45000)
 check('D3-a 閉じている間はリスト取得をしない', hits.length === 0, `リスト取得 ${hits.length} 回`)
 
 await page.click('#sidebar_button')          // 開く
 await page.waitForTimeout(3000)
 hits = []                                     // 開いた瞬間の手動更新ぶんを除外
-log('   開いてから 150秒 観測中（60秒周期なら2回前後）…')
-await page.waitForTimeout(150000)
+log('   開いてから 80秒 観測中（30秒周期なら2回前後）…')
+await page.waitForTimeout(80000)
 check('D3-b 開いた後に定期取得が動き出す（最重要）', hits.length >= 2,
     `開いた後の定期取得 ${hits.length} 回。ここが0だとループが死んでいる（例外もログも出ないので、この項目でしか気付けない）`)
 

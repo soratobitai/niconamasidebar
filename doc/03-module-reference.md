@@ -24,6 +24,8 @@
 | `thumbnailRetryMaxMs` | `60000` | サムネ再試行の最大間隔 |
 | `loadingSessionTimeoutMs` | `60000` | ローディングセッションの強制終了タイムアウト |
 | `manualThumbWaitMaxMs` | `30000` | 手動更新がサムネ反映の完了通知を待つ上限（背景タブへ回ると rAF が止まり通知が永久に来ないため。doc/09 AC-1） |
+| `autoNextListWaitMaxMs` | `15000` | 自動移動が番組終了検知後に最新リストを待つ上限。無制限だと `selectingNext` が立ったまま残り、以後そのページで自動移動が二度と動かない（doc/09 項目AU） |
+| `autoNextCountdownMs` | `10000` | 自動移動のカウントダウン。⚠️ 残り秒数は**この値と現在時刻から毎回計算**する（1秒ずつ引かない）。裏タブのタイマー間引きで10秒が最大10分に化けるため（doc/09 項目AX） |
 | `reorderFlipDurationMs` | `300` | 並べ替え FLIP アニメの時間(ms)。**0 にすれば実質無効** |
 | `animatedThumbnailFrameCount` | `5` | 🧪実験(branch)。動くサムネのリングバッファ保持枚数 |
 | `animatedThumbnailCaptureIntervalMs` | `20000` | 🧪実験。⚠️ **フレーム取得の間隔ではない**（取得は①からの給餌に一本化済み）。消えた番組のバッファを解放する**定期メンテ**の周期 |
@@ -407,8 +409,7 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 | `DOMContentLoaded` ハンドラ | `?popup=on` なら終了。`getOptions()`→`appState` へ反映→`setElems()`→`#root` 無ければ終了→**`setup()`（1回のみ）** |
 | `setup()` ★ | サイドバー挿入→`reflectOptions()`→**3 Manager（Loading/AutoNext/Update）生成**→レイアウト調整→resize/ResizeObserver/theaterボタン/更新ボタン/オプションポップアップ/サイドバーボタン/境界線ドラッグを配線→**初期開閉状態を適用**→`autoNextProgram==='on'` なら watcher 開始→`beforeunload/pagehide`で`cleanup`（⚠️ `visibilitychange` の監視は**していない**＝655df9c で撤去） |
 | `cleanup()` | `appState.cleanup()`＋`UpdateManager.destroyThumbnailLoop()`＋`destroySidebarLoop()`（更新ループ2本を停止）＋onResize解除＋モーダル閉じ |
-| `stopAllTimers()` | **自動移動のカウントダウンを取り消すだけ**（`autoNextManager.cancelScheduledNavigation()`）。更新ループ2本には触らない。⚠️ `clearTimer('autoNext')` だけで済ませないこと — タイマーは止まっても `scheduled` フラグが残り、以後そのページで自動移動が二度と動かなくなる（doc/09 項目AF） |
-| `handleSidebarOpenStateChange(open)` ★ | 開: `resetSidebarSchedule()` → `_refreshThumbSchedule()` → `performManualUpdate()` を RAF/フォールバックで実行。**ループの起動はしない**（setup で起動済み）。閉: `stopAllTimers()`＝自動移動のキャンセルのみ |
+| `handleSidebarOpenStateChange(open)` ★ | 開: `resetSidebarSchedule()` → `_refreshThumbSchedule()` → `performManualUpdate()` を RAF/フォールバックで実行。**ループの起動はしない**（setup で起動済み）。**閉: 何もしない**（2026-07-31。閉じて止まるのは2つの取得だけで、それは各 tick が `isOpen` を見て素通りする形に一本化。⚠️ ここに `clearTimer('autoNext')` を書き戻すと `scheduled` が残って自動移動が二度と動かなくなる＝項目AF。verify:loop が機械で見ている） |
 | `updateSidebar`（ラッパー） | AutoNextManager へ注入される番組終了時のリスト更新。`updateManager.updateSidebar()` の戻り値が非 null の時だけ、**自分が始めたセッションを自分で閉じる**（旧実装では誰も閉じず、定期チェーンの無条件 finish が偶然の回収役になっていた） |
 | `hideAutoNextModal`, `start/stopLiveStatusWatcher` | AutoNextManager へ委譲（`ensure/showModal`・`scheduleNavigation` は AutoNextManager が内部で直接呼ぶため main.js ラッパーは 2026-07-11 整理で削除） |
 | `chrome.storage.onChanged` リスナー ★ | 設定変更を `options` に反映し、`isOpenSidebar`→開閉処理、`updateProgramsInterval`→タイマー再起動、`autoNextProgram`→watcher開始/停止 |
@@ -423,5 +424,5 @@ IndexedDB(`niconamasidebar`/`animFrames`, keyPath:`id`) に blob をそのまま
 ### 設定パネルの表示（setup内）
 `#setting_options`（歯車）クリックで `.sidebar_body` に `.show-settings` をトグル → **番組リストと設定を入れ替え**（CSSで `#liveProgramContainer`/`#api_error` を隠し `#optionContainer` を表示）。設定内の `#settings_close`（×）または Esc で番組リストへ戻る。ポップアップの `placePopup`/`onDocClick` 等は廃止。
 
-> ✅ 死んでいた `clearTimer('queueRestart')`（未宣言キー）は `stopAllTimers` から削除済み（2026-07-11）。
+> ✅ 死んでいた `clearTimer('queueRestart')`（未宣言キー）は `stopAllTimers` から削除済み（2026-07-11）。その `stopAllTimers` 自体も、閉じた時に止めるものが無くなったため撤去した（2026-07-31・項目AX）。
 > ✅ `AppState.handlers` に `reloadBtn` を宣言追加したため、更新ボタンの `setHandler('reloadBtn', ...)` が実効化（2026-07-11）。

@@ -663,16 +663,30 @@ async function r7() {
     check('R-7 サイドバーループに再武装の入口がある', /_sidebarLoopStopped/.test(resetFn))
     check('R-7 サムネループにも再武装の入口がある', /_thumbLoopStopped/.test(refreshFn))
 
-    // --- 自動移動を「タイマーだけ」殺していないか ---
-    const stopAll = mainSrc.slice(mainSrc.indexOf('function stopAllTimers()'), mainSrc.indexOf('function stopAllTimers()') + 800)
-    check('R-7 閉パスが自動移動をタイマーだけ殺していない（フラグとモーダルも戻す）',
-        /cancelScheduledNavigation\(\)/.test(stopAll),
-        'タイマーだけ clearTimer すると scheduled が残り、以後そのページで自動移動が動かなくなる')
+    // --- 閉パスが自動移動に触っていないか（項目AX で「閉じても止めない」へ変更した） ---
+    // 旧: 閉じると cancelScheduledNavigation で取り消していた。その時の不変条件は
+    //     「タイマーだけ殺すな（scheduled が残ると以後動かない＝項目AF）」だった。
+    // 今: そもそも触らないのが正。**うっかり clearTimer('autoNext') を書き戻すと項目AF が再発する**ので、
+    //     触っていないこと自体を機械で見る。終端は実際の文字列でアンカーする（固定幅で切らない）。
+    const openFnStart = mainSrc.indexOf('async function handleSidebarOpenStateChange(open)')
+    const openFn = mainSrc.slice(openFnStart, mainSrc.indexOf('\n}', mainSrc.indexOf('// else: 閉じた時にすることは無い', openFnStart)))
+    check('R-7 閉パスが自動移動のカウントダウンに触らない（閉じても止めない）',
+        !/clearTimer\(['"]autoNext['"]\)/.test(openFn) && !/cancelScheduledNavigation/.test(openFn),
+        'タイマーだけ clearTimer すると scheduled が残り、以後そのページで自動移動が動かなくなる（項目AF）')
+    check('R-7 閉パスの中身が空（閉じて止めるものはループ側の素通りに一本化）',
+        /else: 閉じた時にすることは無い/.test(openFn))
 
+    // --- 停止経路（stopWatcher）は3点セットで戻すか ---
     const anm = rd('managers/AutoNextManager.js')
-    const cancelFn = anm.slice(anm.indexOf('cancelScheduledNavigation() {'), anm.indexOf('cancelScheduledNavigation() {') + 500)
-    check('R-7 取り消しがタイマー・フラグ・モーダルの3点を戻す',
-        /_clearAutoNextTimer\(\)/.test(cancelFn) && /hideModal\(\)/.test(cancelFn) && /scheduled = false/.test(cancelFn))
+    const stopFn = anm.slice(anm.indexOf('stopWatcher() {'), anm.indexOf('\n    }', anm.indexOf('stopWatcher() {')))
+    check('R-7 監視停止はタイマー・フラグ・モーダルの3点を戻す',
+        /_clearAutoNextTimer\(\)/.test(stopFn) && /hideModal\(\)/.test(stopFn) && /scheduled = false/.test(stopFn))
+
+    // --- カウントダウンが「期限」で持たれているか（裏タブの間引き対策） ---
+    const schedFn = anm.slice(anm.indexOf('scheduleNavigation(nextHref, preview) {'), anm.indexOf('startWatcher('))
+    check('R-7 カウントダウンが期限(Date.now)で計算されている（1秒ずつ引き算しない）',
+        /deadlineAt/.test(schedFn) && /Date\.now\(\)/.test(schedFn) && !/remaining -= 1/.test(schedFn),
+        '引き算方式だと裏タブの間引き（1分に1回）で10秒が最大10分に化ける')
 }
 
 /**

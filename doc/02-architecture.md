@@ -38,7 +38,7 @@
    `_thumbDueAt` / `_sidebarNextDueAt`、`LoadingManager.sessionTimeoutTimer`、
    `animatedThumbnail` の `buffers` / `enabled`）
 
-   更新ループ2本を `AppState.timers` に載せると `stopAllTimers` / `cleanup` から外部に殺され、
+   更新ループ2本を `AppState.timers` に載せると `cleanup` から外部に殺され、
    **閉じた瞬間に復活不能**になる。だから外に出した。その代わり所有者には義務がある。
 
    - **`destroy()` 相当を公開し、`main.js` の `cleanup()` から明示的に呼ぶ**

@@ -50,7 +50,7 @@
 ### 初期開閉の分岐（心臓部）
 22. `shouldOpenAtStart = (autoOpen=='1') || (autoOpen=='3' && isOpenSidebar)`
     - **開く**: UIを即 `openSidebar()` → rAF2段でレイアウト → **`setTimeout(()=>handleSidebarOpenStateChange(true), 300)`**（データ取得は300ms遅延＝初期ページ描画を妨げない）。← **初回データ取得の実質トリガ**
-    - **閉じる**: `closeSidebar()` → `handleSidebarOpenStateChange(false)` → `stopAllTimers()`（**閉じている間はタイマーもデータ取得も走らない**）。
+    - **閉じる**: `closeSidebar()` → `handleSidebarOpenStateChange(false)`（**何もしない**。閉じている間はリスト取得とサムネ更新の各 tick が `isOpen` を見て素通りする＝ループは生かしたまま。自動移動のカウントダウンは 2026-07-31 から**閉じても止めない**＝項目AX）。
 23. `autoNextProgram==='on'` なら `startLiveStatusWatcher()`（→ フェーズ7）。
 24. 動くサムネ②の給餌配線（`setAnimThumbnailFeed`）＋ON/OFF反映（`setAnimatedThumbnailEnabled`）。
 25. `beforeunload`/`pagehide` → `cleanup`。**`visibilitychange` は登録しない**（655df9c で撤去）。
