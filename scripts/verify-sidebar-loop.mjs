@@ -444,8 +444,9 @@ async function newProgramThumb() {
         const img = h.dom.getById('555').querySelector('.program_thumbnail_img')
         check('AZ ① 新着カードの繋ぎは配信者アイコン', img.src === 'https://icon/ch.jpg', img.src)
 
-        // フォローAPIが「絵はあるがライブスクショではない」番組として返す（＝チャンネル番組）
-        h.state.notifyRows = []
+        // フォローAPIが「絵はあるがライブスクショではない」番組として返す（＝チャンネル番組）。
+        // ⚠️ **notifybox の行は残すこと**（lv555 はまだ放送中という設定なので）。空にすると
+        //    項目BF の終了判定が働いて正しくカードが消え、この先のサムネ検証が空振りする。
         h.state.followPrograms = [apiProgram({ id: 'lv555', beginAtMs: T, providerType: 'channel', fixedImage: false, thumb: false })]
         h.state.followPrograms[0].listingThumbnail = fixedImageUrl('555')
         await run()
@@ -547,7 +548,8 @@ async function twoDisplayPaths() {
             img.dataset.thumbLive === '0', String(img.dataset.thumbLive))
 
         // フォローAPIがライブサムネ付きで返す。**updateThumbnail は一度も呼ばない**
-        h.state.notifyRows = []
+        // ⚠️ **notifybox の行は残すこと**（lv601 はまだ放送中）。空にすると項目BF の終了判定で
+        //    カードが消え、この先のサムネ検証が空振りする。
         h.state.followPrograms = [apiProgram({ id: 'lv601', beginAtMs: T })]
         await run()
         check('BB ① 🔴 サムネ更新ループを回さなくても、その場更新が既知のURLを表示する',
@@ -793,7 +795,13 @@ async function momentumScore() {
     const near = (a, b) => Math.abs(a - b) < 1e-9
 
     // --- 立ち上げ ---
-    check('AY 初回は開始からの平均レート', near(initialMomentum(prog(100, 20, 10), NOW), 12), '(100+20)/10分 = 12')
+    // 弾幕補正(BE)が入る前は (100+20)/10分 = 12 ちょうどだった。コメントに重みが乗ったので
+    // **コメントを含む番組でぴったりの数値を書かない**（定数を変えるたびに嘘のNGが出る）。
+    // 「開始からの平均レート」であること自体は、重みが確実に1になるコメント0の番組で厳密に見る。
+    check('AY 初回は開始からの平均レート', near(initialMomentum(prog(120, 0, 10), NOW), 12), '120/10分 = 12')
+    check('AY 初回にコメントも足される（普通の番組ならほぼ 1:1 のまま）',
+        initialMomentum(prog(100, 20, 10), NOW) > 11.9 && initialMomentum(prog(100, 20, 10), NOW) <= 12,
+        `(100 + w×20)/10分 = ${initialMomentum(prog(100, 20, 10), NOW).toFixed(4)}（補正前は 12 ちょうど）`)
     check('AY 開始直後は1分として扱う（0除算しない）', near(initialMomentum(prog(5, 0, 0), NOW), 5))
     check('AY 開始時刻が不明でも落ちない', Number.isFinite(initialMomentum({ viewers: 3, comments: 0 }, NOW)))
     check('AY 前回値が無ければ初回扱い',
@@ -894,6 +902,227 @@ async function momentumRanking() {
     h.ageStorage(60000)
     await run()
     check('AY 数字が変わらなければ順位も動かない（時間だけでは入れ替わらない）', ids() === before, ids())
+    h.restore()
+}
+
+/**
+ * BE: 弾幕補正の「形」を固定する。
+ *
+ * 🔴 **ここで守りたいのは値そのものではなく性質。** 定数（半減比・鋭さ・下駄）は実機で
+ * 数日かけて詰める前提の暫定値なので、**定数を動かしても落ちない検証**でなければ意味が無い。
+ * 固定するのは「連続・単調・ゼロにならない・普通の番組を触らない」の4つ。
+ */
+async function commentWeightShape() {
+    console.log('=== BE 弾幕補正（コメントの重み）の形 ===')
+    const { commentWeight, commentRatio, totalEngagement, nextMomentum, initialMomentum } =
+        await import(new URL('../src/utils/momentum.js', import.meta.url).href)
+    const { commentWeightHalfRatio, commentWeightViewerFloor } =
+        await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const NOW = Date.now()
+    const p = (v, c) => ({ viewers: v, comments: c })
+
+    // --- 補正が「無い」ことの確認（＝弾幕でない番組に手を出さない） ---
+    check('BE コメントが無ければ重み1（＝旧実装と完全一致）', commentWeight(p(1000, 0)) === 1)
+    check('BE 空の番組でも落ちない', commentWeight(p(0, 0)) === 1 && commentWeight(null) === 1)
+    check('BE 🔴 来場者が多くてコメントも多い「本物」はほぼ素通し（重み>0.85）',
+        commentWeight(p(10000, 20000)) > 0.85,
+        `来場者1万・コメント2万 → r=${commentRatio(p(10000, 20000)).toFixed(2)} / w=${commentWeight(p(10000, 20000)).toFixed(3)}`)
+    check('BE 🔴 少人数が大量投稿する「弾幕」は強く効く（重み<0.1）',
+        commentWeight(p(150, 30000)) < 0.1,
+        `来場者150・コメント3万 → r=${commentRatio(p(150, 30000)).toFixed(1)} / w=${commentWeight(p(150, 30000)).toFixed(3)}`)
+    check('BE 若い番組は補正されない（下駄で「疑わしきは罰せず」側へ寄る）',
+        commentWeight(p(3, 15)) > 0.9,
+        `来場者3・コメント15 → r=${commentRatio(p(3, 15)).toFixed(2)}（下駄${commentWeightViewerFloor}が無ければ r=5）`)
+
+    // --- 形（定数を変えても成り立つ性質） ---
+    // r を細かく掃いて、単調減少・連続・正であることを見る。**閾値方式ならここで落ちる。**
+    let monotone = true, positive = true, maxJump = 0, prevW = commentWeight(p(0, 0))
+    const STEPS = 4000, R_MAX = commentWeightHalfRatio * 40
+    for (let i = 1; i <= STEPS; i++) {
+        const r = (R_MAX * i) / STEPS
+        // r = c / (v + floor) を満たす番組を作る（v=0 なら c = r * floor）
+        const w = commentWeight(p(0, r * commentWeightViewerFloor))
+        if (!(w < prevW)) monotone = false
+        if (!(w > 0)) positive = false
+        maxJump = Math.max(maxJump, prevW - w)
+        prevW = w
+    }
+    check('BE 🔴 重みは r に対して単調に減る（増える区間が無い）', monotone)
+    check('BE 🔴 重みはゼロにならない（漸近するだけ＝コメントを完全には捨てない）',
+        positive && commentWeight(p(0, 1e9)) > 0,
+        `r=5000万でも w=${commentWeight(p(0, 1e9)).toExponential(2)}`)
+    check('BE 🔴 連続でなだらか（隣接する r で重みが跳ばない＝判定・閾値が無い）',
+        maxJump < 0.01,
+        `r を ${R_MAX} まで ${STEPS} 分割して掃いた時の最大の落差 = ${maxJump.toFixed(5)}`)
+
+    // --- 勢いの計算に効いているか ---
+    const dt = 60000
+    const prevRec = (v, c) => ({ viewers: v, comments: c, momentum: 0, _fetchedAt: NOW - dt })
+    const withAge = (v, c, min) => ({ ...p(v, c), onAirTime: { beginAt: new Date(NOW - min * 60000).toISOString() } })
+    // 来場者の増分は素通し、コメントの増分だけが重みを受ける
+    const real = nextMomentum(prevRec(10000, 20000), p(10200, 20600), NOW)
+    const danmaku = nextMomentum(prevRec(150, 30000), p(152, 31000), NOW)
+    check('BE 🔴 増分が同規模でも、弾幕側は勢いに乗らない',
+        danmaku < real / 10,
+        `本物(+200来場,+600コメ)=${real.toFixed(2)} / 弾幕(+2来場,+1000コメ)=${danmaku.toFixed(2)}`
+        + ' ※旧実装(1:1)なら 800 対 1002 で弾幕が勝つ')
+    check('BE 初回（前回値なし）にも同じ補正が乗る',
+        initialMomentum(withAge(150, 30000, 60), NOW) < initialMomentum(withAge(150, 3000, 60), NOW) * 2,
+        'コメントが10倍でも勢いは10倍にならない')
+    check('BE 第2キー（累計）にも同じ補正が乗る',
+        totalEngagement(p(150, 30000)) < totalEngagement(p(10000, 0)),
+        `弾幕の累計=${totalEngagement(p(150, 30000)).toFixed(1)} / 来場者1万コメント0の累計=${totalEngagement(p(10000, 0))}`)
+
+    // --- 旧実装との一致条件（🔴 「置き換えても同じ」を口約束にしない） ---
+    // w=1（コメント0）かつ両方が減らない周期では、旧 `max(0, Δ合計)` と新 `max(0,Δ来場)+w·max(0,Δコメ)`
+    // は一致する。**一致しないのは「片方だけ減った周期」だけ**で、そこは新のほうが正しい。
+    const legacyEquiv = nextMomentum(prevRec(100, 0), p(160, 0), NOW)
+    const a60 = 1 - Math.exp(-dt / 180000)
+    check('BE w=1 かつ両方増える周期は旧実装と一致する', Math.abs(legacyEquiv - 60 * a60) < 1e-9)
+    check('BE 🔴 片方だけ減った周期は旧実装と一致しない（新のほうが正しい）',
+        nextMomentum(prevRec(100, 100), p(95, 110), NOW) > nextMomentum(prevRec(100, 100), p(95, 105), NOW),
+        '来場者側の揺れ(-5)が実在するコメント(+10)を食い潰さない')
+}
+
+/**
+ * BE(実描画経路): 弾幕番組が本物の人気番組より上に来ないか。
+ *
+ * **旧実装(1:1)ではこの検証は必ず落ちる**（弾幕のほうが増分合計で勝つ数字にしてある）。
+ */
+async function danmakuRanking() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    console.log('=== BE 弾幕より本物の人気番組が上に来る（実描画経路） ===')
+    const NOW = Date.now()
+    const h = buildRenderHarness({ programsSort: 'active' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+    const ids = () => h.dom.ids().join(',')
+    h.state.notifyRows = []
+
+    // lv910 = 本物（来場者1万・コメント2万 → 1人あたり2件）。毎分 +200来場者 +600コメント
+    // lv911 = 弾幕（来場者150・コメント3万 → 1人あたり176件）。毎分 +2来場者 +1000コメント
+    // 増分の単純合計は 800 対 1002 で**弾幕が勝つ**。それでも本物が上に来ることを見る。
+    let v910 = 10000, c910 = 20000, v911 = 150, c911 = 30000
+    const feed = (cycle) => {
+        h.state.followPrograms = [
+            apiProgram({ id: 'lv910', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v910, comments: c910 }),
+            apiProgram({ id: 'lv911', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v911, comments: c911 }),
+        ]
+    }
+    feed(0)
+    await run()
+    for (let cycle = 1; cycle <= 4; cycle++) {
+        h.ageStorage(60000)
+        v910 += 200; c910 += 600
+        v911 += 2; c911 += 1000
+        feed(cycle)
+        await run()
+    }
+    const ap = (id) => parseFloat(h.dom.getById(id).getAttribute('active-point'))
+    check('BE 🔴 増分合計では弾幕が勝つ数字でも、本物の人気番組が上に来る',
+        ids() === '910,911',
+        `並び=${ids()} / 本物=${ap('910').toFixed(1)} 弾幕=${ap('911').toFixed(1)}`
+        + '（旧実装1:1なら弾幕が上）')
+    check('BE 覗き窓の属性が両方のカードに入っている（実機で定数を詰めるのに使う）',
+        parseFloat(h.dom.getById('911').getAttribute('data-comment-ratio')) > 100
+        && parseFloat(h.dom.getById('911').getAttribute('data-comment-weight')) < 0.1
+        && parseFloat(h.dom.getById('910').getAttribute('data-comment-weight')) > 0.85,
+        `弾幕 r=${h.dom.getById('911').getAttribute('data-comment-ratio')} w=${h.dom.getById('911').getAttribute('data-comment-weight')}`
+        + ` / 本物 r=${h.dom.getById('910').getAttribute('data-comment-ratio')} w=${h.dom.getById('910').getAttribute('data-comment-weight')}`)
+    h.restore()
+}
+
+/**
+ * BF: notifybox から消えた番組を「終了」とみなして外す。
+ *
+ * 🔴 **この機能の失敗は「放送中の番組が黙って消える」で、エラーが一切出ない。**
+ * よって「消えること」より**「消えてはいけない時に消えないこと」**のほうを厚く固定する。
+ */
+async function notifyboxEndDetection() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    const { notifyboxRows, notifyboxKnownCap } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    console.log('=== BF notifybox から消えた番組を終了とみなす ===')
+    const NOW = Date.now()
+    const h = buildRenderHarness({ programsSort: 'newest' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+    const ids = () => h.dom.ids().join(',')
+    const prog = (n, ageMin) => apiProgram({ id: `lv${n}`, beginAtMs: NOW - ageMin * 60000 })
+    const row = (n) => ({ id: String(n), title: `t${n}`, community_name: `c${n}`, thumbnail_url: '', provider_type: 'community' })
+
+    // ① 3番組。フォローAPI・notifybox の両方に居る
+    h.state.followPrograms = [prog(700, 30), prog(701, 20), prog(702, 10)]
+    h.state.notifyRows = [row(702), row(701), row(700)]
+    await run()
+    check('BF 前提: 3番組が並ぶ', ids() === '702,701,700', ids())
+
+    // ② lv701 が終了。**フォローAPI はまだ返し続けている**（これが直したい状況）
+    h.state.notifyRows = [row(702), row(700)]
+    await run()
+    check('BF 🔴 notifybox から消えたらフォローAPIがまだ返していても外す',
+        ids() === '702,700', ids() + '（フォローAPIは3件返し続けている）')
+
+    // ③ notifybox の取得が失敗した周期は**判定そのものを止める**（通信断で全消しが最悪の壊れ方）。
+    //    フォローAPIはまだ lv701 を返しているので、**一度消した番組が戻る**。これは承知のうえの
+    //    安全側の挙動。消したidを永続的に抑止すると、判断が誤っていた時に生きている番組を
+    //    永久に隠すことになる（そちらのほうが遥かに悪い）。
+    h.state.notifyFails = true
+    await run()
+    check('BF 🔴 notifybox が失敗した周期は1件も消さない（＝終了済みが一時的に戻るのは承知の上）',
+        ids() === '702,701,700', ids())
+    h.state.notifyFails = false
+
+    // ④ notifybox が戻れば、また消える。
+    //    🔴 **ここが「印を足し込む」ことの検証。** 印を毎周期 live で置き換える実装だと、②で
+    //    lv701 の印が落ちているので「notifybox が知らない番組」に化けて**二度と消せなくなる**
+    //    （消えて出て、を繰り返す）。この項目はその実装では必ず落ちる。
+    await run()
+    check('BF 🔴 notifybox が復活したら、また消える（一度消した番組が復活し続けない）',
+        ids() === '702,700', ids())
+
+    // ⑤ notifybox が知らない番組は触らない。
+    //    lv703 は**フォローAPIにだけ**現れる（notifybox の守備範囲外を模す）。
+    //    この条件が無いと、出た瞬間に消える。
+    h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(703, 5)]
+    h.state.notifyRows = [row(702), row(700)]
+    await run()
+    check('BF 🔴 notifybox に一度も載っていない番組は消さない（守備範囲外かもしれない）',
+        ids().split(',').includes('703'), ids())
+    await run()
+    check('BF 🔴 何周期経っても消さない（「そのうち消える」では意味が無い）',
+        ids().split(',').includes('703'), ids())
+
+    // ⑥ あふれた疑いのある応答は不在を根拠にしない。**notifybox の真の上限は不明**なので
+    //    2本立てで守っている（項目BF）。両方を別々に見る。
+    const flood = (n, startId) => { const a = []; for (let i = 0; i < n; i++) a.push(row(startId + i)); return a }
+    const alive700 = () => ids().split(',').includes('700')
+
+    //   (a) 要求した数ぴったり返った＝こちらの要求で頭打ちになった疑い
+    h.state.notifyRows = flood(notifyboxRows, 9000)
+    h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(703, 5)]
+    await run()
+    check(`BF 🔴 要求数(${notifyboxRows}件)ぴったりの応答は不在を根拠にしない`,
+        alive700(), `lv700 の生死: ${alive700() ? '生存' : '消えた'}`)
+
+    //   (b) 実績値ちょうど返った＝サーバ側がそこで頭打ちの仕様だった場合の疑い。
+    //       要求数(500)には遠く届かないので (a) では捕まらない。**この項目が (b) の存在意義**。
+    h.state.notifyRows = flood(notifyboxKnownCap, 9000)
+    await run()
+    check(`BF 🔴 実績値(${notifyboxKnownCap}件)ちょうどの応答も不在を根拠にしない（真の上限が不明なので）`,
+        alive700(), `要求は${notifyboxRows}件なので (a) では捕まらない / lv700: ${alive700() ? '生存' : '消えた'}`)
+
+    //   (c) 🔴 実績値を**超えた**応答は素通しすること。ここを `>=` で書くと、真の上限が要求値
+    //       だった場合に終了検知が常に止まる。**`>=` 実装ならこの項目が落ちる。**
+    h.state.notifyRows = flood(notifyboxKnownCap + 50, 9000)
+    await run()
+    check(`BF 🔴 実績値を超える応答(${notifyboxKnownCap + 50}件)では終了判定が働く（>= で書くと止まる）`,
+        !alive700(), `lv700 の生死: ${alive700() ? '生存（＝ >= で書かれている）' : '消えた'}`)
+
+    // ⑦ 通常の応答に戻ったら、また根拠として使える（⑥の封じが恒久化していないこと）
+    h.state.notifyRows = [row(702)]
+    h.state.followPrograms = [prog(702, 10)]
+    await run()
+    check('BF 通常の応答に戻れば、また終了判定に使える', ids() === '702', ids())
     h.restore()
 }
 
@@ -1639,9 +1868,11 @@ async function render() {
     check('AM FLIP は次フレームで transform を外す（Play フェーズ）',
         transforms().every((t) => t === ''), transforms().join('|') || '(全て空)')
 
-    // --- 削除 ---
+    // --- 削除（フォローAPIも手放した番組が消えること。notifybox 経由の削除は項目BF で別に見る）---
     h.state.followPrograms = h.state.followPrograms.filter((p) => p.id !== 'lv200')
-    h.state.notifyRows = []
+    // ⚠️ **lv100 の行は残すこと**（まだ放送中の設定）。空にすると項目BF の終了判定が働いて
+    //    lv100 まで消え、「フォローAPI由来の削除」を見ているつもりが別の経路を見ることになる。
+    h.state.notifyRows = [{ id: 100, title: 'x' }]
     await run()
     check('削除: 終了した番組のカードが消える', ids().join(',') === '400,100,300', ids().join(','))
     check('削除: 件数表示がカード数と一致',
@@ -1940,6 +2171,12 @@ if (real) {
     await momentumScore()
     console.log('')
     await momentumRanking()
+    console.log('')
+    await commentWeightShape()
+    console.log('')
+    await danmakuRanking()
+    console.log('')
+    await notifyboxEndDetection()
     console.log('')
     await r1NoSpin()
     console.log('')

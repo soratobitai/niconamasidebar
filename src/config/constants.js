@@ -4,6 +4,24 @@ export const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox
 export const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 export const watchPageBaseUrl = 'https://live.nicovideo.jp/watch/'; // ニコ生視聴ページのベースURL（末尾に lv 番号 or 数値ID）
 
+// notifybox に一度に要求する件数（ページングは無い）。
+//
+// 🔴 **notifybox の本当の上限は分かっていない。** `rows` はこちらが投げるパラメータで、
+//    初回コミットからずっと 100 が入っていたが、その根拠はどこにも記録されていない。
+//    「100件を超える放送中」を作れないので実測もできない（doc/09 項目BF）。
+//    そこで **上限を知らないまま両方に備える**: 要求は大きく出し、判定は下の2本立てで守る。
+export const notifyboxRows = 500;
+// 実績のある件数＝旧実装がずっと使っていた値。**ちょうどこの件数の応答は「頭打ち」を疑う。**
+// サーバ側が 100 で頭打ちなら、あふれた時の応答は必ずちょうど 100 件になるため。
+// ⚠️ **`>= notifyboxKnownCap` にしないこと。** 上限が本当に 500 だった場合、150件の応答が
+//    150 >= 100 で引っかかり、**終了検知が常に止まる**。「ちょうど一致」で見ること。
+//    （上限が 500 で、たまたま放送中がちょうど 100 件だった時だけ1周期空振りするが、実害は無い）
+export const notifyboxKnownCap = 100;
+// notifybox の取得に失敗したら、以後は実績のある件数に落として使い続ける。
+// `rows=500` を受け付けないAPIだった場合、落とさないと notifybox が永久に死んで
+// **新着検知が 20〜101秒 遅くなり、終了検知も効かなくなる**（しかもエラーは1回出るだけ）。
+export const notifyboxRowsFallback = 100;
+
 export const sidebarMinWidth = 180;
 export const maxSaveProgramInfos = 200;
 export const updateThumbnailInterval = 20; // 秒（サムネ<img>更新の基準間隔。番組ごと自己連鎖タイマーで更新完了後にこの時間を張る）
@@ -46,6 +64,33 @@ export const autoNextCountdownMs = 10000; // 10秒
 // （τ=1分→2.3位 / 5分→0.7位 / 8分→0.5位。大きいほど落ち着くが、盛り上がりに気付くのが遅れる）。
 // 更新間隔（30〜180秒）が変わっても手触りが揃うよう、係数は α = 1 - exp(-Δt/τ) で時間から計算する。
 export const momentumTauMs = 180000; // 3分
+
+// 弾幕（少人数が大量に投稿していて、実際には盛り上がっていない番組）への補正。
+//
+// 🔴 **「弾幕かどうか」を判定して下げる方式にはしないこと。** 判定は必ず境界を持ち、
+//    境界の両側で挙動が跳ぶ。ここでやるのは**全番組に同じ1本の式を通す**ことだけで、
+//    弾幕でない番組は重みがほぼ 1 になるので式の上では何も起きない（doc/09 項目BE）。
+//
+//   r = コメント累計 / (来場者累計 + commentWeightViewerFloor)   … 1人あたり何コメントか
+//   w = 1 / (1 + (r / commentWeightHalfRatio) ^ commentWeightSharpness)
+//   勢い = Δ来場者 + w × Δコメント
+//
+// 減衰の引き金は**Δコメントの大きさではなく r（1人あたり）**である。だから来場者が多くて
+// コメントも多い本物の人気番組は r が小さいままで、重みはほとんど減らない。
+// w は 0 に漸近するだけで**ゼロにはならない**（コメントが完全に無視されることはない）。
+//
+// ⚠️ 下の3つは**実測前の暫定値**（2026-08-01）。弾幕番組が手元に無く分布を測れなかったため、
+//    「普通の番組をなるべく触らない」側に倒してある。実機で数日使って調整すること。
+//    調整の目安（r0=10 / γ=1.5 のときの w）:
+//      r=1 → 0.96 ／ r=2 → 0.92 ／ r=4 → 0.80 ／ r=10 → 0.50 ／ r=30 → 0.16 ／ r=100 → 0.03
+//    - 弾幕がまだ高すぎる → commentWeightHalfRatio を下げる（効き始めが早くなる）
+//    - 普通の番組まで沈んだ → commentWeightHalfRatio を上げる、または Sharpness を上げる
+//      （Sharpness を上げると「普通の範囲は触らず、極端なものだけ強く落とす」に寄る）
+export const commentWeightHalfRatio = 10;   // r がこの値でコメントの重みが 0.5 になる
+export const commentWeightSharpness = 1.5;  // 大きいほど「普通は素通し・極端だけ強く落とす」
+// 若い番組・小さい番組は r が数件のコメントで暴れる（来場者3人・コメント15件で r=5 など）。
+// 分母に下駄を履かせて、**データが少ないうちは自動的に「補正なし」側へ寄せる**（疑わしきは罰せず）。
+export const commentWeightViewerFloor = 20;
 
 // 静止サムネの表示が「動くサムネへの給餌」の完了を待つ上限。
 // 🔴 **表示を②（動くサムネ）に依存させないための上限であって、性能調整ではない。**

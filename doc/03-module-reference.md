@@ -230,6 +230,8 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 |-------------|------|
 | `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `provider`(icon/provider_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。**サムネが無い間の繋ぎは配信者アイコン**（→ 無ければ `loading.gif`）で、その時は `dataset.thumbLive='0'` を立てる |
 | `calculateActivePoint(data)` | **盛り上がり**（＝人気順のスコア）を返す。実体は `data.momentum`（直近の増分レートのEMA。計算は `utils/momentum.js`、更新は `storage.upsertProgramInfos`）。未計算なら `initialMomentum`（開始からの平均レート）で代用。⚠️ 旧式 `(viewers+1 + comments+1) / 経過分` に戻さないこと（doc/09 項目AY）。旧 `onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
+| `_dropEndedByNotifybox(programs, notifyList)` (UpdateManager) | **notifybox から消えた番組を終了とみなして外す**（項目BF）。🔴 不在を根拠にするのは「取得成功」「応答が要求件数未満」「その番組が以前 notifybox に載っていた」の3条件が揃った時だけ。1つでも外すと**生きている番組が黙って消える** |
+| `applyRankAttributes(el, data)` | 人気順が読む属性を**まとめて**書く**唯一の書き手**（`active-point` / `data-total` / 覗き窓の `data-comment-weight`・`data-comment-ratio`）。🔴 **個別に書かないこと** — 以前は生成時とその場更新の2箇所で個別に書き、「片方だけ書くと同点時の並びが古い値で決まる」を⚠️コメントで守っていた（doc/09 項目BE） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete,onlyIds,onSettled})` ★★ | ⚠️ ライブサムネを持たない番組（チャンネル等）では `syncStaticThumb` が**唯一の表示経路**（`applyProgramInfoToCard` は `img.src` を触らないため）。「loading.gif の時だけ戻す」にすると絵が永久に出なくなる（項目AZ）。 localStorageの番組情報を元に各サムネを更新。既定は**コンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`onlyIds` 指定時はその id 集合の番組だけ更新（番組ごと自己連鎖サイクルで使う）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。**`onSettled`** は全プリロードが settle したら1回だけ発火し、`_updateOneThumbnailAndWait` がこれを待って次サイクルを張る（＝作業時間ぶん自然にドリフトする） |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体）。比較器は `utils/programOrder.js` の `compareByActivePoint` |
@@ -295,11 +297,14 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | 関数 | 説明 |
 |------|------|
-| `totalEngagement(info)` | 来場者＋コメントの累計。差分の元であり、同点時の第2キー（`data-total`）にも使う。⚠️ `viewers` は**累計の来場者数**で、同時視聴者数ではない（2026-07-31 に70件×6分で実測: 増26/減0） |
+| `commentRatio(info)` | **1人あたり何コメントか** `r = コメント累計 / (来場者累計 + 20)`。弾幕補正の唯一の入力。⚠️ **「Δコメント/Δ来場者」にしないこと** — 分母が頻繁に0になって発散する（項目BE） |
+| `commentWeight(info)` | コメントに掛ける重み `w = 1 / (1 + (r/10)^1.5)`。**0 < w ≤ 1 で、0 には漸近するだけ**。🔴 **弾幕の「判定」ではない** — 全番組が同じ式を通り、`r` が小さければ `w≈1` で何も起きない（項目BE） |
+| `totalEngagement(info)` | 来場者＋**重み付き**コメントの累計。差分の元であり、同点時の第2キー（`data-total`）にも使う。⚠️ 補正で**整数とは限らない**（属性へ書く時は丸める）。⚠️ `viewers` は**累計の来場者数**で、同時視聴者数ではない（2026-07-31 に70件×6分で実測: 増26/減0） |
 | `initialMomentum(info, now)` | 前回値が無い時の初期値＝**開始からの平均レート**。若い番組ではこれが実質そのまま直近レートになる。長時間放送では平均から始まるので、直近値へ寄るまで実時間で数分かかる（EMA の暖機） |
-| `nextMomentum(prev, next, now)` | 新しい取得値で更新。`instant = max(0, 累計の増分) / 経過分` を `α = 1 - exp(-Δt/τ)` で混ぜる。⚠️ **減少はクリップ**（負の勢いを作らない）、**Δt<1秒は据え置き**（極小の分母で爆発させない） |
+| `nextMomentum(prev, next, now)` | 新しい取得値で更新。`instant = (max(0,Δ来場者) + w×max(0,Δコメント)) / 経過分` を `α = 1 - exp(-Δt/τ)` で混ぜる。⚠️ **減少はクリップ**（負の勢いを作らない。**来場者とコメントで別々に**＝旧実装と一致しない唯一の条件・項目BE）、**Δt<1秒は据え置き**（極小の分母で爆発させない） |
 
 - 呼ぶのは **`storage.upsertProgramInfos` だけ**（前回値と新値が出会う唯一の場所）。`calculateActivePoint` は結果を読むだけ。
+- ⚠️ 弾幕補正の定数（`commentWeightHalfRatio` / `Sharpness` / `ViewerFloor`）は**実測前の暫定値**。実機で数日使って調整する前提（項目BE）。
 - 🔴 **α を固定値にしないこと。** 更新間隔は 30〜180秒で可変なので、時間から計算しないと間隔を変えた瞬間に手触りが変わる。検証で「30秒×6回 と 180秒×1回 が一致すること」を固定している。
 - 🔴 **生の差分をそのまま順位に使わないこと。** 30秒ウィンドウでは平均79%の番組が増分ゼロ（ニコ生の統計が約60秒粒度）。平滑化なしでは1周期あたり平均14.4位動く（τ=3分で1.1位）。→ [09 項目AY](./09-gotchas-and-techdebt.md)
 

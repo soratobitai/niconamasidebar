@@ -1,12 +1,29 @@
-import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
+import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo, currentNotifyboxRows } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, calculateActivePoint, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
+import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
-import { totalEngagement } from '../utils/momentum.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, notifyboxKnownCap } from '../config/constants.js';
+
+/**
+ * notifybox 不在を根拠に消した番組が、notifybox に戻ってきた時に1回だけ警告する（鳴る罠）。
+ *
+ * 🔴 **この判断が誤っていた時の症状は「放送中の番組が黙って画面から消える」で、
+ * エラーは一切出ない。** 利用者からは「たまに番組が消える拡張」にしか見えず、原因に辿り着けない。
+ * 消した番組が戻ってきたら、それは判断が誤っていた証拠なので鳴らす（doc/09 項目BF）。
+ */
+let notifyboxResurrectionWarned = false;
+function warnNotifyboxResurrection(id) {
+    if (notifyboxResurrectionWarned) return;
+    notifyboxResurrectionWarned = true;
+    console.warn(
+        `[リスト] ${id} を「notifybox から消えた＝終了」と判断して外しましたが、`
+        + 'notifybox に戻ってきました。**放送中の番組を消していた**ことになります。'
+        + 'notifybox の不在を終了の根拠に使う判断（doc/09 項目BF）を見直してください。'
+    );
+}
 
 /**
  * 更新処理とタイマーの管理
@@ -43,6 +60,16 @@ export class UpdateManager {
         this._thumbLoopRunning = false; // 二重開始ガード（tick 実行中は _thumbLoopTimer が null になる）
         this._thumbLoopStopped = false; // destroyThumbnailLoop で true。開き直しで復帰しうる
         this._thumbDueAt = new Map();
+        // 直近の「使える」notifybox 応答に載っていた番組id（doc/09 項目BF）。
+        // 🔴 **notifybox が面倒を見ている番組かどうかの記録であって、放送中リストではない。**
+        //    ここに居る番組が notifybox から消えたら「終了した」と判断してよい。
+        //    ここに居ない番組の不在は**何の根拠にもならない**（notifybox の守備範囲外かもしれない）。
+        //    ページを開いた直後は空＝1周期ぶんは誰も消さない。安全側に倒している。
+        this._notifyboxLive = new Set();
+        // notifybox 不在を根拠に消した番組id（鳴る罠用）。消した番組が notifybox に戻ってきたら、
+        // 判断が誤りだったという意味なので警告する。**症状が「生きている番組が黙って消える」で
+        // エラーが一切出ない**種類の壊れ方なので、気付ける形を用意しておく。
+        this._droppedByNotifybox = new Set();
         // 取得中の番組（完了を待たずに次へ進むので、同じ番組を二重に走らせないための印）
         this._thumbInFlight = new Set();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
         // _updateOneThumbnailAndWait の安全ガードタイマー（破棄時に一括clearするため追跡）。
@@ -615,6 +642,82 @@ export class UpdateManager {
     }
 
     /**
+     * notifybox から消えた番組を「終了した」とみなしてリストから外す（doc/09 項目BF）。
+     *
+     * 【なぜ要るか】フォローAPI（`?status=onair`）は終了した番組をしばらく返し続ける。
+     * notifybox のほうが反映が早いので、そちらの不在を終了の合図に使う。
+     *
+     * 🔴 **不在は、それだけでは終了の証拠にならない。** 3つの条件が揃った時だけ根拠にする:
+     *
+     *   1. **notifybox の取得が成功している**（失敗時 `false`）。
+     *      通信断で全部消える、が一番やってはいけない壊れ方。
+     *   2. **応答が上限件数に達していない**。notifybox はページングが無く rows=100 が上限で、
+     *      放送中が100件を超えると101件目以降が落ちる（和集合方式はその救済でもある）。
+     *      上限に達した応答の「不在」は、終了ではなく**溢れただけ**かもしれない。
+     *   3. **その番組が以前 notifybox に載っていた**。載ったことがない番組は notifybox の
+     *      守備範囲外である可能性があり、不在から何も言えない。**この条件が無いと、
+     *      notifybox が扱わない番組は出た瞬間に消える。**
+     *
+     * 条件3は notifybox の守備範囲を**こちらが知らなくても成り立つ**ように置いてある。
+     * 「notifybox が一度でも面倒を見た番組だけ、notifybox の言い分を信じる」という形。
+     *
+     * @param {Array<object>} programs `_mergeSources` の結果
+     * @param {Array<any>|false} notifyList notifybox の生応答（失敗時 false）
+     * @returns {Array<object>} 終了とみなした番組を除いたリスト
+     */
+    _dropEndedByNotifybox(programs, notifyList) {
+        // 条件1: 取得に失敗した周期は何も消さない
+        if (!Array.isArray(notifyList)) return programs;
+        // 条件2: あふれた疑いのある応答は不在を根拠にしない。**notifybox の真の上限は不明**なので
+        //        2本立てで守る（doc/09 項目BF）。
+        //   (a) 要求した数ぴったり返った → こちらの要求で頭打ちになった疑い
+        //   (b) 実績値ちょうど返った     → サーバ側が実績値で頭打ちの仕様だった場合の疑い
+        // ⚠️ (b) を `>=` にしないこと。真の上限が要求値だった場合、それを下回る応答
+        //    （例: 実績値100に対して150件）が全部引っかかり、**終了検知が常に止まる**。
+        if (notifyList.length >= currentNotifyboxRows()) return programs;
+        if (notifyList.length === notifyboxKnownCap) return programs;
+
+        const live = new Set();
+        for (const row of notifyList) {
+            if (row && row.id != null) live.add('lv' + String(row.id).replace(/^lv/, ''));
+        }
+
+        // 消した番組が戻ってきた＝判断が誤っていた。黙って消えるのを防ぐための鳴る罠。
+        for (const id of live) {
+            if (this._droppedByNotifybox.has(id)) {
+                this._droppedByNotifybox.delete(id);
+                warnNotifyboxResurrection(id);
+            }
+            // 🔴 **印は足し込む。置き換えないこと。** 毎周期 live で上書きすると、消した番組の印まで
+            //    落ちる。フォローAPIはその番組をまだ返し続けているので、**次の周期は条件3で
+            //    「notifybox が知らない番組」に化けて復活する**（消えて出て、を繰り返す）。
+            this._notifyboxLive.add(id);
+        }
+
+        const kept = programs.filter((p) => {
+            const id = p && p.id ? String(p.id) : '';
+            if (!id || live.has(id)) return true;
+            // 条件3: notifybox が面倒を見たことのない番組は触らない
+            if (!this._notifyboxLive.has(id)) return true;
+            this._droppedByNotifybox.add(id);
+            return false;
+        });
+
+        // 掃除: notifybox にも今回のリストにも居ない番組の印は落とす（集合が青天井にならないように）。
+        // ⚠️ **消した番組の印は残る**（フォローAPIがまだ返している＝`programs` に居るため）。
+        //    それでよい。印が消えるのはフォローAPIもその番組を手放した時＝本当に用が済んだ時。
+        const stillRelevant = new Set();
+        for (const p of programs) if (p && p.id) stillRelevant.add(String(p.id));
+        for (const id of this._notifyboxLive) {
+            if (!live.has(id) && !stillRelevant.has(id)) this._notifyboxLive.delete(id);
+        }
+        for (const id of this._droppedByNotifybox) {
+            if (!stillRelevant.has(id)) this._droppedByNotifybox.delete(id);
+        }
+        return kept;
+    }
+
+    /**
      * notifybox が先に見つけた新番組の最小レコードを storage にも載せる。
      *
      * 【なぜ必要か】ライブサムネの追撃 `_fetchLiveThumbIfPendingYoung` は **storage のレコードを
@@ -687,7 +790,7 @@ export class UpdateManager {
             // notifybox は rows=100 でページングが無いため、**放送中が100件を超えると101件目以降が
             // 表示されなかった**（詳細だけ取得して捨てていた）。和集合にすることでこれも解消する。
             const [notifyList, fetched] = await Promise.all([
-                fetchLivePrograms(100),          // 失敗時 false
+                fetchLivePrograms(),             // 失敗時 false（件数は api.js が持つ＝失敗で下がる）
                 this._refreshDetailsViaScrape(), // 失敗時 null
             ]);
 
@@ -724,7 +827,10 @@ export class UpdateManager {
                 return sessionId;
             }
 
-            const merged = this._mergeSources(notifyList, fetched);
+            // 和集合を作ってから、notifybox が「もう居ない」と言っている番組を落とす。
+            // ⚠️ 順序を入れ替えないこと。先に落としても `_mergeSources` が notifybox 行を
+            //    足し直すので意味が無い。
+            const merged = this._dropEndedByNotifybox(this._mergeSources(notifyList, fetched), notifyList);
             this._seedNewProgramsToStorage(merged);
 
             // 空のときは既存DOMを維持（取得は成功していて放送中0件）
@@ -763,10 +869,10 @@ export class UpdateManager {
 
                     if (existing) {
                         // その場更新。**カードのDOMは移動も作り直しもしない。**
-                        existing.setAttribute('active-point', String(calculateActivePoint(data)));
-                        // 人気順の第2キー（勢いが同じ番組は累計の多い順）。
-                        // ⚠️ active-point とセットで書くこと。片方だけ更新すると同点時の並びが古い値で決まる。
-                        existing.setAttribute('data-total', String(totalEngagement(data)));
+                        // 人気順が読む属性（active-point / data-total / 弾幕補正の覗き窓）を
+                        // まとめて更新する。**個別に書かないこと** — 片方だけ更新すると
+                        // 同点時の並びが古い値で決まる。書き手は applyRankAttributes だけにしてある。
+                        applyRankAttributes(existing, data);
                         // 新着順（放送開始が新しい順）での位置。sorting.js の newest がこれを昇順に並べる。
                         existing.setAttribute('data-api-index', String(apiIndex));
                         // タイトル・リンク先・配信者名・アイコン・静止サムネの戻り先(data-src)を反映。

@@ -1,6 +1,6 @@
 import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
-import { initialMomentum, totalEngagement } from '../utils/momentum.js'
+import { initialMomentum, totalEngagement, commentWeight, commentRatio } from '../utils/momentum.js'
 
 /**
  * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
@@ -226,16 +226,11 @@ export function makeProgramElement(data, loadingImageURL) {
         thumbnail_url = icon_url || loadingImageURL
     }
 
-    const activePoint = calculateActivePoint(data)
-
     // メインコンテナ
     const container = document.createElement('div')
     container.id = id
     container.className = 'program_container'
-    container.setAttribute('active-point', String(activePoint))
-    // 人気順の第2キー。静かな番組は勢いが 0 で並ぶので、その中は累計の多い順にする。
-    // ⚠️ **active-point を書く所では必ずこれも書くこと**（もう1箇所は updateSidebar のその場更新）。
-    container.setAttribute('data-total', String(totalEngagement(data)))
+    applyRankAttributes(container, data)
 
     // 配信者セクション（アイコン＋配信者名）
     const providerDiv = document.createElement('div')
@@ -318,6 +313,32 @@ export function calculateActivePoint(data) {
     const m = Number(data.momentum)
     if (Number.isFinite(m)) return m
     return initialMomentum(data, Date.now())
+}
+
+/**
+ * 人気順が読む属性を**まとめて**書く。カードを作る時と、その場更新の時の両方から呼ぶ。
+ *
+ * 🔴 **集約してあるのは片方だけ書く事故を構造的に潰すため。** 以前は2箇所で個別に
+ * `active-point` と `data-total` を書いており、「片方だけ更新すると同点時の並びが古い値で決まる」
+ * という⚠️コメントで守っていた。**思い出して守るガードは、書く場所が増えた時に破れる。**
+ * 属性を足したくなったらここへ足すこと（doc/09 項目BE）。
+ *
+ * - `active-point` … 盛り上がり（第1キー）
+ * - `data-total`   … 来場者＋重み付きコメントの累計（同点時の第2キー）
+ * - `data-comment-weight` / `data-comment-ratio` … 弾幕補正の実効値。**順位計算には使わない**。
+ *   暫定定数を実機で詰めるための覗き窓で、DevTools で要素を見れば効き方が分かる。
+ *   定数が固まったらこの2つは消してよい。
+ *
+ * @param {HTMLElement} el カードのコンテナ
+ * @param {Object} data 番組データ
+ */
+export function applyRankAttributes(el, data) {
+    if (!el) return
+    el.setAttribute('active-point', String(calculateActivePoint(data)))
+    // 弾幕補正で整数でなくなったので丸める。第2キーの粗さとしては小数1桁で十分。
+    el.setAttribute('data-total', String(Math.round(totalEngagement(data) * 10) / 10))
+    el.setAttribute('data-comment-weight', commentWeight(data).toFixed(3))
+    el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))
 }
 
 // サムネイル画像の読み込み失敗時のフォールバック処理。

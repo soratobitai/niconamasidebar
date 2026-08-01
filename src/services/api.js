@@ -1,4 +1,4 @@
-import { notifyboxAPI, liveInfoAPI } from '../config/constants.js'
+import { notifyboxAPI, liveInfoAPI, notifyboxRows, notifyboxRowsFallback } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 import { mapProviderType } from '../utils/providerType.js'
 
@@ -10,13 +10,29 @@ import { mapProviderType } from '../utils/providerType.js'
 // カードが「名前なし・アイコンなし」で立つ（doc/09 項目AT）。
 
 /**
+ * 今この瞬間 notifybox に要求している件数。
+ *
+ * 呼び出し側（終了検知）が「要求した数ぴったり返ってきたか＝あふれた疑いがあるか」を
+ * 判定するのに要る。**失敗時に下がる**ので、定数を直接読ませずここから取ること
+ * （下がったことに気付かないと、あふれ判定が黙って外れる）。doc/09 項目BF。
+ * @returns {number}
+ */
+export function currentNotifyboxRows() {
+    return effectiveRows
+}
+
+// 実際に投げる件数。`rows=500` を受け付けないAPIだった場合に備え、失敗したら実績値へ落とす。
+// 落とさないと notifybox が永久に死に、新着検知が 20〜101秒 遅くなる（エラーは1回出るだけ）。
+let effectiveRows = notifyboxRows
+
+/**
  * フォロー中の放送中番組リストを notifybox から取得する。
- * @param {number} [rows=100] 取得件数（ページングは無い＝最大100件）
+ * @param {number} [rows] 取得件数。既定は現在の要求件数（失敗時に下がる）
  * @returns {Promise<false|Array<any>>} notifybox_content 配列、失敗時は false
  */
 const liveProgramsInFlight = new Map()
 
-export async function fetchLivePrograms(rows = 100) {
+export async function fetchLivePrograms(rows = effectiveRows) {
     const key = String(rows)
     if (liveProgramsInFlight.has(key)) return liveProgramsInFlight.get(key)
 
@@ -29,11 +45,15 @@ export async function fetchLivePrograms(rows = 100) {
                     new Error(`notifybox returned status ${response.meta?.status || 'unknown'}`),
                     { api: 'fetchLivePrograms', rows, response: response.meta }
                 )
+                downgradeRows(rows)
                 return false
             }
             warnIfNotifyboxShapeChanged(response.data.notifybox_content)
             return response.data.notifybox_content
         } catch (error) {
+            // 🔴 **ここでは件数を下げない。** 通信断・オフラインでも来る経路なので、下げると
+            //    ネットが一瞬切れただけで以後ずっと少ない件数になる。「APIが rows を拒否した」なら
+            //    応答は返ってきて meta.status が 200 以外になるはずで、それは上の分岐で捕まえる。
             handleError(error, { api: 'fetchLivePrograms', rows })
             return false
         } finally {
@@ -43,6 +63,23 @@ export async function fetchLivePrograms(rows = 100) {
 
     liveProgramsInFlight.set(key, p)
     return p
+}
+
+/**
+ * APIに拒否されたら要求件数を実績値へ落とす（1回だけ・以後そのまま）。
+ *
+ * `rows=500` を受け付けないAPIだった場合の保険。落とさないと notifybox が永久に死に、
+ * **新着検知が 20〜101秒 遅くなり、終了検知も効かなくなる**（しかもエラーは1回出るだけ）。
+ *
+ * ⚠️ **呼ぶのは「応答は返ってきたが meta.status が異常」の時だけ。** 通信断の catch から
+ * 呼ぶと、ネットが一瞬切れただけで以後ずっと少ない件数になる（検証で実際に踏んだ）。
+ */
+function downgradeRows(usedRows) {
+    if (effectiveRows <= notifyboxRowsFallback || usedRows !== effectiveRows) return
+    effectiveRows = notifyboxRowsFallback
+    console.warn(
+        `[notifybox] rows=${usedRows} の取得に失敗したため、以後は rows=${notifyboxRowsFallback} で取得します。`
+    )
 }
 
 /**
