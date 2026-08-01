@@ -278,6 +278,33 @@ async function d6Static() {
     }
     check('D6 visibilitychange のリスナーが1つも無い', listeners.length === 0,
         listeners.length ? `混入: ${listeners.join(', ')}` : '0件')
+
+    // --- BH: サイドバーを開いた時の更新が2回走らないこと ---
+    //
+    // rAF と setTimeout の2経路で更新を撃っている。裏タブで止まっていた rAF は
+    // **タブを表に戻した時に遅れて実行される**ので、掛け金が無いとフォールバック完走後に
+    // もう一度フル更新が走る（isPerformingManualUpdate は「同時」しか防げない）。
+    //
+    // ⚠️ **開くパスを固定幅で切り出さないこと**（コメントを足すと窓から押し出される）。
+    //    関数名でアンカーし、次の `async function` までを見る。
+    const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+    const openStart = mainSrc.indexOf('async function handleSidebarOpenStateChange')
+    const openEnd = mainSrc.indexOf('\nasync function ', openStart + 1)
+    const openBody = openStart >= 0
+        ? mainSrc.slice(openStart, openEnd > openStart ? openEnd : mainSrc.indexOf('\nconst resetSidebarSchedule', openStart))
+        : ''
+    check('BH handleSidebarOpenStateChange を特定できる', openBody.length > 200, `${openBody.length} 文字`)
+    // 「rAF と setTimeout の両方から撃つ」構造自体は維持されていること（＝裏タブでも更新が走る）
+    check('BH 裏タブ用のフォールバックが残っている（rAF と setTimeout の両方から撃つ）',
+        /requestAnimationFrame\(/.test(openBody) && /setTimeout\(/.test(openBody))
+    // 🔴 呼び出し口は1つだけ。2経路がそれぞれ performManualUpdate() を直接呼ぶ形に戻すと落ちる。
+    const calls = (openBody.match(/performManualUpdate\s*\(/g) || []).length
+    check('BH 🔴 performManualUpdate の呼び出しは1箇所だけ（rAF とフォールバックの二重発火を防ぐ）',
+        calls === 1, `${calls}箇所（2箇所なら掛け金が外れている＝タブ復帰時にフル更新が2回走る）`)
+    // 正常系（裏タブで rAF が止まる）で警告を出さないこと。利用者が異常と誤解した実績がある。
+    check('BH 裏タブのフォールバックで警告を出さない（正常系なので）',
+        !/console\.(warn|error)/.test(openBody),
+        '⚠️ requestAnimationFrameが実行されなかったため… は正常系。鳴らさない')
 }
 
 /**

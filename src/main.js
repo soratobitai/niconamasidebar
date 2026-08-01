@@ -376,20 +376,23 @@ async function handleSidebarOpenStateChange(open) {
         if (updateManager) updateManager._refreshThumbSchedule();
 
         // データ更新は非同期で実行（サイドバー開閉アニメーションをブロックしない）。
-        // requestAnimationFrameで次のフレームに延期し、非アクティブタブ向けに setTimeout フォールバックも用意する。
-        let rafExecuted = false;
-        requestAnimationFrame(async () => {
-            rafExecuted = true;
-            await performManualUpdate();
-        });
-
-        // requestAnimationFrameが実行されない場合のフォールバック（タブが非アクティブなど）
-        setTimeout(() => {
-            if (!rafExecuted) {
-                console.warn('⚠️ requestAnimationFrameが実行されなかったため、fallbackで更新を呼び出し');
-                performManualUpdate();
-            }
-        }, 100); // 100ms後にチェック
+        // rAF で次フレームへ回し、裏タブ用に setTimeout のフォールバックも張る。
+        //
+        // 🔴 **必ずどちらか片方だけが走るように掛け金で締めること。**
+        //    裏タブで止まっていた rAF は**タブを表に戻した時に遅れて実行される**（破棄されない）。
+        //    掛け金が無いと、フォールバックが完走した後にもう一度フル更新が走る。
+        //    `isPerformingManualUpdate` は「同時」しか防げないので、15〜30秒後に来る2回目は素通しする。
+        //
+        // ⚠️ フォールバックが走ること自体は異常ではない（裏タブでは rAF が止まるのが正常）。
+        //    以前ここで警告を出していたが、正常系なので消した（利用者が異常と誤解した）。
+        let updateDispatched = false;
+        const dispatchManualUpdateOnce = () => {
+            if (updateDispatched) return;
+            updateDispatched = true;
+            performManualUpdate();
+        };
+        requestAnimationFrame(dispatchManualUpdateOnce);
+        setTimeout(dispatchManualUpdateOnce, 100);
     }
     // else: 閉じた時にすることは無い（上のコメント参照）
 }
