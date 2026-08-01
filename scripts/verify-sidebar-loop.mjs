@@ -826,9 +826,13 @@ async function momentumScore() {
     // **コメントを含む番組でぴったりの数値を書かない**（定数を変えるたびに嘘のNGが出る）。
     // 「開始からの平均レート」であること自体は、重みが確実に1になるコメント0の番組で厳密に見る。
     check('AY 初回は開始からの平均レート', near(initialMomentum(prog(120, 0, 10), NOW), 12), '120/10分 = 12')
-    check('AY 初回にコメントも足される（普通の番組ならほぼ 1:1 のまま）',
-        initialMomentum(prog(100, 20, 10), NOW) > 11.9 && initialMomentum(prog(100, 20, 10), NOW) <= 12,
-        `(100 + w×20)/10分 = ${initialMomentum(prog(100, 20, 10), NOW).toFixed(4)}（補正前は 12 ちょうど）`)
+    // コメントは足されるが、来場者より軽い（2026-08-01 に 1:1 から変更・項目BE-2）。
+    // 🔴 **両側から挟む。** 上限だけだと「コメントを完全に捨てても合格」、
+    //    下限だけだと「1:1 に戻しても合格」になる。
+    check('AY 初回にコメントも足される。ただし来場者より軽い（1:1 に戻しても、捨てても落ちる）',
+        initialMomentum(prog(100, 20, 10), NOW) > 10 && initialMomentum(prog(100, 20, 10), NOW) < 12,
+        `(100 + w×20)/10分 = ${initialMomentum(prog(100, 20, 10), NOW).toFixed(3)}`
+        + '（コメントを捨てれば 10.0 ／ 1:1 なら 12.0）')
     check('AY 開始時刻が不明でも落ちない', Number.isFinite(initialMomentum({ viewers: 3, comments: 0 }, NOW)))
 
     // --- BG: 初回スコアの分母には下限がある（入室ラッシュが勢いに化けるのを防ぐ） ---
@@ -966,18 +970,38 @@ async function commentWeightShape() {
     const NOW = Date.now()
     const p = (v, c) => ({ viewers: v, comments: c })
 
-    // --- 補正が「無い」ことの確認（＝弾幕でない番組に手を出さない） ---
-    check('BE コメントが無ければ重み1（＝旧実装と完全一致）', commentWeight(p(1000, 0)) === 1)
-    check('BE 空の番組でも落ちない', commentWeight(p(0, 0)) === 1 && commentWeight(null) === 1)
-    check('BE 🔴 来場者が多くてコメントも多い「本物」はほぼ素通し（重み>0.85）',
-        commentWeight(p(10000, 20000)) > 0.85,
-        `来場者1万・コメント2万 → r=${commentRatio(p(10000, 20000)).toFixed(2)} / w=${commentWeight(p(10000, 20000)).toFixed(3)}`)
+    check('BE 空の番組でも落ちない',
+        Number.isFinite(commentWeight(p(0, 0))) && Number.isFinite(commentWeight(null)))
+    check('BE 重みは常に 0 より大きく 1 以下',
+        [p(0, 0), p(1000, 0), p(10, 1e9), p(0, 1)].every((x) => commentWeight(x) > 0 && commentWeight(x) <= 1))
+
+    // 🔴 **来場者を重く見る（基礎重み）** — 2026-08-01 に 1:1 から変更。
+    //    弾幕でない普通の番組でも、コメントは来場者より軽く扱われる。
+    //    ⚠️ 期待値を commentBaseWeight から作らないこと（定数と比較する形＝空振りになる。項目BG）。
+    check('BE-2 🔴 弾幕でない番組でもコメントは来場者より軽い（基礎重み。1:1 に戻すと落ちる）',
+        commentWeight(p(10000, 5000)) < 0.8,
+        `来場者1万・コメント5千（r=${commentRatio(p(10000, 5000)).toFixed(2)}＝弾幕ではない）`
+        + ` → w=${commentWeight(p(10000, 5000)).toFixed(3)}（基礎重み1.0なら0.9超）`)
+
+    // 🔴 **弾幕っぽさで差がつく（形）** — 利用者の実機報告: 1人あたり3〜4倍でも弾幕の可能性がある。
+    //    半減点が10だった時は 0.85 対 0.95 で**差が1割しかなく、順位がほぼ動かなかった**。
+    const susp = p(200, 700)     // 1人あたり約3.2倍（弾幕疑い）
+    const modest = p(1000, 1500) // 1人あたり約1.5倍（本物）
+    check('BE-2 🔴 1人あたり3倍の番組は1.5倍の番組より3割以上軽い（半減点10なら落ちる）',
+        commentWeight(susp) < 0.7 * commentWeight(modest),
+        `r=${commentRatio(susp).toFixed(1)}→w=${commentWeight(susp).toFixed(3)} /`
+        + ` r=${commentRatio(modest).toFixed(1)}→w=${commentWeight(modest).toFixed(3)}`
+        + ` （比=${(commentWeight(susp) / commentWeight(modest)).toFixed(2)}。半減点10なら0.90で差がつかない）`)
+
     check('BE 🔴 少人数が大量投稿する「弾幕」は強く効く（重み<0.1）',
         commentWeight(p(150, 30000)) < 0.1,
         `来場者150・コメント3万 → r=${commentRatio(p(150, 30000)).toFixed(1)} / w=${commentWeight(p(150, 30000)).toFixed(3)}`)
-    check('BE 若い番組は補正されない（下駄で「疑わしきは罰せず」側へ寄る）',
-        commentWeight(p(3, 15)) > 0.9,
-        `来場者3・コメント15 → r=${commentRatio(p(3, 15)).toFixed(2)}（下駄${commentWeightViewerFloor}が無ければ r=5）`)
+    // 下駄の役目は「データが少ないうちは弾幕扱いしない」。基礎重みは掛かるので絶対値では見ず、
+    // **弾幕でない番組の重みと比べて遜色ないか**で見る（定数から独立させるため）。
+    check('BE 若い番組は弾幕扱いされない（下駄で「疑わしきは罰せず」側へ寄る）',
+        commentWeight(p(3, 15)) > 0.9 * commentWeight(p(10000, 10)),
+        `来場者3・コメント15 → r=${commentRatio(p(3, 15)).toFixed(2)}（下駄${commentWeightViewerFloor}が無ければ r=5）`
+        + ` / w=${commentWeight(p(3, 15)).toFixed(3)} 対 ほぼ無補正=${commentWeight(p(10000, 10)).toFixed(3)}`)
 
     // --- 形（定数を変えても成り立つ性質） ---
     // r を細かく掃いて、単調減少・連続・正であることを見る。**閾値方式ならここで落ちる。**
@@ -1019,11 +1043,11 @@ async function commentWeightShape() {
         `弾幕の累計=${totalEngagement(p(150, 30000)).toFixed(1)} / 来場者1万コメント0の累計=${totalEngagement(p(10000, 0))}`)
 
     // --- 旧実装との一致条件（🔴 「置き換えても同じ」を口約束にしない） ---
-    // w=1（コメント0）かつ両方が減らない周期では、旧 `max(0, Δ合計)` と新 `max(0,Δ来場)+w·max(0,Δコメ)`
+    // コメントが増えず両方が減らない周期では、旧 `max(0, Δ合計)` と新 `max(0,Δ来場)+w·max(0,Δコメ)`
     // は一致する。**一致しないのは「片方だけ減った周期」だけ**で、そこは新のほうが正しい。
     const legacyEquiv = nextMomentum(prevRec(100, 0), p(160, 0), NOW)
     const a60 = 1 - Math.exp(-dt / 180000)
-    check('BE w=1 かつ両方増える周期は旧実装と一致する', Math.abs(legacyEquiv - 60 * a60) < 1e-9)
+    check('BE コメントが増えない周期は旧実装と一致する', Math.abs(legacyEquiv - 60 * a60) < 1e-9)
     check('BE 🔴 片方だけ減った周期は旧実装と一致しない（新のほうが正しい）',
         nextMomentum(prevRec(100, 100), p(95, 110), NOW) > nextMomentum(prevRec(100, 100), p(95, 105), NOW),
         '来場者側の揺れ(-5)が実在するコメント(+10)を食い潰さない')
@@ -1071,7 +1095,8 @@ async function danmakuRanking() {
     check('BE 覗き窓の属性が両方のカードに入っている（実機で定数を詰めるのに使う）',
         parseFloat(h.dom.getById('911').getAttribute('data-comment-ratio')) > 100
         && parseFloat(h.dom.getById('911').getAttribute('data-comment-weight')) < 0.1
-        && parseFloat(h.dom.getById('910').getAttribute('data-comment-weight')) > 0.85,
+        && parseFloat(h.dom.getById('910').getAttribute('data-comment-weight'))
+           > 10 * parseFloat(h.dom.getById('911').getAttribute('data-comment-weight')),
         `弾幕 r=${h.dom.getById('911').getAttribute('data-comment-ratio')} w=${h.dom.getById('911').getAttribute('data-comment-weight')}`
         + ` / 本物 r=${h.dom.getById('910').getAttribute('data-comment-ratio')} w=${h.dom.getById('910').getAttribute('data-comment-weight')}`)
     h.restore()

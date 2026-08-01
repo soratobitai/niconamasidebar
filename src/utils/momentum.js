@@ -3,6 +3,7 @@ import {
     commentWeightHalfRatio,
     commentWeightSharpness,
     commentWeightViewerFloor,
+    commentBaseWeight,
     initialMomentumMinWindowMin,
 } from '../config/constants.js'
 
@@ -53,7 +54,10 @@ export function commentRatio(info) {
 }
 
 /**
- * コメントに掛ける重み（0 < w ≤ 1）。r だけで決まる、連続でなだらかな減少関数。
+ * コメントに掛ける重み（0 < w ≤ 基礎重み）。r だけで決まる、連続でなだらかな減少関数。
+ *
+ * **2つの係数の積**である: 弾幕っぽさに応じて差をつける「形」と、弾幕かどうかに関係なく
+ * 来場者を重く見る「基礎重み」。役割が違うので両方要る（doc/09 項目BE-2）。
  *
  * 🔴 **これは「弾幕の検出」ではない。** 全番組が同じ式を通る。r が小さい番組では w がほぼ 1 に
  * なるので、式があってもなくても結果が変わらない。分岐も閾値も無いので、**境界の両側で挙動が
@@ -66,10 +70,12 @@ export function commentRatio(info) {
  */
 export function commentWeight(info) {
     const r = commentRatio(info)
-    if (!(r > 0)) return 1
-    const w = 1 / (1 + Math.pow(r / commentWeightHalfRatio, commentWeightSharpness))
-    // 壊れた定数（0や負）を入れられた時に番組を消さない。補正なしへ倒す。
-    return Number.isFinite(w) && w > 0 && w <= 1 ? w : 1
+    // 「形」の部分。r が大きいほど小さくなる（弾幕っぽさに応じた差はここでつく）。
+    const shape = r > 0 ? 1 / (1 + Math.pow(r / commentWeightHalfRatio, commentWeightSharpness)) : 1
+    // 基礎重み。**弾幕かどうかに関係なく**掛かる（来場者を重く見るための係数）。
+    const w = commentBaseWeight * shape
+    // 壊れた定数（0や負）を入れられた時に番組を消さない。基礎重みだけへ倒す。
+    return Number.isFinite(w) && w > 0 && w <= 1 ? w : commentBaseWeight
 }
 
 /**
