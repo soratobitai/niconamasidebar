@@ -789,7 +789,7 @@ async function momentumScore() {
     console.log('=== AY 盛り上がり（人気順のスコア） ===')
     const { initialMomentum, nextMomentum } = await import(new URL('../src/utils/momentum.js', import.meta.url).href)
     const { compareByActivePoint } = await import(new URL('../src/utils/programOrder.js', import.meta.url).href)
-    const { momentumTauMs } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const { momentumTauMs, initialMomentumMinWindowMin } = await import(new URL('../src/config/constants.js', import.meta.url).href)
     const NOW = Date.now()
     const prog = (v, c, ageMin) => ({ viewers: v, comments: c, onAirTime: { beginAt: new Date(NOW - ageMin * 60000).toISOString() } })
     const near = (a, b) => Math.abs(a - b) < 1e-9
@@ -802,8 +802,26 @@ async function momentumScore() {
     check('AY 初回にコメントも足される（普通の番組ならほぼ 1:1 のまま）',
         initialMomentum(prog(100, 20, 10), NOW) > 11.9 && initialMomentum(prog(100, 20, 10), NOW) <= 12,
         `(100 + w×20)/10分 = ${initialMomentum(prog(100, 20, 10), NOW).toFixed(4)}（補正前は 12 ちょうど）`)
-    check('AY 開始直後は1分として扱う（0除算しない）', near(initialMomentum(prog(5, 0, 0), NOW), 5))
     check('AY 開始時刻が不明でも落ちない', Number.isFinite(initialMomentum({ viewers: 3, comments: 0 }, NOW)))
+
+    // --- BG: 初回スコアの分母には下限がある（入室ラッシュが勢いに化けるのを防ぐ） ---
+    // 🔴 **効くのは初回の1点だけ。** 落ち着いた後の順位には影響しない（下の「下限を超えた番組」で固定）。
+    const W = initialMomentumMinWindowMin
+    // ⚠️ **期待値を `120 / W` と書かないこと。** 定数そのものと比較する形になり、W を何に変えても
+    //    通る＝空振り検査になる（**実際に一度そう書いて、下限を1へ戻しても落ちなかった**）。
+    //    ここは「1分で割った生の値の半分以下であること」という**定数から独立した絶対値**で見る。
+    check('BG 🔴 開始直後の入室ラッシュをそのまま勢いにしない（下限を1分に戻すと落ちる）',
+        initialMomentum(prog(120, 0, 0), NOW) <= 60 && initialMomentum(prog(120, 0, 0), NOW) > 0,
+        `開始0分・累計120人 → ${initialMomentum(prog(120, 0, 0), NOW).toFixed(1)}/分`
+        + `（下限1分なら120。現在の下限は${W}分）`)
+    check('BG 🔴 下限を超えた番組は素通し（＝落ち着いた後の順位を動かさない）',
+        near(initialMomentum(prog(120, 0, 10), NOW), 12), '開始10分・累計120人 → 12/分')
+    check('BG 下限の内と外で値が跳ばない（連続）',
+        near(initialMomentum(prog(120, 0, W), NOW), initialMomentum(prog(120, 0, W - 1e-9), NOW)))
+    check('BG 🔴 新着は「落ち着き先より上」から入る（下から登らせる補正にはしない）',
+        initialMomentum(prog(200, 0, 1), NOW) > 20,
+        `開始1分・累計200人（＝定常20/分の番組の入室ラッシュ）→ ${initialMomentum(prog(200, 0, 1), NOW).toFixed(0)}/分`
+        + ' ※落ち着き先の20より上から入ること。利用者の好み（項目BG）')
     check('AY 前回値が無ければ初回扱い',
         near(nextMomentum(null, prog(100, 20, 10), NOW), initialMomentum(prog(100, 20, 10), NOW)))
 

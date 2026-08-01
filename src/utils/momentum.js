@@ -3,6 +3,7 @@ import {
     commentWeightHalfRatio,
     commentWeightSharpness,
     commentWeightViewerFloor,
+    initialMomentumMinWindowMin,
 } from '../config/constants.js'
 
 /**
@@ -91,6 +92,10 @@ export function totalEngagement(info) {
  *
  * 若い番組ではこれが実質そのまま「直近のレート」なので、新番組が不当に沈まない。
  * 逆に長時間放送では平均に寄った値から始まるが、EMA が数周期で直近値へ寄せる。
+ *
+ * ⚠️ **分母には下限がある**（`initialMomentumMinWindowMin`）。入室ラッシュをそのまま
+ * 「1分あたり」にすると新番組が初回で最上位に飛ぶため（doc/09 項目BG）。
+ * **効くのは初回の1点だけ**で、以後は EMA が実データで動くのでこの関数は使われない。
  * @param {object} info programInfo
  * @param {number} now 現在時刻(ms)
  * @returns {number} 1分あたりの勢い
@@ -98,8 +103,11 @@ export function totalEngagement(info) {
 export function initialMomentum(info, now) {
     if (!info) return 0
     const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
-    // 経過が1分未満の番組は「1分」として扱う（0除算と、開始直後の極端な値を避ける）
-    const minutes = Number.isFinite(beginAt) ? Math.max(1, (now - beginAt) / 60000) : 1
+    // 経過がこれ未満の番組は「最低ウィンドウぶん経った」として扱う。
+    // 0除算を避けるためだけでなく、**入室ラッシュがそのまま勢いに化けるのを防ぐ**ため
+    // （下限が1分だと、大型の新番組が初回でいきなり1位に入る。doc/09 項目BG）。
+    const elapsed = Number.isFinite(beginAt) ? (now - beginAt) / 60000 : 0
+    const minutes = Math.max(initialMomentumMinWindowMin, elapsed)
     const v = totalEngagement(info) / minutes
     return Number.isFinite(v) ? v : 0
 }
