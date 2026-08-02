@@ -238,7 +238,7 @@ export class AutoNextManager {
         
         diagNote('自動移動: 監視を始めた（失敗した時だけ記録を出します）'); // 【診断コード】
 
-        const stopper = observeProgramEnd(async () => {
+        const stopper = observeProgramEnd(async (firstSinceArmed) => {
             // 多重進入抑止
             if (this.appState.autoNext.scheduled || this.appState.autoNext.selectingNext) {
                 // 【診断コード】ここで止まると、終了しても何も起きない（モーダルも出ない）
@@ -259,12 +259,23 @@ export class AutoNextManager {
                 //
                 // 待つ目的は「より新しいリストから選ぶ」ことであって、待てないなら今DOMにある
                 // カードから選べばよい。取得自体は裏で走り続けるので、次の周期で反映される。
-                if (typeof updateSidebarFn === 'function') {
+                // 🔴 **取り直すのは「終了を検知した最初の1回」だけ**（doc/09 項目BI-3）。
+                //
+                // 終了ガイドが出ている間、この検知は20秒ごとに再発火する。毎回取り直すと、
+                // **移動先が見つからないページで 20秒ごとの取得が止まらない**（`scheduled` が
+                // 立たないため多重進入ガードにも掛からない）。実測: 通常6回/分・最悪66回/分。
+                // 暴走ではない（回数は時間で決まる）が、常設ループの3倍が延々と続く。
+                //
+                // 2回目以降は**今DOMにあるカードから選ぶ**。リストは常設ループが更新し続けている
+                // ので、待っていれば新しい番組は勝手に入ってくる。取り直す意味が無い。
+                if (firstSinceArmed && typeof updateSidebarFn === 'function') {
                     await Promise.race([
                         // updateSidebar は内部で catch 済みだが、経路が増えても未処理拒否にならないようにする
                         Promise.resolve(updateSidebarFn()).catch(() => {}),
                         new Promise((resolve) => setTimeout(resolve, autoNextListWaitMaxMs)),
                     ]);
+                } else if (!firstSinceArmed) {
+                    diagEvent('自動移動: 再検知（リストは取り直さず、今あるカードから選ぶ）'); // 【診断コード】
                 }
                 const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
                 const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);

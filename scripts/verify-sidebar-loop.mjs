@@ -1250,6 +1250,99 @@ async function programEndConfirmation() {
 }
 
 /**
+ * BI-3: 番組終了の再検知で、リストを何度も取り直さないこと。
+ *
+ * 🔴 **終了ガイドが出ている間、検知は20秒ごとに再発火する。**
+ * 毎回リストを取り直すと、**移動先が見つからないページで取得が止まらない**
+ * （移動先が決まらないと `scheduled` が立たず、多重進入ガードにも掛からない）。
+ * 実測（2026-08-02・DOM変異を45秒で900回発火）: 通常 6回/分・最悪 66回/分が延々と続いた。
+ * 暴走ではない（回数は変異ではなく時間で決まる）が、常設ループの3倍が止まらない。
+ *
+ * ここでは実物の `observeProgramEnd` と `AutoNextManager` を動かし、
+ * **時計を進めて**スロットルの窓を越えさせ、取り直しが1回だけであることを見る。
+ * （実時間で待つと1項目に20秒かかるため、`Date.now` を差し替えて即座に進める）
+ */
+async function endedRecheckDoesNotRefetch() {
+    console.log('=== BI-3 終了の再検知でリストを取り直し続けないこと ===')
+
+    // --- 最小限の DOM/環境スタブ（この項目専用。他の項目の mock-dom とは別物）---
+    const saved = {
+        document: globalThis.document, location: globalThis.location,
+        MutationObserver: globalThis.MutationObserver, now: Date.now,
+        sessionStorage: globalThis.sessionStorage,
+    }
+    let mutationCallbacks = []
+    globalThis.MutationObserver = class {
+        constructor(cb) { this.cb = cb }
+        observe() { mutationCallbacks.push(this.cb) }
+        disconnect() { mutationCallbacks = mutationCallbacks.filter((c) => c !== this.cb) }
+    }
+    const fire = () => { for (const cb of mutationCallbacks.slice()) cb() }
+
+    // 終了ガイドが出ている状態。中身は実装が見る2つ（announcement / next-action-area）を持たせる。
+    let guidePresent = true
+    const guideEl = {
+        querySelector: (sel) => ((sel.includes('announcement') || sel.includes('next-action-area')) ? {} : null),
+        querySelectorAll: () => [],
+    }
+    globalThis.document = {
+        body: {},
+        getElementById: () => null,
+        querySelector: (sel) => ((String(sel).includes('program-end-guide') && guidePresent) ? guideEl : null),
+        querySelectorAll: () => [],   // 移動先の候補は無い＝`scheduled` が立たない経路
+        hidden: false,
+    }
+    globalThis.location = { href: 'https://live.nicovideo.jp/watch/lv1', pathname: '/watch/lv1' }
+    globalThis.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+
+    // 時計を差し替えてスロットルの窓（20秒）を跨がせる
+    let clock = saved.now()
+    Date.now = () => clock
+    const advance = (ms) => { clock += ms }
+
+    try {
+        const { AutoNextManager } = await import(`${SRC}managers/AutoNextManager.js`)
+        const appState = new AppState()
+        const anm = new AutoNextManager(appState, {}, {})
+
+        let refetches = 0
+        anm.startWatcher(async () => { refetches++ })   // startWatcher 内で即時1回チェックされる
+
+        // 変異を大量に起こしても、スロットルの窓の中では再検知しない
+        for (let i = 0; i < 50; i++) fire()
+        check('BI-3 前提: 終了を検知してリストを1回取り直す', refetches === 1, `${refetches} 回`)
+
+        // 窓を越えさせて再検知させる。**ここで取り直してはいけない。**
+        for (let round = 0; round < 5; round++) {
+            advance(21000)
+            fire()
+            await new Promise((r) => setTimeout(r, 0)) // コールバックの await を進める
+        }
+        check('BI-3 🔴 2回目以降の再検知ではリストを取り直さない（20秒ごとの取得が止まらない形にしない）',
+            refetches === 1, `窓を5回跨いで ${refetches} 回`)
+
+        // ガイドが消えて再び出た＝別の番組が終わった。この時は取り直してよい（再武装）。
+        guidePresent = false
+        advance(21000)
+        fire()
+        guidePresent = true
+        advance(21000)
+        fire()
+        await new Promise((r) => setTimeout(r, 0))
+        check('BI-3 ガイドが消えて再び出たら、また取り直す（再武装が効いている）',
+            refetches === 2, `${refetches} 回`)
+
+        anm.stopWatcher()
+    } finally {
+        Date.now = saved.now
+        globalThis.document = saved.document
+        globalThis.location = saved.location
+        globalThis.MutationObserver = saved.MutationObserver
+        globalThis.sessionStorage = saved.sessionStorage
+    }
+}
+
+/**
  * AW: 固定画像運用の番組から flippedListingThumbnail でライブスクショを回収できるか。
  *
  * 回収できないと、その番組は毎サイクル「詳細APIで番組ごとに問い合わせ」に回る（実測で user の約1/3）。
@@ -2321,6 +2414,7 @@ if (real) {
     await danmakuRanking()
     console.log('')
     await programEndConfirmation()
+    await endedRecheckDoesNotRefetch()
     console.log('')
     await r1NoSpin()
     console.log('')

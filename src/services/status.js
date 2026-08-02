@@ -2,6 +2,12 @@
 import { diagFail, diagEvent } from '../utils/diag.js'
 
 /**
+ * 番組終了を検知したら呼ばれる。
+ * @callback OnProgramEnded
+ * @param {boolean} firstSinceArmed 再武装してから最初の検知か（＝リストを取り直してよい回か）
+ */
+
+/**
  * 視聴中の番組が終了したか（ニコ生の「番組終了ガイド」が出ているか）を判定する。
  *
  * ニコ生側の実装（2026-07-31 に `nicolib` / `pc-watch` バンドルから復元）:
@@ -144,8 +150,12 @@ function observeProgramEnd(onEnded) {
 		// ガイド表示中は最小間隔でのみ onEnded を再発火（自己駆動ループ・API暴走の防止）
 		const now = Date.now()
 		if (now - lastFiredAt < PROGRAM_END_RECHECK_MIN_INTERVAL_MS) return
+		// **今回が「再武装してから最初の検知」か**を呼び出し側へ伝える（doc/09 項目BI-3）。
+		// 受け手はこれを見て、リストの強制取り直しを1回だけに絞る。
+		// 2回目以降まで取り直すと、移動先が見つからないページで 20秒ごとの取得が止まらない。
+		const firstSinceArmed = lastFiredAt === 0
 		lastFiredAt = now
-		onEnded()
+		onEnded(firstSinceArmed)
 	}
 
 	// 即時チェック
