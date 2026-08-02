@@ -1,4 +1,4 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { initialMomentum, totalEngagement, commentWeight, commentRatio } from '../utils/momentum.js'
 
@@ -341,6 +341,28 @@ export function applyRankAttributes(el, data) {
     el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))
 }
 
+/**
+ * 拡張が無効化された後でも投げない `chrome.runtime.getURL`。
+ *
+ * 🔴 **この2箇所（handleThumbnailError / syncStaticThumb）が実際に投げていた。**
+ * 2026-08-02 に拡張をアンインストールして観測したスタックがこの2つだけを指した。
+ * 前者は img の error リスナ、後者は rAF の中なので、投げると **Uncaught** になる。
+ * どちらも「ライブサムネを持たない番組がリストに居る回」しか通らないため、
+ * その番組が無い構成では0件・1件足すと2件、と再現も切り分けも取れている。
+ *
+ * 無効化の検知と全ループ停止は checkExtensionAlive の仕事。ここは、
+ * 検知が走るまでの隙間（最大1周期）で uncaught を出さないための当て木。
+ * @returns {string} 取れなければ空文字
+ */
+function safeRuntimeUrl(path) {
+    try {
+        return (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id)
+            ? chrome.runtime.getURL(path) : ''
+    } catch (_e) {
+        return ''
+    }
+}
+
 // サムネイル画像の読み込み失敗時のフォールバック処理。
 // makeProgramElement 生成時に各 img へ addEventListener('error', ...) で配線される。
 function handleThumbnailError() {
@@ -353,8 +375,8 @@ function handleThumbnailError() {
     if (dataSrc && this.src !== dataSrc) {
         this.src = dataSrc
     } else {
-        const loading = chrome.runtime.getURL('images/loading.gif')
-        this.src = loading
+        const loading = safeRuntimeUrl('images/loading.gif')
+        if (loading) this.src = loading // 取れない＝拡張が無効化済み。今出ている絵をそのまま残す
     }
 }
 
@@ -371,6 +393,13 @@ export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
  *
  * 上限で倒しているので**表示は無事**だが、②のコマ化が詰まっているサインではある。
  * 黙って倒すと「動くサムネだけ動かない」に気付けないので、1回だけ鳴らす。
+ *
+ * 🔴 **IndexedDB を疑わせる文面に戻さないこと。** 旧文面はそう書いてあったが、2026-08-02 に
+ * 実測して**外れだと確定した**（doc/09 項目BK）。調べる人を確実に空振りさせる:
+ *   - 起動時の掃除(cleanupFrames)が読みを塞ぐ説 → 600件（上限の2倍）で走査189ms・裏のget 188ms
+ *   - 書き込み量が読みを塞ぐ説 → 35本/秒（現実の10倍・5.25MB/秒）でも get は 6〜15ms
+ *   - 実拡張の正常運転90秒（動くサムネON）では **0回**
+ * IndexedDB はボトルネックではない。1回きりの警告なので、単発の重い瞬間を拾ったと考えるのが妥当。
  */
 let ingestStallWarned = false
 function warnIngestStall() {
@@ -378,9 +407,93 @@ function warnIngestStall() {
     ingestStallWarned = true
     console.warn(
         `[サムネ] 動くサムネへの給餌が ${animIngestWaitMaxMs}ms 以内に返りませんでした。`
-        + '静止サムネはURLで表示します（表示は無事）。動くサムネのコマが貯まらない場合は'
-        + ' IndexedDB（別タブとの競合など）を疑ってください。'
+        + '静止サムネはURLで表示します（表示は無事・コマ化は裏で続きます）。'
+        + '1回きりならメインスレッドが詰まった瞬間を拾っただけで、対処は不要です。'
+        + '毎回出る場合だけ調べてください（IndexedDB は実測で白＝doc/09 項目BK）。'
     )
+}
+
+// ---- ライブサムネ差し替え時のクロスフェード ----
+// レイヤーごとの進行中フェード。差し替えが続けて来た時に前のを止める（WeakMapなのでカード破棄で自然に消える）。
+const thumbFades = new WeakMap()
+
+/**
+ * 古い絵を上に載せてから src を差し替え、新しい絵が出せるようになったら上の絵を薄れさせる
+ * （＝ライブサムネがふわっと入れ替わる）。
+ *
+ * 🔴 **覆いと差し替えは同じ処理の中で済ませること（間に await や setTimeout を挟まない）。**
+ * 挟むと描画が入りうるので、覆う前に新しい絵が出てしまいフェードが無意味になる。
+ * 同期で並んでいる限り**この2行の前後関係自体はどちらでもよい**（次の描画まで画面には出ない）。
+ *
+ * 🔴 **「新しい絵を上でフェードイン → base へ確定」の向きにしないこと。** 確定処理が何かの理由で
+ * 走らないと古い絵が残り続ける＝更新が止まって見える。この向きなら base には常に最新が入っているので、
+ * フェードがどう失敗しても最悪「従来どおり瞬時に切り替わる」までしか壊れない。
+ *
+ * 🔴 **フェードの開始は `decode()` を待つこと。** 待たずに始めると、新しい絵が出るより先に覆いが
+ * 薄れて、途中で絵がボンと入れ替わる（ここが「ふわっと」の実質）。
+ *
+ * @param {HTMLImageElement} img カードの静止サムネ
+ * @param {string} next 新しく表示する画像のURL
+ */
+function crossfadeThumbnail(img, next) {
+    const thumb = img.closest ? img.closest('.program_thumbnail') : null
+    const prev = img.currentSrc || img.src
+    // 覆う絵が無い（初回表示・読込失敗中）ならフェードのしようがない。そのまま差し替える。
+    if (!(thumbnailCrossfadeMs > 0) || !thumb || !prev || !img.complete || !img.naturalWidth) {
+        img.src = next
+        return
+    }
+
+    let layer = thumb.querySelector('.thumb_fade_layer')
+    if (!layer) {
+        layer = document.createElement('img')
+        layer.className = 'thumb_fade_layer'
+        // 🔴 `alt=""` を外さないこと。フェード後に src を手放すので、次の差し替えでは
+        // 「まだ何も読めていない img」を不透明にする瞬間がある。alt が空なら仕様上そこは
+        // **何も描かれない**（＝下のベースサムネがそのまま見える＝見た目に変化なし）。
+        // alt があると壊れた画像アイコンが全面に一瞬出る。
+        layer.alt = ''
+        thumb.appendChild(layer)
+    }
+    // 前回のフェードを先に畳む。アニメーションは style.opacity より強いので、
+    // 走ったままだと下の「不透明で覆う」指定が効かない。
+    const running = thumbFades.get(layer)
+    if (running) {
+        clearTimeout(running.safety)
+        if (running.anim) running.anim.cancel()
+    }
+    const state = { anim: null, safety: 0 }
+    thumbFades.set(layer, state)
+
+    // ① 古い絵で不透明に覆い、② そのまま差し替える。ここは同期で続けること（上の🔴）。
+    layer.style.opacity = '1'
+    layer.src = prev
+    img.src = next
+
+    // ③ 新しい絵が出せる状態になったら薄れさせ、下の新しい絵を見せる
+    let started = false
+    const fadeOut = () => {
+        if (started || thumbFades.get(layer) !== state) return // 次の差し替えが始まっていたら手を引く
+        started = true
+        clearTimeout(state.safety)
+        layer.style.opacity = '' // CSSの0へ戻し、その間をアニメーションで埋める（fill無しで終了後は0）
+        state.anim = layer.animate(
+            [{ opacity: 1 }, { opacity: 0 }],
+            { duration: thumbnailCrossfadeMs, easing: 'ease' }
+        )
+        state.anim.finished.then(() => {
+            // デコード済み画像を抱えたままにしない（カードの数だけ積み上がる）
+            if (thumbFades.get(layer) !== state) return
+            layer.removeAttribute('src')
+            thumbFades.delete(layer)
+        }, () => { /* cancel＝次の差し替えが来た。後始末はそちらの担当 */ })
+    }
+    // decode を待つのは「新しい絵が出る前に覆いが消えて、切り替わりがボンと見える」のを防ぐため。
+    // 🔴 **タイマーの蹴り出しを外さないこと。** タブが非表示だと decode が返らないことがあり、
+    // 返らないままだと古い絵で覆ったまま固まる（＝更新が止まって見える）。
+    state.safety = setTimeout(fadeOut, thumbnailCrossfadeMs + 1000)
+    if (img.decode) img.decode().then(fadeOut, fadeOut)
+    else fadeOut()
 }
 
 /**
@@ -397,7 +510,7 @@ function warnIngestStall() {
  */
 function showThumbnail(img, url, frame) {
     const next = frame && frame.url ? frame.url : url
-    if (img.src !== next) img.src = next
+    if (img.src !== next) crossfadeThumbnail(img, next)
     if (frame && frame.url) img.dataset.thumbSeq = String(frame.seq)
     else delete img.dataset.thumbSeq   // URL表示＝コマと同一である保証が無い（末尾スロットに任せる）
     // 1世代前の blob を解放する。直前に表示していたものは、新しい画像のデコード中もまだ画面に出て
@@ -501,7 +614,8 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
     function syncStaticThumb(img) {
         const dataSrc = img.getAttribute('data-src')
         if (!dataSrc) return
-        const loadingUrl = chrome.runtime.getURL('images/loading.gif')
+        const loadingUrl = safeRuntimeUrl('images/loading.gif')
+        if (!loadingUrl) return              // 拡張が無効化済み。触らず帰る（次の tick で全体が止まる）
         if (dataSrc === loadingUrl) return   // 出す先が無い（元から静止サムネ不明）
         if (img.src === dataSrc) return      // 既に出している
         if (img.dataset.staticTried === dataSrc) {

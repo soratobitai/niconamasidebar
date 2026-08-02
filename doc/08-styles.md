@@ -39,6 +39,7 @@
 |---------|------|
 | `.program_container` | 1番組カード。`id`=番組数値ID、属性 `active-point`（盛り上がり＝人気順の第1キー）と `data-total`（累計＝同点時の第2キー） |
 | `.program_thumbnail .anim_thumb_overlay` / `.anim_thumb_layer` / `.show` | 🧪実験。動くサムネのホバー用オーバーレイ（div, `inset:0`, `pointer-events:none`, **`z-index:1`**）。内部に2枚の `.anim_thumb_layer`(img) を重ね、`opacity`(0.4s)でクロスフェード。生成/制御は `render/animatedThumbnail.js`。⚠️ **`z-index` は必ずベースサムネの上・ホバーボタンの下**（「別窓くん」の `.nicolive_link_button_wrap` は `z-index:2`）。div自身が stacking context になり内部レイヤーの z-index は外に漏れない |
+| `.program_thumbnail .thumb_fade_layer` | ライブサムネ差し替え時のクロスフェード用レイヤー（img, `inset:0`, `pointer-events:none`, 既定 `opacity:0`）。**古い絵**をここへ載せて薄れさせ、下のベースサムネ（新しい絵）を出す。生成/制御は `render/sidebar.js` の `crossfadeThumbnail`。`opacity`/`transition` はJSがインラインで指定（Web Animations）。⚠️ **`z-index` を付けないこと**＝「位置指定あり・`z-index:auto`」でベースサムネより上・`.anim_thumb_overlay`(z-index:1) より下に必ず入る（DOM順に依存しない）。⚠️ `pointer-events:none` 必須（ベースサムネは `<a>` の中。覆うとリンクが押せない。透明でもヒットテストには残る） |
 | `.program_container .provider` | 配信者行（アイコン＋名前）。⚠️ 旧 `.community`（ニコ生のコミュニティ廃止に伴い 2026-07-31 改名） |
 | `.provider a` / `.provider img` | 丸い配信者アイコン（40px, `border-radius:50%`） |
 | `.provider .provider_name` | 配信者名（1行省略 `text-overflow:ellipsis`）。旧 `.community_name` |

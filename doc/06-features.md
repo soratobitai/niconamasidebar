@@ -48,6 +48,13 @@
 - 定期更新: `UpdateManager.startThumbnailLoop`（**常設ループ1本＋番組ごとの期限表**）。`_thumbDueAt` Map（id→次に更新してよい時刻）が唯一の正で、`_thumbTick` が「期限の来た1件の `<img>` を更新→画像の読み込み完了(`updateThumbnailsFromStorage` の **`onSettled`**)を待って→**完了してから** `updateThumbnailInterval`(**20秒**)先へ期限を置き直す」を回す。周期＝20秒＋その回の作業時間なので、読み込み時に一斉に始まっても少しずつ自然にズレる（**ドリフト**＝「リストが一斉に切り替わるのが気持ち悪い」というUX要望に沿ったもの）。実処理 `updateThumbnailsFromStorage`（TTL10秒・失敗バックオフ2〜60秒・プリロード成功時のみ差替・**コンテナ内の全img対象**。旧・可視限定(IntersectionObserver)は撤去）。新規/削除カードは `_refreshThumbSchedule`→`_syncThumbDueAt`（`updateSidebar` 末尾）が期限表を追従させる。読み込み時の一斉更新は `performManualUpdate` が担う（定期 `updateSidebarInterval` の全件 `updateThumbnail()` 呼び出しは撤去）。
 - **ネットワーク詳細取得は最小限**: このループは storage に保存済みの**安定したライブサムネURL＋キャッシュバスター**で `<img>` を更新するだけ。例外として、ライブサムネ空かつ放送開始から `newProgramFastPollMs`=3分以内の若い user 番組だけ各サイクルで詳細API(`fetchProgramInfo`)を1回追撃する（`_fetchLiveThumbIfPendingYoung`。旧A1の別建てバッチ `_retryPendingLiveThumbnails`／`THUMB_RETRY_MAX_ATTEMPTS`/`PER_CYCLE` は撤去し各サイクルに統合）。3分超の空番組はスクレイプ `fillMissingDetails`（60〜180秒）に委譲。プリロード成功画像は動くサムネ②へも給餌される（§15）。
 - **背景（非表示）タブ**: `_thumbTick` は `document.hidden` の間は画像更新を行わず次の期限だけ置き直す（rAF が止まり `onSettled` が来ないため）。可視復帰後は通常サイクルへ戻り、一斉更新は `performManualUpdate` が担う。停止は `destroyThumbnailLoop`（`cleanup`＝ページ離脱**のみ**。サイドバーを閉じても止めない）。⚠️ **リスト更新側は背景タブを見ない**（意図的な非対称。doc/09 項目AH のポリシー表）。旧・60秒しきい値（`visibilityFullRefreshMs`）による「軽量/しっかり更新」の区別は廃止（詳細は毎回フロントAPIで全件更新されるため）。
+- **差し替えはクロスフェード**（`crossfadeThumbnail`／`thumbnailCrossfadeMs`=500ms・2026-08-02）: 新しい絵に切り替わる瞬間がパッと変わらないよう、**古い絵を `.thumb_fade_layer` に載せて不透明で覆ってから** `img.src` を差し替え、新しい絵が `decode()` できたら覆いを薄れさせる。0 にするとフェード無し（従来どおり瞬時）。
+  - 🔴 **覆いと差し替えは同じ処理の中で済ませる**（間に `await`/`setTimeout` を挟まない）。挟むと描画が入りうるので、覆う前に新しい絵が出てフェードが無意味になる。同期で並んでいる限り2行の前後関係自体はどちらでもよい。
+  - 🔴 **「新しい絵を上でフェードイン→baseへ確定」の向きにしない**。確定処理が走らないと古い絵が残る＝更新が止まって見える。今の向きなら base には常に最新が入っており、フェードがどう失敗しても最悪「瞬時に切り替わる」までしか壊れない。
+  - 🔴 **フェードの開始は `decode()` を待つ**。待たずに始めると新しい絵が出るより先に覆いが薄れ、途中で絵がボンと入れ替わる（ここが「ふわっと」の実質）。
+  - 非表示タブでは `decode()` が返らないことがあるため、必ずタイマー（フェード時間＋1秒）で蹴り出す。フェード後は `src` を手放す（デコード済み画像をカードの数だけ抱えないため）。
+  - 動くサムネ(§15)のホバーオーバーレイは `z-index:1` でこの上に来るので干渉しない。`img.src` は覆っている間に最新へ入るため、末尾スロットの判定（`getLiveStaticSrc`）にも影響しない。
+  - ⚠️ **もう1本の表示経路（`applyProgramInfoToCard` の直接代入。doc/09 項目BB）はフェードしない。** あちらは「サムネが出ない」の安全網なので、見た目のためにこの関数へ依存させない。フェード側が何かで詰まっても復帰経路まで巻き添えにしないための線引き。
 - 対応設定: **直接のUI項目なし**（フォームのヘルプに「サムネは設定と無関係に20〜60秒で自動更新」と明記）。`updateThumbnailInterval` 保存キーは既定に無く実質固定20秒。
 
 ## 5. 定期自動更新（番組リスト＋詳細）
@@ -57,6 +64,7 @@
   リストと突き合わせてカードを組み、`programsSort` でソート → カウント更新。詳細がカード生成時点で揃っているので**初回描画から人気度が確定**する。失敗時 `#api_error`。
 - **詳細取得はフロントAPIに一本化**: 従来の「1番組=詳細API×N」＋レート制限キューは廃止（`queue.js` / `ProgramInfoQueue` 削除）。フロントAPIを通常1リクエスト（100件超はページングで数リクエスト）叩いて全放送中フォロー番組の詳細を取得する。→ [04-data-flow](./04-data-flow.md) / [05-external-api](./05-external-api.md)
 - 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢30/60/120/180）。変更時、開いていれば `resetSidebarSchedule`。
+- **拡張が無効化されたら自分で止まる**（2026-08-02・doc/09 項目BK）: 拡張を再読み込み/更新/無効化しても content script は動き続ける。`_sidebarTick` / `_thumbTick` の先頭で `checkExtensionAlive()`（`chrome.runtime.id`）を見て、消えていたら**張り直さずに打ち切り**、`cleanup('invalidated')` を1回だけ走らせる。これが無いと取り残されたタブがニコ生への取得を続ける（実測: 無効化後60秒で サムネ+9回・follow+1・notifybox+1）。🔴 `_sidebarTick` は **`try` に入る前に return**（try 内だと `finally` が次を張って生き残る）。
 
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`（比較器は `utils/programOrder.js`）。`active`=`active-point`降順（人気順）、`newest`=**`beginAt` 降順**（新着順。`data-api-index` 昇順として実装）。

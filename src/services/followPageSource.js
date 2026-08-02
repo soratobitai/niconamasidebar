@@ -189,14 +189,29 @@ async function fillMissingDetails(programs) {
 }
 
 /**
- * 固定画像の番組から flippedListingThumbnail でライブスクショを回収できなかったら1回だけ警告する（鳴る罠）。
+ * 固定画像の番組から flippedListingThumbnail でライブスクショを回収できなくなったら1回だけ警告する（鳴る罠）。
  *
  * 回収できていれば**完全に無言**。応答から flipped が消える／形が変わると、詳細APIでの補完
  * （番組ごと・毎サイクル・最大30件）が静かに復活するだけで、画面上は何も変わらないので気付けない。
- * ⚠️ 包まれた形（listing-thumbnail プロキシ経由）ばかりだった回も鳴りうる。実測では22件中2件なので稀。
+ *
+ * 🔴 **`flipped` を持っていない番組を母数に入れないこと。** 旧実装はそれをやっていて誤報していた
+ * （2026-08-02 に利用者のコンソールで実際に1件鳴った。doc/09 項目BK）。
+ * 実測（同日・公開の recent 版で user 70件）:
+ *   - `flippedListingThumbnail` を持つ番組は **17/70**。持たないのが普通で、欠落ではない。
+ *   - 固定画像運用は19件。うち flipped を持つ17件は **17/17 回収できていた**。
+ *   - 残る2件は `listingThumbnail` 自体が**プロキシに包まれたスクショ**
+ *     (`listing-thumbnail…/?url=<エンコードした dlive URL>`) で、この形の時 API は flipped を返さない。
+ *     これは**こちらが意図的に弾いている形**（緩めると項目AA の事故）＝仕様どおり詳細APIへ回るだけ。
+ * 旧条件は「回収できた数が0なら鳴らす」だったので、リストにこの形が1件しか無い回に必ず鳴った。
+ *
  * @param {Array<object>} raw フォローAPIの生データ
  * @param {Array<object>} mapped 写像後の programInfo
  */
+// 「1件も flipped を持っていない」を異常とみなすのに必要な母数。実測で持たない番組は約1割なので、
+// 数件の回はたまたま全部そうなりうる。少ない回は黙る（誤報より見逃しを選ぶ＝実害は通信量だけ）。
+const FLIPPED_TRAP_MIN_SAMPLE = 8
+// 「flipped は来ているが1件も使えない」を異常とみなすのに必要な母数（下記②）。
+const FLIPPED_TRAP_MIN_CARRIERS = 3
 let flippedWarned = false
 function warnIfFlippedThumbMissing(raw, mapped) {
     if (flippedWarned) return
@@ -208,14 +223,33 @@ function warnIfFlippedThumbMissing(raw, mapped) {
         return m && m.providerType === 'user' && p.listingThumbnail && !isLiveScreenshotUrl(p.listingThumbnail)
     })
     if (fixed.length === 0) return
-    const recovered = fixed.filter((p) => byId.get(String(p.id)).thumbnailUrl).length
+
+    const warn = (why, sample) => {
+        flippedWarned = true
+        console.warn(
+            `[followApi] ${why}（詳細APIでの番組ごと補完に戻ります）。`
+            + 'flippedListingThumbnail の有無/形を確認してください。実際のキー:',
+            Object.keys(sample || {})
+        )
+    }
+
+    // ① フィールドごと消えた疑い: 固定画像番組がそれなりの数あるのに、誰も flipped を持っていない。
+    const carriers = fixed.filter((p) => !!p.flippedListingThumbnail)
+    if (carriers.length === 0) {
+        if (fixed.length < FLIPPED_TRAP_MIN_SAMPLE) return // 母数不足。偶然と区別できないので黙る
+        warn(`固定画像の番組 ${fixed.length}件が1つも flippedListingThumbnail を持っていません`, fixed[0])
+        return
+    }
+
+    // ② 形が変わった疑い: flipped は来ているのに、1件も採用できる形ではない。
+    // こちらも1件だけの回では鳴らさない。**flipped が包まれた形で来ることもある**
+    // （doc/09 項目AW の実測 2026-07-31: 22件中2件。※2026-08-02 の70件では0件）ので、
+    // 母数1でそれを引いたら①と同じ誤報になる。本当に形が変わったなら母数は十分大きくなる
+    // （実測の carriers は17件）。
+    if (carriers.length < FLIPPED_TRAP_MIN_CARRIERS) return
+    const recovered = carriers.filter((p) => byId.get(String(p.id)).thumbnailUrl).length
     if (recovered > 0) return
-    flippedWarned = true
-    console.warn(
-        `[followApi] 固定画像の番組 ${fixed.length}件からライブスクショを回収できませんでした`
-        + '（詳細APIでの番組ごと補完に戻ります）。flippedListingThumbnail の有無/形を確認してください。実際のキー:',
-        Object.keys(fixed[0] || {})
-    )
+    warn(`flippedListingThumbnail を持つ ${carriers.length}件からライブスクショを回収できませんでした`, carriers[0])
 }
 
 /**

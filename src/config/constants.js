@@ -42,6 +42,9 @@ export const newProgramFastPollMs = 180000; // 3分
 export const thumbnailTtlMs = 10000; // 成功後この時間は再取得しない（フリッカー抑制）
 export const thumbnailRetryBaseMs = 2000; // エラー時の再試行ベース間隔
 export const thumbnailRetryMaxMs = 60000; // エラー時の再試行最大間隔
+// ライブサムネが新しい絵に差し替わる時のクロスフェード時間（ミリ秒）。
+// 0 にするとフェードなし（従来どおり瞬時に切り替わる）。
+export const thumbnailCrossfadeMs = 500;
 
 // ローディングセッションのタイムアウト（ミリ秒）
 export const loadingSessionTimeoutMs = 60000; // 60秒

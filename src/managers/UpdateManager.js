@@ -6,6 +6,7 @@ import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
 import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle } from '../config/constants.js';
+import { checkExtensionAlive } from '../utils/extensionAlive.js';
 
 /**
  * 終了と**確認して**消した番組が notifybox に戻ってきた時に1回だけ警告する（鳴る罠）。
@@ -275,6 +276,9 @@ export class UpdateManager {
     async _thumbTick() {
         this._thumbLoopTimer = null; // 自分は発火済み
         if (this._thumbLoopStopped) return;
+        // 拡張が再読み込み/更新/無効化されていたら、ここで打ち切る（**張り直さない**）。
+        // 放っておくと取り残された content script が取得を続ける（実測: 無効化後60秒でサムネ+9回）。
+        if (!checkExtensionAlive()) return;
         // 先行の tick が await 中なら重ねない。重なると同じ番組を連続更新して暴走する。
         // （先行側が finally で必ず張り直すので、ここは何もせず戻ってよい）
         if (this._thumbTickBusy) return;
@@ -490,6 +494,9 @@ export class UpdateManager {
     async _sidebarTick() {
         this._sidebarLoopTimer = null; // 自分は発火済み
         if (this._sidebarLoopStopped) return;
+        // 拡張が無効化されていたら打ち切る（**finally の張り直しへ入る前に return する**）。
+        // try の中で返すと finally が次を張ってしまい、止めたつもりでループが生き残る。
+        if (!checkExtensionAlive()) return;
         try {
             // 閉じている間は取得しない（旧実装の stopAllTimers 相当。ループは生かしたまま素通り）
             if (!this._isSidebarOpen()) return;

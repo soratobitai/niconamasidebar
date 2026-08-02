@@ -239,7 +239,9 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `deriveCardFields(data)` | 番組データ→カードに書く値一式（id/リンク/配信者名/サムネURL/アイコン/タイトル）を導出する純関数。`makeProgramElement` と `applyProgramInfoToCard` の**共通の土台**。`data.id` は `lv` 有無どちらでも受ける（カードDOM id は数値・視聴URLは `lv` 付き、という規約の唯一の生成点） |
 | `applyProgramInfoToCard(card, data)` ★ | **既存カードを作り直さずにその場で更新**（タイトル/リンク先/配信者名/アイコン/`data-src`）。⚠️ `img.src` は**触らない**（サムネ更新ループの担当。触ると動くサムネの状態が壊れる）。項目AK の修正本体 |
 | `setAnimThumbnailFeed(feed)` | 動くサムネ(②)への給餌フックを注入。①が `crossOrigin` で読んだ画像を②へ渡し、**②が返したコマをそのまま静止サムネにも表示する**（同じ1枚を共有＝「静止サムネ＝最新コマ」が構造的に成立。項目AV） |
+| （内部）`safeRuntimeUrl(path)` | 拡張が無効化された後でも投げない `chrome.runtime.getURL`。🔴 **この当て木を外さないこと。** 実測で `Uncaught Error: Extension context invalidated` を出していたのは `handleThumbnailError`（imgのerrorリスナ）と `syncStaticThumb`（rAF内＝uncaughtになる）の2箇所だけで、どちらもここを通る。無効化の検知と全ループ停止は `checkExtensionAlive` の仕事で、これは検知が走るまでの隙間（最大1周期）を埋めるもの（doc/09 項目BK） |
 | （内部）`showThumbnail(img, url, frame)` | 静止サムネの表示を確定。②のコマがあればそれを出して `dataset.thumbSeq` を記録、無ければ取得URLを出して記録を消す。blob URL の所有者はこちらで、**1世代遅れで** revoke する（表示中のものを消さないため） |
+| （内部）`crossfadeThumbnail(img, next)` | 差し替えをふわっと見せる。**古い絵を `.thumb_fade_layer` に載せて不透明で覆ってから** `img.src=next`、新しい絵が `decode()` できたら Web Animations で覆いを 1→0 へ（`thumbnailCrossfadeMs`=500ms、0でフェード無し）。🔴 覆いと差し替えは同期で続ける（間に await/setTimeout を挟まない。順序自体はどちらでもよい）／🔴 逆向き（新しい絵を上でフェードイン→baseへ確定）にしない＝確定が走らないと古い絵が残る／🔴 フェード開始は `decode()` を待つ（待たないと途中で絵がボンと入れ替わる）。非表示タブで `decode()` が返らない事故に備えタイマーで必ず蹴り出し、フェード後は `src` を手放す。進行中フェードは `thumbFades`(WeakMap) で持ち、連続差し替え時に前のアニメを `cancel()` してから覆い直す（アニメは `style.opacity` より強いので消さないと覆えない） |
 | `releaseThumbnailBlobs(card)` | リストから外れるカードが抱えている blob URL を解放（`updateSidebar` の差し替え直前に呼ぶ）。外れた要素はDOMから辿れなくなるため、ここで手放さないとページ滞在中ずっと残る |
 | `flipReorder(container, reorderFn, duration=300)` | FLIPアニメで並べ替えを滑らかに見せる。First(位置記録)→`reorderFn()`で同期並べ替え→Invert(旧位置へtransform)→Play(rAFでtransition付きで新位置へ)→後始末(setTimeout)。移動量0はスキップ。**`UpdateManager.updateSidebar` から現役で呼ばれている**（定期更新の並べ替えアニメ本体）。🔴 `reorderFn` の中でフラグメントを組むこと。外で組むと既存カードが親から外れた状態で First を測ることになり、**毎回空振りする**（項目AM） |
 | `buildSidebarShell({reloadImageURL, optionsImageURL})` ★ | サイドバー枠HTML(`sidebarHtml`)・境界線(`sidebarLine`)・オプションフォーム(`optionHtml`)の文字列を返す。`main.js` が body に挿入。オプションフォームの全ラジオ(表示順序/自動更新/オートオープン/自動移動)はここに定義 |
@@ -354,6 +356,26 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | 関数 | 説明 |
 |------|------|
 | `debounce(fn, delay)` | 標準的なデバウンス。`main.js` のリサイズ(30ms)で使用 |
+
+---
+
+## utils/extensionAlive.js ★（拡張の無効化検知・2026-08-02 新設）
+
+拡張を再読み込み/更新/無効化しても、注入済みの content script は動き続ける。放置すると
+**ニコ生への取得が止まらない**（実測: 無効化後60秒で サムネ+9回・follow+1・notifybox+1）。doc/09 項目BK。
+
+| 関数 | 説明 |
+|------|------|
+| `isExtensionAlive()` | `chrome.runtime.id` があるか。参照自体が投げることがあるので try で包む |
+| `onExtensionInvalidated(fn)` | 無効化を検知した時の後始末を登録。`main.js` が `cleanup('invalidated')` を登録する |
+| `checkExtensionAlive()` | 生死を確かめ、死んでいたら登録済みの後始末を**1回だけ**走らせる。生きていれば `true`。各ループの tick 先頭から呼ぶ（専用タイマーを増やさず、止めたい対象そのものが検知点になる） |
+| `_resetExtensionAliveForTest()` | 検知済みフラグと登録を戻す（検証用） |
+
+🔴 **`_sidebarTick` では `try` に入る**前に** return すること。** try の中で返すと `finally` が
+次の目覚ましを張り、**止めたつもりでループが生き残る**（取得は0回なので見た目では気付けない）。
+🔴 **無効化での後始末に `cleanup()` を素で呼ばないこと。** 冒頭の関門4診断が必ず誤検知する
+（「後始末が走ったのにページが生き残っている」＝無効化では正常）。`cleanup('invalidated')` で飛ばす。
+🔴 **`verify:loop` の chrome スタブに `runtime.id` を残すこと。** 無いと全ループが即死して14項目落ちる。
 
 ---
 

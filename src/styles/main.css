@@ -290,6 +290,22 @@ body.nicosidebar-light {
     object-fit: contain;
 }
 
+/* ライブサムネ差し替え時のクロスフェード用レイヤー（古い絵を上に載せて薄れさせる）。
+   z-index は指定しない＝「位置指定ありの z-index:auto」なので、位置指定なしの実サムネ img より上、
+   z-index:1 の動くサムネオーバーレイより下に必ず入る（DOM順に依存しない）。
+   pointer-events:none 必須。実サムネは <a> の中にあるので、覆うとリンクが押せなくなる。
+   opacity は JS が都度インラインで指定し、フェード自体は Web Animations で行う
+   （フェード時間 = thumbnailCrossfadeMs）。
+   ⚠️ will-change を足さないこと。このレイヤーは**カードの数だけ**常駐するので、
+   常時の合成レイヤー確保はそのまま数十枚ぶんのメモリになる。opacity アニメーションの間は
+   ブラウザが自動で合成へ載せるため、宣言しなくても滑らかさは変わらない。 */
+.program_container .program_thumbnail .thumb_fade_layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+}
+
 /* 動くサムネ（ホバー中のオーバーレイ・2レイヤーでクロスフェード） */
 .program_container .program_thumbnail .anim_thumb_overlay {
     position: absolute;

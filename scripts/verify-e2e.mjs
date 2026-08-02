@@ -4,7 +4,7 @@
  *   npm run verify:e2e
  *
  * 本物の Chrome に dist/ の拡張を読ませ、視聴ページとAPIの応答だけこちらで差し替える。
- * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約7分。
+ * **niconico へのログインは不要**で、実サーバには一切アクセスしない。所要 約9分。
  * 検証用の一時プロファイルで起動するので、普段使いの Chrome には影響しない。
  *
  * 【前提】`npm i` 済み（playwright-core）＋ `npm run build` 済み（dist/ が最新であること）。
@@ -142,7 +142,8 @@ for (let i = 0; i < 80; i++) {
 }
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`)
 const bs = await browser.newBrowserCDPSession()
-await bs.send('Extensions.loadUnpacked', { path: EXT.replace(/\/$/, '') })
+const loaded = await bs.send('Extensions.loadUnpacked', { path: EXT.replace(/\/$/, '') })
+const EXT_ID = loaded && loaded.id
 log('拡張を読み込みました（CDP Extensions.loadUnpacked）')
 
 const ctx = browser.contexts()[0]
@@ -338,6 +339,128 @@ for (let i = 0; i < 3 && !(await isOpen()); i++) {
 }
 check('AV 前提: サイドバーが開いている（閉じているとサムネ更新は動かない）', await isOpen())
 await page.waitForTimeout(1000)
+
+// ===== BJ ライブサムネ差し替え時のクロスフェード ==============================
+// 動くサムネはまだOFF（AVで後からONにする）＝ここで見るのは素のURL表示経路。
+//
+// 【なぜ requestAnimationFrame で覗くか】フェードは0.5秒ほどしかない。外から page.evaluate を
+// 連打すると往復の遅れで山場を跨いでしまうので、ページ側に観測を置いて毎フレーム記録させ、
+// 終わってからまとめて回収する。
+//
+// 【何を「本物」として見ているか】getComputedStyle の opacity。Web Animations が走っている間は
+// **実際に合成に使われている値**がここに出る。自前のフラグではなくブラウザの合成状態を読む。
+{
+    // サムネ更新ループは document.hidden で素通りする。ここを忘れると1回もフェードが起きず、
+    // 「観測できなかった」なのか「壊れている」なのか区別が付かなくなる。
+    await page.bringToFront()
+    const v = await page.evaluate(() => document.visibilityState)
+    check('BJ 前提: タブが可視（サムネ更新は背景タブでは動かない）', v === 'visible', `visibilityState=${v}`)
+
+    await page.evaluate(() => {
+        window.__fadeLog = []
+        window.__fadeWatch = true
+        const tick = () => {
+            if (!window.__fadeWatch) return // 観測は BJ の窓だけ。AV の計測に余計な負荷を残さない
+            const cards = document.querySelectorAll('#liveProgramContainer .program_container')
+            for (const card of cards) {
+                const layer = card.querySelector('.thumb_fade_layer')
+                if (!layer) continue
+                const im = card.querySelector('.program_thumbnail_img')
+                window.__fadeLog.push({
+                    t: performance.now(),
+                    id: card.id,
+                    op: parseFloat(getComputedStyle(layer).opacity),
+                    layerSrc: layer.getAttribute('src') || '',
+                    baseSrc: im ? im.src : '',
+                })
+            }
+            requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+    })
+    log('   サムネの差し替えを 45秒 観測中（サムネ周期20秒）…')
+    await page.waitForTimeout(45000)
+    const fadeLog = await page.evaluate(() => { window.__fadeWatch = false; return window.__fadeLog })
+
+    // カードごとに「覆いが立ってから消えるまで」を1回のフェードとして切り出す。
+    // op が 0 から上がった所を始まり、0 に戻った所を終わりとみなす。
+    const fades = []
+    const open = new Map()
+    for (const s of fadeLog) {
+        const cur = open.get(s.id)
+        if (s.op > 0) {
+            if (cur) { cur.samples.push(s) } else { open.set(s.id, { id: s.id, samples: [s] }) }
+        } else if (cur) {
+            cur.endT = s.t
+            fades.push(cur)
+            open.delete(s.id)
+        }
+    }
+
+    // 空振り防止。1件も観測できていないなら以下の合格は全て無意味なので、まずそこを落とす。
+    check('BJ 前提: 観測期間中に実際にフェードが起きた', fades.length > 0,
+        `フェード ${fades.length} 回 / 記録 ${fadeLog.length} フレーム`)
+
+    // ① 覆いは「古い絵」で、その時すでに下は「新しい絵」。これがクロスフェードの実体。
+    //    ここが崩れる＝同じ絵を重ねているだけ（＝見た目が変わらない）か、覆う前に切り替わっている。
+    const sameSrc = fades.filter((f) => f.samples.some((s) => !s.layerSrc || s.layerSrc === s.baseSrc))
+    check('BJ 上に載っているのは古い絵で、下はもう新しい絵になっている',
+        fades.length > 0 && sameSrc.length === 0,
+        `重なりが同じ絵だったフェード ${sameSrc.length} / ${fades.length} 回`)
+
+    // ② 立ち上がりは不透明。ここが 1 に届いていないと、切り替わりの瞬間に下の絵が透けて見える。
+    const weak = fades.filter((f) => Math.max(...f.samples.map((s) => s.op)) < 0.98)
+    check('BJ 差し替えの瞬間は古い絵が完全に覆っている（下の絵が透けない）',
+        fades.length > 0 && weak.length === 0,
+        `最大不透明度が足りないフェード ${weak.length} / ${fades.length} 回`)
+
+    // ③ 中間の値を通っている＝本当に薄れている（0→1の瞬間切替ではない）。
+    const noMid = fades.filter((f) => !f.samples.some((s) => s.op > 0.05 && s.op < 0.95))
+    check('BJ 途中の濃さを通っている（瞬時に消えるのではなく薄れている）',
+        fades.length > 0 && noMid.length === 0,
+        `中間値が無かったフェード ${noMid.length} / ${fades.length} 回`)
+
+    // ④ 目で見て「ふわっと」と感じる長さに収まっているか。
+    //    🔴 期待値を thumbnailCrossfadeMs から作らないこと。実装を書き換えても一緒に動いてしまい、
+    //       「一瞬で消える」「いつまでも残る」のどちらも検出できなくなる。人が見て妥当な幅で固定する。
+    const durs = fades.map((f) => f.endT - f.samples[0].t)
+    const bad = durs.filter((d) => d < 200 || d > 2000)
+    check('BJ フェードの長さが 0.2〜2.0 秒に収まっている',
+        fades.length > 0 && bad.length === 0,
+        `長さ: ${durs.map((d) => Math.round(d)).join(', ')} ms`)
+
+    // ⑤ 固着しないこと。最後は必ず透明に戻り、抱えた画像も手放している。
+    //    ここが壊れると古い絵で覆ったまま止まる＝「サムネが更新されない」に見える（最悪の壊れ方）。
+    const stuck = await page.evaluate(() => {
+        const out = { opaque: 0, holding: 0, layers: 0 }
+        for (const l of document.querySelectorAll('.thumb_fade_layer')) {
+            out.layers++
+            if (parseFloat(getComputedStyle(l).opacity) > 0.01) out.opaque++
+            if (l.hasAttribute('src')) out.holding++
+        }
+        return out
+    })
+    check('BJ フェード後に覆いが残らない（古い絵で固まらない）',
+        stuck.layers > 0 && stuck.opaque === 0,
+        `不透明のまま ${stuck.opaque} / レイヤー ${stuck.layers} 枚`)
+    check('BJ フェード後は画像を手放している（カードの数だけ抱え込まない）',
+        stuck.layers > 0 && stuck.holding === 0,
+        `src を持ったまま ${stuck.holding} / レイヤー ${stuck.layers} 枚`)
+
+    // ⑥ 回帰テスト: 覆いが番組リンクのクリックを奪っていないか。
+    //    透明でも要素はヒットテストに残るので、pointer-events:none が抜けると常時押せなくなる。
+    const hit = await page.evaluate(() => {
+        const t = document.querySelector('#liveProgramContainer .program_container .program_thumbnail')
+        if (!t) return null
+        const r = t.getBoundingClientRect()
+        if (r.width < 4 || r.height < 4) return null
+        const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return { cls: el ? el.className : '(なし)', inLink: !!(el && el.closest('.program_thumbnail a')) }
+    })
+    check('BJ 🔴 覆いが番組リンクのクリックを奪っていない',
+        !!(hit && hit.inLink), hit ? `当たった要素: "${hit.cls}"` : '(サムネが見えていない)')
+}
+
 // この節の操作は全て JS クリックで行う。設定パネルはサイドバー内にあり、項目によっては
 // viewport の外に出て Playwright の click が「outside of the viewport」で通らないため。
 await page.evaluate(() => document.getElementById('setting_options').click()); await page.waitForTimeout(400)
@@ -418,6 +541,50 @@ check('AV アニメが再生されている（2コマ以上めくれた）', new
 check('AV 🔴 今表示している絵がアニメのコマに含まれる（最新欠落の回帰テスト）',
     staticN >= 0 && seen.indexOf(staticN) >= 0,
     `静止=色${staticN} / コマ列: ${seen.join(' → ')}`)
+
+// ===== BK 拡張が無効化されたら、取り残されたページが自分で止まること ==================
+// 🔴 **必ず最後に置くこと。** 拡張を消すので、これ以降どの項目も動かない。
+//
+// 【なぜ実ブラウザで見るか】これは「本物の無効化」でしか起きない状態で、
+// `verify:loop` は chrome.runtime.id を差し替えて論理だけを見ている。
+// 実測（2026-08-02・修正前）: 無効化後60秒で **サムネ+9回**・別の回で follow+1 / notifybox+1、
+// さらに `Uncaught Error: Extension context invalidated` が2件（doc/09 項目BK）。
+{
+    const pageErrors = []
+    page.on('pageerror', (e) => pageErrors.push(String((e && e.message) || e)))
+    await page.bringToFront()
+    await page.waitForTimeout(3000)
+
+    // 空振り防止: 消す前に「本当に取得が動いている」ことを確かめる。
+    // ここが0なら以下の「0回になった」は何も証明しない。
+    const t0 = { thumb: thumbHits.length, follow: hits.length, notify: notifyboxHits }
+    await page.waitForTimeout(25000)
+    const alive = thumbHits.length - t0.thumb
+    check('BK 前提: 消す前はサムネ取得が動いている', alive > 0, `25秒で ${alive} 回`)
+
+    let removed = false
+    try {
+        await bs.send('Extensions.uninstall', { id: EXT_ID })
+        removed = true
+    } catch (e) {
+        log(`  （Extensions.uninstall が使えないためBKは飛ばす: ${e.message}）`)
+    }
+    if (removed) {
+        pageErrors.length = 0
+        const t1 = { thumb: thumbHits.length, follow: hits.length, notify: notifyboxHits }
+        await page.waitForTimeout(45000)
+        const after = {
+            thumb: thumbHits.length - t1.thumb,
+            follow: hits.length - t1.follow,
+            notify: notifyboxHits - t1.notify,
+        }
+        check('BK 🔴 無効化した後はニコ生への取得が止まる（取り残されたタブが叩き続けない）',
+            after.thumb === 0 && after.follow === 0 && after.notify === 0,
+            `45秒で サムネ${after.thumb} / follow${after.follow} / notifybox${after.notify}`)
+        check('BK 無効化した後に Uncaught を出さない',
+            pageErrors.length === 0, pageErrors.slice(0, 3).join(' / ') || 'なし')
+    }
+}
 
 await browser.close()
 try { child.kill() } catch (_) {}

@@ -27,7 +27,10 @@ const SRC = new URL('../src/', import.meta.url).href
 
 // --- 最小限のブラウザAPIスタブ（import と LoadingManager.updateLoadingState 用） ---
 globalThis.chrome = {
-    runtime: { getURL: (p) => 'chrome-extension://test/' + p },
+    // 🔴 `id` を消さないこと。本物の content script では必ず入っており、**これが undefined になる＝
+    // 拡張が無効化された合図**として各ループが自分を止める（項目BK）。スタブに無いと全ループが
+    // 「無効化された」と判断して即死し、周期・描画まわりの項目が丸ごと落ちる。
+    runtime: { id: 'test-extension-id', getURL: (p) => 'chrome-extension://test/' + p },
     storage: { local: { get: () => {}, set: () => {} }, onChanged: { addListener: () => {} } },
 }
 globalThis.document = {
@@ -167,6 +170,69 @@ async function d4() {
     const p = periods(marks)
     const ok = p.length >= 2 && p.slice(-2).every((x) => Math.abs(x - 3000) < 250)
     check('D4 新しい間隔（2s＋作業1s＝3.00s）で回る', ok, `実測: ${fmt(p)}`)
+}
+
+/**
+ * BK: 拡張が無効化されたら、取り残されたループが自分で止まること。
+ *
+ * 【なぜ要るか】拡張を再読み込み/更新/無効化しても、注入済みの content script は動き続ける。
+ * 検知が無かった頃は**ニコ生への取得が延々と続いていた**（実測 2026-08-02: 無効化後60秒で
+ * サムネ+9回・別の回で follow+1 / notifybox+1）。doc/09 項目BK。
+ *
+ * 【落とし穴】「止まった」だけを見る検査は、**常に止まる実装でも通ってしまう**（空振り）。
+ * 先に「生きている間は回り続ける」を同じ土台で確かめてから、無効化して止まることを見る。
+ * さらに **finally の張り直しを通っていないこと**（＝内部タイマーが残っていないこと）まで見る。
+ * try の中で return すると finally が次を張るので、止めたつもりで生き残る。
+ */
+async function invalidated() {
+    const realChrome = globalThis.chrome
+    try {
+        // --- ① 生きている間は回る（この土台で本当に取得が起きることの確認＝空振り防止） ---
+        const { um, marks } = build(1, 100)
+        um.startSidebarLoop()
+        await sleep(5200) // 周期は約2秒（間隔1s＋最低表示1s）。2周期は確実に入る長さを取る
+        const alive = marks.length
+        check('BK 前提: 拡張が生きている間はリスト取得が回る', alive >= 2, `${alive} 回`)
+
+        // --- ② 無効化する（本物と同じく chrome.runtime.id が消える） ---
+        globalThis.chrome = { ...realChrome, runtime: { ...realChrome.runtime, id: undefined } }
+        const atInvalidate = marks.length
+        await sleep(5200) // 生きていれば2回は回る長さ。ここで0回なら本当に止まっている
+        const after = marks.length - atInvalidate
+        check('BK 🔴 無効化した後はリスト取得が1回も起きない', after === 0, `無効化後 ${after} 回`)
+
+        // --- ③ 内部タイマーが残っていない（finally の張り直しを通っていない） ---
+        check('BK 次の目覚ましを張り直していない（止めたつもりで生き残らない）',
+            um._sidebarLoopTimer === null, `_sidebarLoopTimer=${um._sidebarLoopTimer}`)
+
+        // --- ④ 後始末フックが1回だけ走る（毎tick走ると cleanup が何度も動く） ---
+        const { _resetExtensionAliveForTest, onExtensionInvalidated, checkExtensionAlive } =
+            await import(`${SRC}utils/extensionAlive.js`)
+        _resetExtensionAliveForTest()
+        let fired = 0
+        onExtensionInvalidated(() => { fired++ })
+        checkExtensionAlive(); checkExtensionAlive(); checkExtensionAlive()
+        check('BK 後始末フックは何度検知しても1回だけ', fired === 1, `${fired} 回`)
+
+        // ⑤ 登録が1箇所だけであること。④は「1回の検知で複数回呼ばない」を見るが、
+        //    **同じ後始末を2箇所で登録する**ミスは素通りする（実際に一度やった）。
+        //    その場合 cleanup が2回走り、動くサムネの解放やモーダル操作が二重に動く。
+        const { readFileSync } = await import('fs')
+        const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
+        const regs = (mainSrc.match(/^\s*onExtensionInvalidated\(/gm) || []).length
+        check('BK 後始末の登録は1箇所だけ（二重登録で cleanup が2回走らない）', regs === 1, `${regs} 箇所`)
+        // 登録はループを起こす前に済んでいること（検知は1回で打ち止め＝先に気付かれると永久に走らない）
+        const regAt = mainSrc.search(/^\s*onExtensionInvalidated\(/m)
+        const loopAt = mainSrc.indexOf('startSidebarLoop()')
+        check('BK 後始末の登録がループ開始より前にある', regAt >= 0 && loopAt >= 0 && regAt < loopAt,
+            `登録=${regAt} / ループ開始=${loopAt}`)
+
+        um.destroySidebarLoop()
+    } finally {
+        globalThis.chrome = realChrome
+        const { _resetExtensionAliveForTest } = await import(`${SRC}utils/extensionAlive.js`)
+        _resetExtensionAliveForTest()
+    }
 }
 
 /** D5: 手動更新の後に位相が数え直されるか */
@@ -1382,6 +1448,88 @@ async function flippedThumb() {
 }
 
 /**
+ * BK: 固定画像の警告（鳴る罠）が、正常な応答で鳴らないこと。
+ *
+ * 【なぜ要るか】旧条件は「回収できた数が0なら鳴らす」だった。実測（2026-08-02・公開の recent 版で
+ * user 70件）では固定画像19件のうち**2件は listingThumbnail 自体が包まれたスクショ**で、
+ * その形の時 API は flippedListingThumbnail を返さない＝**回収するものが無いのが正常**。
+ * リストにその形が1件しか無い回は必ず鳴っていた（利用者のコンソールで実際に発生）。
+ *
+ * 【空振り防止】「鳴らない」だけを並べると、罠を丸ごと消しても全部通る。
+ * **鳴るべき2つの壊れ方（フィールド消失・形の変化）で実際に鳴ること**を同じ土台で確かめる。
+ */
+async function flippedTrap() {
+    console.log('=== BK 固定画像の警告が誤報しない／壊れた時は鳴る ===')
+    const SHOT = 'https://asset2.dlive.nicovideo.jp/915e/abc/screenshot/123/thumbnail-352x198/screenshot.jpg'
+    const FIXED = 'https://listing-thumbnail.live.nicovideo.jp?image=prod-lv1/thumbnail_1.png&w=352&h=198'
+    // 実測で「回収できない」に分類された形。listingThumbnail 自体が包まれたスクショで flipped は来ない
+    const WRAPPED = 'https://listing-thumbnail.live.nicovideo.jp/?url=' + encodeURIComponent(SHOT)
+    let seq = 0
+    const prog = (extra) => ({
+        id: `lv${++seq}`, title: 't', providerType: 'community', liveCycle: 'ON_AIR',
+        programProvider: { id: String(seq), name: 'n' }, statistics: {}, beginAt: Date.now(), ...extra,
+    })
+
+    // 応答だけ差し替えて**本物の fetchFollowedProgramsViaPage** を走らせ、console.warn を拾う。
+    // 罠は1回で打ち止めるモジュール変数なので、シナリオごとに import を作り直す。
+    let tag = 0
+    const warnsFor = async (programs) => {
+        const realFetch = globalThis.fetch, realWarn = console.warn, realErr = console.error
+        const warns = []
+        console.warn = (...a) => warns.push(a.map((x) => (Array.isArray(x) ? x.join(',') : String(x))).join(' '))
+        console.error = () => {} // 詳細API補完の失敗ログは本題ではないので伏せる
+        globalThis.fetch = async (url) => String(url).includes('/front/api/pages/follow/v1/programs')
+            ? { ok: true, status: 200, json: async () => ({ data: { programs, total: programs.length } }) }
+            : { ok: false, status: 404, json: async () => ({}) }
+        try {
+            const mod = await import(new URL(`../src/services/followPageSource.js?trap=${++tag}`, import.meta.url).href)
+            await mod.fetchFollowedProgramsViaPage()
+        } finally {
+            globalThis.fetch = realFetch; console.warn = realWarn; console.error = realErr
+        }
+        return warns.filter((w) => w.includes('[followApi]'))
+    }
+
+    // ① 利用者のコンソールで実際に鳴った形。これが本命の回帰テスト
+    const one = await warnsFor([prog({ listingThumbnail: SHOT }), prog({ listingThumbnail: WRAPPED })])
+    check('BK 🔴 包まれた固定画像が1件だけの回で鳴らない（利用者が踏んだ誤報）',
+        one.length === 0, one[0] ? one[0].slice(0, 100) : '無言')
+
+    // ② 今日の実データ相当（回収できる番組と、できない包まれた番組が混在）
+    const mixed = await warnsFor([
+        ...Array.from({ length: 5 }, () => prog({ listingThumbnail: FIXED, flippedListingThumbnail: SHOT })),
+        ...Array.from({ length: 2 }, () => prog({ listingThumbnail: WRAPPED })),
+        prog({ listingThumbnail: SHOT }),
+    ])
+    check('BK 回収できている回は無言（実測 17/19 が回収できる形）', mixed.length === 0,
+        mixed[0] ? mixed[0].slice(0, 100) : '無言')
+
+    // ③ 母数が少なく全部が包まれた形 → 偶然と区別できないので黙る
+    const few = await warnsFor(Array.from({ length: 3 }, () => prog({ listingThumbnail: WRAPPED })))
+    check('BK 母数が少ない回（3件）は黙る', few.length === 0, few[0] ? few[0].slice(0, 100) : '無言')
+
+    // ④ 壊れ方その1: フィールドごと消えた（固定画像が10件あるのに誰も flipped を持たない）
+    const gone = await warnsFor(Array.from({ length: 10 }, () => prog({ listingThumbnail: FIXED })))
+    check('BK 🔴 flipped がフィールドごと消えたら鳴る', gone.length === 1,
+        gone[0] ? gone[0].slice(0, 90) : '鳴らなかった')
+
+    // ⑤ flipped が包まれた形で来る番組が1件だけ → これも偶然ありうるので黙る
+    //    （doc/09 項目AW の実測 2026-07-31 では 22件中2件がこの形だった）
+    const oneWrappedFlip = await warnsFor([
+        prog({ listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED }),
+        prog({ listingThumbnail: SHOT }),
+    ])
+    check('BK flipped が包まれた形の番組が1件だけの回も黙る', oneWrappedFlip.length === 0,
+        oneWrappedFlip[0] ? oneWrappedFlip[0].slice(0, 100) : '無言')
+
+    // ⑥ 壊れ方その2: flipped は来るが全部が採用できない形になった（母数あり）
+    const changed = await warnsFor(Array.from({ length: 3 }, () =>
+        prog({ listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED })))
+    check('BK 🔴 flipped の形が変わったら鳴る', changed.length === 1,
+        changed[0] ? changed[0].slice(0, 90) : '鳴らなかった')
+}
+
+/**
  * R-3(A): 2つの取得元の和集合が正しく作られるか。
  *
  * notifybox は「早さ」担当（user番組の新着検知が 20〜101秒 速い）、
@@ -1668,6 +1816,45 @@ async function r4() {
     check('R-4 startSession の先頭に「奪わない」ガードがある',
         /if \(this\.currentUpdateSessionId\) return null/.test(startFn),
         'これが消えると上書きが復活し、押せるのに無反応が再発する')
+}
+
+/**
+ * BJ-static: サムネのクロスフェード用レイヤーが番組リンクを塞いでいないこと。
+ *
+ * `.thumb_fade_layer` はサムネ枠を全面に覆う `<img>` で、ベースサムネは `<a>` の**中**にある。
+ * `pointer-events: none` が抜けると**透明なまま常時**クリックを吸うので、番組カードが押せなくなる
+ * （opacity:0 でもヒットテストには残る＝フェード中だけの問題ではない）。
+ *
+ * 実挙動は `verify:e2e`（項目BJ）が elementFromPoint で見ているが、そちらは約8分かかる。
+ * 一番痛い1点だけはここで即座に落とせるようにしておく。
+ */
+async function fadeLayerStatic() {
+    const { readFileSync } = await import('fs')
+    const css = readFileSync(new URL('../src/styles/main.css', import.meta.url), 'utf8')
+
+    // ルール本体を切り出す（見つからない＝レイヤーごと消えた or 改名された、も検出したい）
+    const at = css.indexOf('.thumb_fade_layer {')
+    const rule = at >= 0 ? css.slice(at, css.indexOf('}', at)) : ''
+    check('BJ-static .thumb_fade_layer のCSSルールがある', rule.length > 0,
+        at >= 0 ? `${rule.length} 文字` : '⚠ ルールが見つからない（改名したなら本検査も直すこと）')
+    check('BJ-static 🔴 覆いが pointer-events:none（番組リンクを塞がない）',
+        /pointer-events\s*:\s*none/.test(rule),
+        rule ? '' : '（ルールが取れていないので判定不能）')
+    // 位置指定ありで z-index を持たない＝ベースサムネの上・動くサムネのオーバーレイ(z-index:1)の下。
+    // z-index を足すと重なり順がDOM順や値に依存し、ホバーアニメを覆い隠しうる。
+    check('BJ-static 覆いに z-index を足していない（動くサムネの下に留まる）',
+        rule.length > 0 && !/z-index/.test(rule),
+        /z-index/.test(rule) ? '⚠ z-index が入った。.anim_thumb_overlay(z-index:1) との上下を再確認すること' : '')
+
+    // 逆向き（新しい絵を上でフェードイン→baseへ確定）へ作り替えられていないこと。
+    // 確定処理が走らないと古い絵が残る＝更新が止まって見えるので、向きは設計上の要。
+    const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    const fn = sb.slice(sb.indexOf('function crossfadeThumbnail'), sb.indexOf('\n}', sb.indexOf('function crossfadeThumbnail')))
+    check('BJ-static 覆いに載せるのは「古い絵」・base へ入れるのが「新しい絵」',
+        /layer\.src\s*=\s*prev/.test(fn) && /img\.src\s*=\s*next/.test(fn),
+        fn.length ? '' : '⚠ crossfadeThumbnail を特定できなかった')
+    check('BJ-static 覆いを外す蹴り出しタイマーがある（decode が返らなくても固まらない）',
+        /setTimeout\(fadeOut/.test(fn))
 }
 
 /**
@@ -2389,6 +2576,9 @@ if (real) {
     await noDouble()
     await sessionOnClose()
     await d6Static()
+    await fadeLayerStatic()
+    console.log('')
+    await invalidated()
     console.log('')
     await ac1()
     await ac2()
@@ -2398,6 +2588,8 @@ if (real) {
     await r3merge()
     console.log('')
     await flippedThumb()
+    console.log('')
+    await flippedTrap()
     console.log('')
     await newProgramThumb()
     console.log('')

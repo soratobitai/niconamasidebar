@@ -18,6 +18,7 @@ import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimated
 import './services/followPageSource.js'
 // 【診断コード】原因が分かったら import ごと消す
 import { diagEvent, diagFail } from './utils/diag.js'
+import { onExtensionInvalidated } from './utils/extensionAlive.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
@@ -115,8 +116,15 @@ const setup = async () => {
     autoNextManager = new AutoNextManager(appState);
     updateManager = new UpdateManager(appState, loadingManager, options, elems, loadingImageURL);
 
+    // 拡張が再読み込み/更新/無効化された時のクリーンアップ。**ループを起こす前に登録すること。**
+    // 検知は各ループの tick 先頭（checkExtensionAlive）で、専用タイマーは増やさない。
+    // 検知は1回で打ち止めなので、登録前に tick が先に気付くと後始末が永久に走らなくなる。
+    // これが無いと、取り残された content script がニコ生への取得を延々と続ける
+    // （実測 2026-08-02: 無効化後60秒で サムネ+9回、別の回で follow+1 / notifybox+1）。
+    onExtensionInvalidated(() => cleanup('invalidated'));
+
     // サイドバー更新の常設ループを開始する。ページ滞在中ずっと1本だけ回り、
-    // 停止は cleanup（beforeunload/pagehide）の destroySidebarLoop だけ。
+    // 停止は cleanup（beforeunload/pagehide の 'unload'、または上の 'invalidated'）だけ。
     // 開閉による停止/再開はしない（閉じている間は _sidebarTick が isOpen を見て素通りする）。
     updateManager.startSidebarLoop();
     // サムネ更新の常設ループも同様に1回だけ開始する（番組ごとの期限はループ内で管理）。
@@ -323,9 +331,11 @@ const setup = async () => {
         feedbackAnchor.style.right = 0;
     }
 
-    // ページ離脱時のクリーンアップ
-    window.addEventListener('beforeunload', cleanup);
-    window.addEventListener('pagehide', cleanup);
+    // ページ離脱時のクリーンアップ（イベント引数を reason に流し込まないよう包む）
+    window.addEventListener('beforeunload', () => cleanup('unload'));
+    window.addEventListener('pagehide', () => cleanup('unload'));
+    // ※ 無効化時の後始末（onExtensionInvalidated）は**ループを起こす前**に登録済み（上を参照）。
+    //   ここに書き足さないこと。二重登録すると cleanup が2回走る。
 
     // タブの可視/非表示による一時停止・復帰処理は行わない。
     // サイドバーが開いている間は各更新ループを常時走らせ続ける（非表示中も止めず、復帰時も何もしない）。
@@ -333,22 +343,30 @@ const setup = async () => {
 }
 
 // クリーンアップ関数
-const cleanup = () => {
-    // 【診断コード】関門4。ここが走った後もページが生き残ると、監視が止まったまま
-    // `scheduled` も立ったままになり、**自動移動が二度と動かない**（モーダルも出ない）。
-    //
-    // 「生き残ったかどうか」はここでは分からないので、少し先に見に行く。
-    // 本当にページを離れたならこのタイマーは発火しない＝正常時は何も出ない。
-    diagEvent('ページ離脱の後始末が走った（監視を止める・カウントダウンを消す）');
-    setTimeout(() => {
-        if (options.autoNextProgram !== 'on') return;
-        const watching = !!(appState.autoNext && appState.autoNext.liveStatusStopper);
-        if (watching) return; // 監視が張り直されている＝問題なし
-        diagFail(
-            '後始末が走ったのにページが生き残っている。監視が止まったままなので、'
-            + `このページでは自動移動が二度と動かない（scheduled=${appState.autoNext.scheduled}）`
-        );
-    }, 3000);
+// @param {'unload'|'invalidated'} [reason] 既定は 'unload'（ページ離脱）。
+//        'invalidated' = 拡張が再読み込み/更新/無効化され、取り残された content script を畳む場合。
+const cleanup = (reason) => {
+    // 🔴 **無効化での後始末では、関門4の診断を鳴らしてはいけない。**
+    // 下の診断は「後始末が走ったのにページが生き残っている＝異常」を見るものだが、
+    // 無効化ではページが生き残るのが**正常**なので、必ず誤検知する。
+    // ここを素通しにすると、利用者が今ためている自動移動の診断記録が嘘で埋まる。
+    if (reason !== 'invalidated') {
+        // 【診断コード】関門4。ここが走った後もページが生き残ると、監視が止まったまま
+        // `scheduled` も立ったままになり、**自動移動が二度と動かない**（モーダルも出ない）。
+        //
+        // 「生き残ったかどうか」はここでは分からないので、少し先に見に行く。
+        // 本当にページを離れたならこのタイマーは発火しない＝正常時は何も出ない。
+        diagEvent('ページ離脱の後始末が走った（監視を止める・カウントダウンを消す）');
+        setTimeout(() => {
+            if (options.autoNextProgram !== 'on') return;
+            const watching = !!(appState.autoNext && appState.autoNext.liveStatusStopper);
+            if (watching) return; // 監視が張り直されている＝問題なし
+            diagFail(
+                '後始末が走ったのにページが生き残っている。監視が止まったままなので、'
+                + `このページでは自動移動が二度と動かない（scheduled=${appState.autoNext.scheduled}）`
+            );
+        }, 3000);
+    }
 
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
