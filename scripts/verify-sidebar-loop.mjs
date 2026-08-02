@@ -1103,20 +1103,26 @@ async function danmakuRanking() {
 }
 
 /**
- * BF: notifybox から消えた番組を「終了」とみなして外す。
+ * BF-2: 番組が終了したかを**詳細APIに聞いて確かめてから**外す。
  *
  * 🔴 **この機能の失敗は「放送中の番組が黙って消える」で、エラーが一切出ない。**
  * よって「消えること」より**「消えてはいけない時に消えないこと」**のほうを厚く固定する。
+ *
+ * 🔴 **件数で守ろうとして3回失敗した歴史がある**（2026-08-01〜02）。
+ *   - 「要求数ぴったり／実績値ちょうどの応答は疑う」→ 5件の応答が素通りして事故が起きた
+ *   - 「フォローAPIより少なければ怪しい」→ 終了検知が常に止まる
+ *   - 「notifybox が返した範囲より古い番組は触らない」→ **いちばん古い番組が永久に消えない**
+ * **不在から終了を導くのをやめた**のが今の形。ここでは「導いていないこと」を固定する。
  */
-async function notifyboxEndDetection() {
+async function programEndConfirmation() {
     const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
-    const { notifyboxRows, notifyboxKnownCap } = await import(new URL('../src/config/constants.js', import.meta.url).href)
-    console.log('=== BF notifybox から消えた番組を終了とみなす ===')
+    console.log('=== BF-2 番組終了は詳細APIに聞いて確かめる ===')
     const NOW = Date.now()
     const h = buildRenderHarness({ programsSort: 'newest' })
     const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
     const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
     const ids = () => h.dom.ids().join(',')
+    const has = (n) => ids().split(',').includes(String(n))
     const prog = (n, ageMin) => apiProgram({ id: `lv${n}`, beginAtMs: NOW - ageMin * 60000 })
     const row = (n) => ({ id: String(n), title: `t${n}`, community_name: `c${n}`, thumbnail_url: '', provider_type: 'community' })
 
@@ -1124,75 +1130,122 @@ async function notifyboxEndDetection() {
     h.state.followPrograms = [prog(700, 30), prog(701, 20), prog(702, 10)]
     h.state.notifyRows = [row(702), row(701), row(700)]
     await run()
-    check('BF 前提: 3番組が並ぶ', ids() === '702,701,700', ids())
+    check('BF-2 前提: 3番組が並ぶ', ids() === '702,701,700', ids())
 
-    // ② lv701 が終了。**フォローAPI はまだ返し続けている**（これが直したい状況）
+    // ② notifybox から消え、詳細APIも「終了した」と答える → 外す。
+    //    **フォローAPI はまだ返し続けている**（これが直したい状況）
     h.state.notifyRows = [row(702), row(700)]
+    h.state.endedIds = new Set(['701'])
     await run()
-    check('BF 🔴 notifybox から消えたらフォローAPIがまだ返していても外す',
+    check('BF-2 🔴 詳細APIが ended と答えたら、フォローAPIがまだ返していても外す',
         ids() === '702,700', ids() + '（フォローAPIは3件返し続けている）')
 
-    // ③ notifybox の取得が失敗した周期は**判定そのものを止める**（通信断で全消しが最悪の壊れ方）。
-    //    フォローAPIはまだ lv701 を返しているので、**一度消した番組が戻る**。これは承知のうえの
-    //    安全側の挙動。消したidを永続的に抑止すると、判断が誤っていた時に生きている番組を
-    //    永久に隠すことになる（そちらのほうが遥かに悪い）。
+    // ③ 🔴 **ここが今の設計の肝。** notifybox から消えても、詳細APIが「放送中」と答えるなら残す。
+    //    旧実装は notifybox の不在だけで消していたので、この状況で放送中の番組が消えていた。
+    h.state.notifyRows = [row(702)]           // 700 も notifybox から消える
+    h.state.endedIds = new Set(['701'])       // が、700 は放送中のまま
+    await run()
+    check('BF-2 🔴 notifybox から消えても、詳細APIが on_air なら消さない',
+        has(700), ids() + '（700 は notifybox に居ないが放送中）')
+
+    // ④ 詳細APIが答えない周期（通信断・404）は消さない。**判断材料が無い時は消さない。**
+    h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(704, 5)]
+    h.state.notifyRows = [row(702)]
+    h.state.detailFails = true
+    await run()
+    check('BF-2 🔴 詳細APIが答えない周期は1件も消さない',
+        has(700) && has(704), ids())
+    h.state.detailFails = false
+
+    // ⑤ notifybox の取得が失敗した周期は、新たな疑いを立てない（通信断で全消しが最悪の壊れ方）。
+    //    ⚠️ ただし**既に確認済みの番組は消えたまま**にする。ここで戻すと、notifybox が不安定な間
+    //       「終わった番組が出たり消えたり」を繰り返す。
+    h.state.followPrograms = [prog(700, 30), prog(701, 20), prog(702, 10)]
+    h.state.notifyRows = [row(702), row(700)]
+    h.state.endedIds = new Set(['701'])
+    await run()
+    check('BF-2 前提: 701 を終了として外している', !has(701), ids())
     h.state.notifyFails = true
     await run()
-    check('BF 🔴 notifybox が失敗した周期は1件も消さない（＝終了済みが一時的に戻るのは承知の上）',
-        ids() === '702,701,700', ids())
+    check('BF-2 🔴 notifybox が失敗した周期は、新たに消さない（700 が生きている）', has(700), ids())
+    check('BF-2 🔴 確認済みの番組は notifybox の失敗では戻らない', !has(701), ids())
     h.state.notifyFails = false
 
-    // ④ notifybox が戻れば、また消える。
-    //    🔴 **ここが「印を足し込む」ことの検証。** 印を毎周期 live で置き換える実装だと、②で
-    //    lv701 の印が落ちているので「notifybox が知らない番組」に化けて**二度と消せなくなる**
-    //    （消えて出て、を繰り返す）。この項目はその実装では必ず落ちる。
+    // ⑥ 🔴 **いちばん古い番組が終了しても消えること。**
+    //
+    //    2026-08-02 に実コードで再現したバグの再発防止。旧実装の条件4は
+    //    「notifybox が返した中でいちばん古い番組より古い番組は触らない」だったため、
+    //    **いちばん古い番組が終わると基準がそれより新しい番組へ繰り上がり、自分が自動的に
+    //    範囲の外になって永久に消えなかった**（長時間放送の番組ほど当たる）。
+    //    真ん中の番組で試すと通ってしまうので、**必ずいちばん古い番組で試すこと。**
+    h.state.followPrograms = [prog(810, 180), prog(811, 120), prog(812, 60)]
+    h.state.notifyRows = [row(812), row(811), row(810)]
+    h.state.endedIds = new Set()
     await run()
-    check('BF 🔴 notifybox が復活したら、また消える（一度消した番組が復活し続けない）',
-        ids() === '702,700', ids())
+    check('BF-2⑥ 前提: 3番組（810 がいちばん古い）', ids() === '812,811,810', ids())
+    h.state.notifyRows = [row(812), row(811)]
+    h.state.endedIds = new Set(['810'])
+    await run()
+    check('BF-2⑥ 🔴 いちばん古い番組が終了しても消える（範囲の外に逃げないこと）',
+        !has(810), ids() + '（810 は3時間前開始でいちばん古い）')
 
-    // ⑤ notifybox が知らない番組は触らない。
-    //    lv703 は**フォローAPIにだけ**現れる（notifybox の守備範囲外を模す）。
-    //    この条件が無いと、出た瞬間に消える。
-    h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(703, 5)]
-    h.state.notifyRows = [row(702), row(700)]
+    // ⑦ 🔴 **2026-08-01 の事故の再現。** notifybox が rows を無視して新しい順に5件しか返さない。
+    //    旧実装は「返らなかった＝終了」と推測したので放送中の番組が大量に消えた。
+    //    今は**全部に問い合わせて on_air が返る**ので、1件も消えない。
+    //    ⚠️ 件数で守っていないことの証明でもある。5件は要求数にも実績値にも一致しない。
+    const many = []
+    const manyRows = []
+    for (let i = 0; i < 21; i++) {
+        many.push(prog(9000 + i, 200 - i * 5)) // 古い順に並ぶ（9000 がいちばん古い）
+        manyRows.push(row(9000 + i))
+    }
+    h.state.followPrograms = many
+    h.state.notifyRows = manyRows.slice().reverse() // notifybox は新しい順
+    h.state.endedIds = new Set()
     await run()
-    check('BF 🔴 notifybox に一度も載っていない番組は消さない（守備範囲外かもしれない）',
-        ids().split(',').includes('703'), ids())
+    check('BF-2⑦ 前提: 21番組が並ぶ', ids().split(',').length === 21, `${ids().split(',').length}件`)
+    // notifybox が新しい順に5件しか返さなくなる（rows が黙って無視された時の形）
+    h.state.notifyRows = manyRows.slice().reverse().slice(0, 5)
     await run()
-    check('BF 🔴 何周期経っても消さない（「そのうち消える」では意味が無い）',
-        ids().split(',').includes('703'), ids())
+    check('BF-2⑦ 🔴 notifybox が5件しか返さなくても、放送中の番組は1件も消えない',
+        ids().split(',').length === 21, `${ids().split(',').length}件 / ${ids()}`)
+    // その状態で1件だけ本当に終了したら、その1件だけ消える
+    h.state.endedIds = new Set(['9000']) // いちばん古い番組
+    await run()
+    check('BF-2⑦ 🔴 5件しか返らない状態でも、本当に終了した番組は消える',
+        !has(9000) && ids().split(',').length === 20, `${ids().split(',').length}件`)
 
-    // ⑥ あふれた疑いのある応答は不在を根拠にしない。**notifybox の真の上限は不明**なので
-    //    2本立てで守っている（項目BF）。両方を別々に見る。
-    const flood = (n, startId) => { const a = []; for (let i = 0; i < n; i++) a.push(row(startId + i)); return a }
-    const alive700 = () => ids().split(',').includes('700')
-
-    //   (a) 要求した数ぴったり返った＝こちらの要求で頭打ちになった疑い
-    h.state.notifyRows = flood(notifyboxRows, 9000)
-    h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(703, 5)]
+    // ⑧ 応答が空の周期でも、確認して初めて消える（空応答での全消しが最悪の壊れ方）
+    h.state.followPrograms = [prog(820, 60), prog(821, 30)]
+    h.state.notifyRows = [row(820), row(821)]
+    h.state.endedIds = new Set()
     await run()
-    check(`BF 🔴 要求数(${notifyboxRows}件)ぴったりの応答は不在を根拠にしない`,
-        alive700(), `lv700 の生死: ${alive700() ? '生存' : '消えた'}`)
-
-    //   (b) 実績値ちょうど返った＝サーバ側がそこで頭打ちの仕様だった場合の疑い。
-    //       要求数(500)には遠く届かないので (a) では捕まらない。**この項目が (b) の存在意義**。
-    h.state.notifyRows = flood(notifyboxKnownCap, 9000)
+    check('BF-2⑧ 前提: 2番組が並ぶ', ids().split(',').length === 2, ids())
+    h.state.notifyRows = []
     await run()
-    check(`BF 🔴 実績値(${notifyboxKnownCap}件)ちょうどの応答も不在を根拠にしない（真の上限が不明なので）`,
-        alive700(), `要求は${notifyboxRows}件なので (a) では捕まらない / lv700: ${alive700() ? '生存' : '消えた'}`)
+    check('BF-2⑧ 🔴 notifybox が空でも、詳細APIが on_air なら全部残る',
+        has(820) && has(821), ids())
 
-    //   (c) 🔴 実績値を**超えた**応答は素通しすること。ここを `>=` で書くと、真の上限が要求値
-    //       だった場合に終了検知が常に止まる。**`>=` 実装ならこの項目が落ちる。**
-    h.state.notifyRows = flood(notifyboxKnownCap + 50, 9000)
+    // ⑨ 1周期の問い合わせ数に上限があること（notifybox が壊れた時の暴走止め）。
+    //    上限を超えた分は次の周期に回るだけで、消えることはない。
+    const { endCheckMaxPerCycle } = await import(new URL('../src/config/constants.js', import.meta.url).href)
+    const lots = [], lotsRows = []
+    for (let i = 0; i < endCheckMaxPerCycle + 10; i++) {
+        lots.push(prog(8500 + i, 200 - i))
+        lotsRows.push(row(8500 + i))
+    }
+    h.state.followPrograms = lots
+    h.state.notifyRows = lotsRows.slice().reverse()
+    h.state.endedIds = new Set()
     await run()
-    check(`BF 🔴 実績値を超える応答(${notifyboxKnownCap + 50}件)では終了判定が働く（>= で書くと止まる）`,
-        !alive700(), `lv700 の生死: ${alive700() ? '生存（＝ >= で書かれている）' : '消えた'}`)
-
-    // ⑦ 通常の応答に戻ったら、また根拠として使える（⑥の封じが恒久化していないこと）
-    h.state.notifyRows = [row(702)]
-    h.state.followPrograms = [prog(702, 10)]
+    h.state.notifyRows = []          // 全部が疑いになる
+    h.state.calls.detail = 0
     await run()
-    check('BF 通常の応答に戻れば、また終了判定に使える', ids() === '702', ids())
+    check(`BF-2⑨ 🔴 1周期の問い合わせは上限(${endCheckMaxPerCycle}件)まで`,
+        h.state.calls.detail <= endCheckMaxPerCycle,
+        `${h.state.calls.detail}件 問い合わせた（疑いは ${lots.length}件）`)
+    check('BF-2⑨ 上限を超えても番組は消えない（次の周期に回るだけ）',
+        ids().split(',').length === lots.length, `${ids().split(',').length}/${lots.length}件`)
     h.restore()
 }
 
@@ -2008,9 +2061,21 @@ async function render() {
     check('AT 繋ぎのアイコンだった data-src が実サムネURLに差し替わる',
         (img777.getAttribute('data-src') || '').includes('/screenshot/'), img777.getAttribute('data-src'))
 
+    // 🔴 **放送中の番組は notifybox にも載っているのが実際の姿。**
+    //    片方にしか載せないと、項目BF-2 の終了確認が「notifybox に居ない＝疑い」として
+    //    詳細APIに問い合わせる。**それは正しい動作**なので、下の「詳細APIを呼んでいない」
+    //    （＝サムネ/名前の補完で呼んでいないこと）を見たい検証では、両方に載せて土台を揃える。
+    const syncNotify = () => {
+        h.state.notifyRows = h.state.followPrograms.map((p) => ({ id: String(p.id).replace(/^lv/, ''), title: p.title || 'x' }))
+    }
+
     // --- channel のアイコン: フォローAPIは programProvider.icon を空で返す（socialGroup から拾う） ---
-    h.state.notifyRows = []
+    // ⚠️ **ここでカウンタを0に戻す。** この検査が見たいのは「サムネ／名前の補完で詳細APIを
+    //    呼んでいないこと」だけ。項目BF-2 の終了確認も同じAPIを使うので、通算で数えると
+    //    別の経路の呼び出しまで拾ってしまう（実際にそれで落ちた）。区間ごとに見ること。
+    h.state.calls.detail = 0
     h.state.followPrograms = [apiProgram({ id: 'lv555', beginAtMs: T + 5000, providerType: 'channel', name: 'チャンネルX' })]
+    syncNotify()
     await run()
     const card555 = h.dom.getById('555')
     check('channel カードに配信者名（チャンネル名）が出る',
@@ -2026,7 +2091,12 @@ async function render() {
         h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
 
     // --- 固定画像運用の番組: flipped からスクショを回収し、詳細APIを呼ばずに済むか（項目AW・実描画経路） ---
+    // ⚠️ **ここでカウンタを0に戻す。** この検査が見たいのは「サムネ／名前の補完で詳細APIを
+    //    呼んでいないこと」だけ。項目BF-2 の終了確認も同じAPIを使うので、通算で数えると
+    //    別の経路の呼び出しまで拾ってしまう（実際にそれで落ちた）。区間ごとに見ること。
+    h.state.calls.detail = 0
     h.state.followPrograms = [apiProgram({ id: 'lv666', beginAtMs: T + 6000, fixedImage: true })]
+    syncNotify()
     await run()
     const img666 = h.dom.getById('666').querySelector('.program_thumbnail_img')
     check('AW 固定画像の番組でもライブサムネが入る（flipped から回収）',
@@ -2038,12 +2108,16 @@ async function render() {
     // ⚠️ 盛り上がりは「前回取得からの増分 ÷ 経過時間」なので、**手順の順番が結果を決める**。
     //    ①基準の値で1回取得 → ②時間を進める → ③伸びた値で取得、の順でないと増分が計上されない。
     //    「値を変えてから時間を進める」と、変化が Δt<1秒の回に飲まれて何も起きない（実際に踏んだ）。
-    h.state.notifyRows = []
+    // ⚠️ **ここでカウンタを0に戻す。** この検査が見たいのは「サムネ／名前の補完で詳細APIを
+    //    呼んでいないこと」だけ。項目BF-2 の終了確認も同じAPIを使うので、通算で数えると
+    //    別の経路の呼び出しまで拾ってしまう（実際にそれで落ちた）。区間ごとに見ること。
+    h.state.calls.detail = 0
     h.state.followPrograms = [
         apiProgram({ id: 'lv100', beginAtMs: T + 3000, viewers: 1 }),
         apiProgram({ id: 'lv300', beginAtMs: T + 1000, viewers: 1 }),
         apiProgram({ id: 'lv400', beginAtMs: T + 9000, viewers: 1 }),
     ]
+    syncNotify()
     await run()
     check('新着順: beginAt 降順', ids().join(',') === '400,100,300', ids().join(','))
     um.options.programsSort = 'active'
@@ -2066,7 +2140,7 @@ async function render() {
     check('AK その場更新で配信者名が反映される',
         h.dom.getById('100').querySelector('.provider_name').textContent === '改名した配信者')
 
-    check('詳細API(fetchProgramInfo)は呼ばれていない（前提が崩れていない）', h.state.calls.detail === 0,
+    check('この区間で詳細API(fetchProgramInfo)は呼ばれていない（補完待ちで描画が遅れない）', h.state.calls.detail === 0,
         `notifybox ${h.state.calls.notify} / フォローAPI ${h.state.calls.follow} / 詳細 ${h.state.calls.detail}`)
 
     h.restore()
@@ -2246,7 +2320,7 @@ if (real) {
     console.log('')
     await danmakuRanking()
     console.log('')
-    await notifyboxEndDetection()
+    await programEndConfirmation()
     console.log('')
     await r1NoSpin()
     console.log('')

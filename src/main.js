@@ -16,6 +16,8 @@ import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimated
 // フォロー中ページ・スクレイプ方式（番組詳細の一括取得）。
 // 副作用インポート: window.__testFollowScrape() を登録し、実ページのConsoleから動作確認できるようにする。
 import './services/followPageSource.js'
+// 【診断コード】原因が分かったら import ごと消す
+import { diagEvent, diagFail } from './utils/diag.js'
 
 // アプリケーション状態を管理するインスタンス
 const appState = new AppState();
@@ -332,6 +334,22 @@ const setup = async () => {
 
 // クリーンアップ関数
 const cleanup = () => {
+    // 【診断コード】関門4。ここが走った後もページが生き残ると、監視が止まったまま
+    // `scheduled` も立ったままになり、**自動移動が二度と動かない**（モーダルも出ない）。
+    //
+    // 「生き残ったかどうか」はここでは分からないので、少し先に見に行く。
+    // 本当にページを離れたならこのタイマーは発火しない＝正常時は何も出ない。
+    diagEvent('ページ離脱の後始末が走った（監視を止める・カウントダウンを消す）');
+    setTimeout(() => {
+        if (options.autoNextProgram !== 'on') return;
+        const watching = !!(appState.autoNext && appState.autoNext.liveStatusStopper);
+        if (watching) return; // 監視が張り直されている＝問題なし
+        diagFail(
+            '後始末が走ったのにページが生き残っている。監視が止まったままなので、'
+            + `このページでは自動移動が二度と動かない（scheduled=${appState.autoNext.scheduled}）`
+        );
+    }, 3000);
+
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 

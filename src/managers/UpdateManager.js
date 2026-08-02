@@ -1,27 +1,29 @@
-import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo, currentNotifyboxRows } from '../services/api.js';
+import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, notifyboxKnownCap } from '../config/constants.js';
+import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle } from '../config/constants.js';
 
 /**
- * notifybox 不在を根拠に消した番組が、notifybox に戻ってきた時に1回だけ警告する（鳴る罠）。
+ * 終了と**確認して**消した番組が notifybox に戻ってきた時に1回だけ警告する（鳴る罠）。
  *
  * 🔴 **この判断が誤っていた時の症状は「放送中の番組が黙って画面から消える」で、
  * エラーは一切出ない。** 利用者からは「たまに番組が消える拡張」にしか見えず、原因に辿り着けない。
- * 消した番組が戻ってきたら、それは判断が誤っていた証拠なので鳴らす（doc/09 項目BF）。
+ *
+ * 詳細APIが `ended` と答えた番組しか消さないので、ここが鳴るなら
+ * **詳細APIと notifybox が食い違っている**＝前提の作り直しが要る（doc/09 項目BF-2）。
  */
 let notifyboxResurrectionWarned = false;
 function warnNotifyboxResurrection(id) {
     if (notifyboxResurrectionWarned) return;
     notifyboxResurrectionWarned = true;
     console.warn(
-        `[リスト] ${id} を「notifybox から消えた＝終了」と判断して外しましたが、`
-        + 'notifybox に戻ってきました。**放送中の番組を消していた**ことになります。'
-        + 'notifybox の不在を終了の根拠に使う判断（doc/09 項目BF）を見直してください。'
+        `[リスト] ${id} を詳細APIで「終了した」と確認して外しましたが、`
+        + 'notifybox に戻ってきました。詳細API(`liveCycle`)と notifybox が食い違っています。'
+        + '番組終了の確認（doc/09 項目BF-2）を見直してください。'
     );
 }
 
@@ -60,16 +62,11 @@ export class UpdateManager {
         this._thumbLoopRunning = false; // 二重開始ガード（tick 実行中は _thumbLoopTimer が null になる）
         this._thumbLoopStopped = false; // destroyThumbnailLoop で true。開き直しで復帰しうる
         this._thumbDueAt = new Map();
-        // 直近の「使える」notifybox 応答に載っていた番組id（doc/09 項目BF）。
-        // 🔴 **notifybox が面倒を見ている番組かどうかの記録であって、放送中リストではない。**
-        //    ここに居る番組が notifybox から消えたら「終了した」と判断してよい。
-        //    ここに居ない番組の不在は**何の根拠にもならない**（notifybox の守備範囲外かもしれない）。
-        //    ページを開いた直後は空＝1周期ぶんは誰も消さない。安全側に倒している。
-        this._notifyboxLive = new Set();
-        // notifybox 不在を根拠に消した番組id（鳴る罠用）。消した番組が notifybox に戻ってきたら、
-        // 判断が誤りだったという意味なので警告する。**症状が「生きている番組が黙って消える」で
-        // エラーが一切出ない**種類の壊れ方なので、気付ける形を用意しておく。
-        this._droppedByNotifybox = new Set();
+        // 番組詳細API に問い合わせて `liveCycle: 'ended'` と**確認できた**番組id（doc/09 項目BF-2）。
+        // 🔴 **推測で入れないこと。** ここに入れてよいのは詳細APIが終了と答えた番組だけ。
+        //    ここに入った番組は聞き直さず、フォローAPIが手放すまで消したままにする。
+        //    notifybox に戻ってきたら警告を鳴らして印を落とす（＝食い違いに気付ける）。
+        this._endedConfirmed = new Set();
         // 取得中の番組（完了を待たずに次へ進むので、同じ番組を二重に走らせないための印）
         this._thumbInFlight = new Set();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
         // _updateOneThumbnailAndWait の安全ガードタイマー（破棄時に一括clearするため追跡）。
@@ -87,6 +84,7 @@ export class UpdateManager {
         // 描画の世代。updateSidebar が入口で採番し、取得の await 明けに自分が最新かを確認する。
         // 遅れて着地した古い取得結果で新しい描画を巻き戻さないため（doc/09 項目AP）。
         this._renderGen = 0;
+
     }
 
     /**
@@ -533,7 +531,9 @@ export class UpdateManager {
      */
     async performManualUpdate() {
         // 多重防止（開閉/タブ復帰/自動移動が重なった時の二重取得を防ぐ）
-        if (this.isPerformingManualUpdate) return;
+        if (this.isPerformingManualUpdate) {
+            return;
+        }
         this.isPerformingManualUpdate = true;
         // 自分が始めたセッションのIDを覚えておく。相乗り（＝別の更新が先に動いていた）なら null で、
         // その場合は finish しない。持ち主が最後まで施錠を保つ（doc/09 項目AG）。
@@ -642,77 +642,95 @@ export class UpdateManager {
     }
 
     /**
-     * notifybox から消えた番組を「終了した」とみなしてリストから外す（doc/09 項目BF）。
+     * 終了した番組をリストから外す（doc/09 項目BF-2）。
      *
-     * 【なぜ要るか】フォローAPI（`?status=onair`）は終了した番組をしばらく返し続ける。
-     * notifybox のほうが反映が早いので、そちらの不在を終了の合図に使う。
+     * 【考え方】**notifybox の不在は「疑い」でしかない。終了かどうかは本人に聞いて確かめる。**
      *
-     * 🔴 **不在は、それだけでは終了の証拠にならない。** 3つの条件が揃った時だけ根拠にする:
+     *   1. notifybox から消えた番組を「終わったかもしれない」とみなす（＝疑い）
+     *   2. その番組だけ番組詳細API に問い合わせ、`liveCycle` を見る
+     *   3. `ended` なら消す。`on_air` なら残す。**答えが得られなければ消さない**
      *
-     *   1. **notifybox の取得が成功している**（失敗時 `false`）。
-     *      通信断で全部消える、が一番やってはいけない壊れ方。
-     *   2. **応答が上限件数に達していない**。notifybox はページングが無く rows=100 が上限で、
-     *      放送中が100件を超えると101件目以降が落ちる（和集合方式はその救済でもある）。
-     *      上限に達した応答の「不在」は、終了ではなく**溢れただけ**かもしれない。
-     *   3. **その番組が以前 notifybox に載っていた**。載ったことがない番組は notifybox の
-     *      守備範囲外である可能性があり、不在から何も言えない。**この条件が無いと、
-     *      notifybox が扱わない番組は出た瞬間に消える。**
+     * 🔴 **これは推測ではなく確認なので、notifybox が何件返そうと放送中の番組は消えない。**
+     * 2026-08-01 の事故（rows=500 を要求したら5件しか返らず、放送中16件が「終了した」と
+     * 誤判定されてカードが消えた）は、この形なら起きない。16件すべてに問い合わせが飛び、
+     * すべて `on_air` が返り、1件も消えない。
      *
-     * 条件3は notifybox の守備範囲を**こちらが知らなくても成り立つ**ように置いてある。
-     * 「notifybox が一度でも面倒を見た番組だけ、notifybox の言い分を信じる」という形。
+     * 【なぜ件数で守るのをやめたか】2026-08-01 に件数で守ろうとして3回失敗した:
+     *   - 「要求数ぴったり／実績値ちょうど」→ 5件の応答が素通りして事故が起きた
+     *   - 「フォローAPIより少なければ怪しい」→ notifybox が先に落とすのが前提なので常に止まる
+     *   - 「notifybox が返した範囲より古い番組は触らない」→ **いちばん古い番組が終わると、
+     *     基準がそれより新しい番組へ繰り上がり、自分が自動的に範囲の外になる。永久に消えない**
+     *     （2026-08-02 に実コードで再現。長時間放送の番組ほど当たる）
+     * **不在から終了を導こうとする限り、この手の穴は塞ぎきれない。だから導くのをやめた。**
+     *
+     * 【速さ】実測 2026-08-02: 詳細APIは番組終了の **0.5〜1.0秒後**には `ended` を返す
+     * （応答 約31ms・約2KB）。問い合わせるのは疑いが出た番組だけなので、普段は1周期に0〜数件。
      *
      * @param {Array<object>} programs `_mergeSources` の結果
      * @param {Array<any>|false} notifyList notifybox の生応答（失敗時 false）
-     * @returns {Array<object>} 終了とみなした番組を除いたリスト
+     * @returns {Promise<Array<object>>} 終了と**確認できた**番組を除いたリスト
      */
-    _dropEndedByNotifybox(programs, notifyList) {
-        // 条件1: 取得に失敗した周期は何も消さない
-        if (!Array.isArray(notifyList)) return programs;
-        // 条件2: あふれた疑いのある応答は不在を根拠にしない。**notifybox の真の上限は不明**なので
-        //        2本立てで守る（doc/09 項目BF）。
-        //   (a) 要求した数ぴったり返った → こちらの要求で頭打ちになった疑い
-        //   (b) 実績値ちょうど返った     → サーバ側が実績値で頭打ちの仕様だった場合の疑い
-        // ⚠️ (b) を `>=` にしないこと。真の上限が要求値だった場合、それを下回る応答
-        //    （例: 実績値100に対して150件）が全部引っかかり、**終了検知が常に止まる**。
-        if (notifyList.length >= currentNotifyboxRows()) return programs;
-        if (notifyList.length === notifyboxKnownCap) return programs;
+    async _dropEndedPrograms(programs, notifyList) {
+        // 消したままにする（＝既に詳細APIで終了と確認できている番組を落とす）。
+        const dropConfirmed = (list) => list.filter((p) => {
+            const id = p && p.id ? String(p.id) : '';
+            return !(id && this._endedConfirmed.has(id));
+        });
+
+        // notifybox の取得に失敗した周期は**新たな疑いを立てない**（通信断で全部消えるのが最悪の壊れ方）。
+        // ⚠️ ただし**確認済みの番組は消したままにする**。ここで戻すと、notifybox が不安定な間
+        //    「終わった番組が出たり消えたり」を繰り返す。推測で消したのなら戻す価値があるが、
+        //    確認して消した番組を notifybox の不調で戻す理由は無い。
+        if (!Array.isArray(notifyList)) return dropConfirmed(programs);
 
         const live = new Set();
         for (const row of notifyList) {
             if (row && row.id != null) live.add('lv' + String(row.id).replace(/^lv/, ''));
         }
 
-        // 消した番組が戻ってきた＝判断が誤っていた。黙って消えるのを防ぐための鳴る罠。
+        // 消した番組が notifybox に戻ってきた＝詳細APIと notifybox が食い違っている。鳴る罠。
         for (const id of live) {
-            if (this._droppedByNotifybox.has(id)) {
-                this._droppedByNotifybox.delete(id);
+            if (this._endedConfirmed.has(id)) {
+                this._endedConfirmed.delete(id);
                 warnNotifyboxResurrection(id);
             }
-            // 🔴 **印は足し込む。置き換えないこと。** 毎周期 live で上書きすると、消した番組の印まで
-            //    落ちる。フォローAPIはその番組をまだ返し続けているので、**次の周期は条件3で
-            //    「notifybox が知らない番組」に化けて復活する**（消えて出て、を繰り返す）。
-            this._notifyboxLive.add(id);
         }
 
-        const kept = programs.filter((p) => {
+        // 疑い＝notifybox に居ない番組。既に `ended` と確認済みの番組は聞き直さない。
+        const suspects = [];
+        for (const p of programs) {
             const id = p && p.id ? String(p.id) : '';
-            if (!id || live.has(id)) return true;
-            // 条件3: notifybox が面倒を見たことのない番組は触らない
-            if (!this._notifyboxLive.has(id)) return true;
-            this._droppedByNotifybox.add(id);
-            return false;
-        });
+            if (!id || live.has(id) || this._endedConfirmed.has(id)) continue;
+            suspects.push(id);
+        }
 
-        // 掃除: notifybox にも今回のリストにも居ない番組の印は落とす（集合が青天井にならないように）。
+        // 1周期の問い合わせ数に上限を置く（notifybox が壊れて大量に疑いが出た時の暴走止め）。
+        // ⚠️ あぶれた番組は**次の周期に回るだけ**。消えるのが遅れることはあっても、
+        //    間違って消えることはない（確認できていない番組は消さないため）。
+        const batch = suspects.slice(0, endCheckMaxPerCycle);
+        if (suspects.length > batch.length) {
+            console.warn(
+                `[終了確認] 疑いが ${suspects.length}件あるため、この周期は ${batch.length}件だけ確認します`
+                + '（残りは次の周期）。notifybox の応答が異常に少ない可能性があります。'
+            );
+        }
+        await Promise.all(batch.map(async (id) => {
+            const info = await fetchProgramInfo(String(id).replace(/^lv/, ''));
+            // ⚠️ **答えが得られなかった時（通信断・404・想定外の応答）は消さない。**
+            //    「判断の材料が無い時は消さない」を守る。次の周期にまた聞く。
+            if (info && info.liveCycle === 'ended') this._endedConfirmed.add(id);
+        }));
+
+        const kept = dropConfirmed(programs);
+
+        // 掃除: 今回のリストにも居ない番組の印は落とす（集合が青天井にならないように）。
         // ⚠️ **消した番組の印は残る**（フォローAPIがまだ返している＝`programs` に居るため）。
         //    それでよい。印が消えるのはフォローAPIもその番組を手放した時＝本当に用が済んだ時。
+        //    印を早く落とすと、フォローAPIが返し続けている間ずっと問い合わせ直すことになる。
         const stillRelevant = new Set();
         for (const p of programs) if (p && p.id) stillRelevant.add(String(p.id));
-        for (const id of this._notifyboxLive) {
-            if (!live.has(id) && !stillRelevant.has(id)) this._notifyboxLive.delete(id);
-        }
-        for (const id of this._droppedByNotifybox) {
-            if (!stillRelevant.has(id)) this._droppedByNotifybox.delete(id);
+        for (const id of this._endedConfirmed) {
+            if (!stillRelevant.has(id)) this._endedConfirmed.delete(id);
         }
         return kept;
     }
@@ -827,10 +845,17 @@ export class UpdateManager {
                 return sessionId;
             }
 
-            // 和集合を作ってから、notifybox が「もう居ない」と言っている番組を落とす。
+            // 和集合を作ってから、終了したと**確認できた**番組を落とす。
             // ⚠️ 順序を入れ替えないこと。先に落としても `_mergeSources` が notifybox 行を
             //    足し直すので意味が無い。
-            const merged = this._dropEndedByNotifybox(this._mergeSources(notifyList, fetched), notifyList);
+            const merged = await this._dropEndedPrograms(this._mergeSources(notifyList, fetched), notifyList);
+
+            // 🔴 上の確認は詳細APIを叩くので、ここでもう一度世代を確かめる（項目AP と同じ理由）。
+            //    問い合わせている間に別の取得が着地して描画を終えていたら、古い結果で上書きしない。
+            //    ⚠️ **await を足したらこの確認も足すこと。** 前回は取得の直後にしか置いておらず、
+            //       ここに await が増えた時に守りが1つ抜けた形になる。
+            if (myGen !== this._renderGen) return sessionId;
+
             this._seedNewProgramsToStorage(merged);
 
             // 空のときは既存DOMを維持（取得は成功していて放送中0件）
@@ -964,6 +989,7 @@ export class UpdateManager {
 
             // 新規/削除カードに合わせてサムネ更新の期限表を同期する。
             this._refreshThumbSchedule();
+
         } catch (error) {
             console.error('[updateSidebar] エラーが発生しました:', error);
             this.appState.update.isInserting = false;

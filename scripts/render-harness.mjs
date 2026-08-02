@@ -81,6 +81,10 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         notifyRows: [],       // notifybox が返す行（{ id, title }）
         followFails: false,
         notifyFails: false,
+        // 番組詳細API が「終了した」と答える番組id（'lv700' でも '700' でも可）。
+        // 項目BF-2 の終了確認は、notifybox の不在を疑いにして**ここへ問い合わせる**。
+        endedIds: new Set(),
+        detailFails: false,   // 詳細APIが答えない状況（通信断・404）を作る
         calls: { notify: 0, follow: 0, detail: 0 },
     }
 
@@ -102,13 +106,21 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         }
         if (u.includes('api.cas.nicovideo.jp')) {
             state.calls.detail++
-            // 既定データでは到達しないはず。到達したらテスト側の前提が崩れている。
-            // `state.detailThumb` を立てた時だけ、ライブスクショを返す番組詳細として振る舞う
+            if (state.detailFails) throw new Error('detail api down (test)')
+            // 実物と同じ形で答える（2026-08-02 実測）:
+            //   放送中 → { meta:{status:200}, data:{ liveCycle:'on_air', … } }
+            //   終了   → { meta:{status:200}, data:{ liveCycle:'ended',  … } }
+            //   無い番組 → HTTP 404 / meta.status 404
+            const id = (/\/lv(\d+)/.exec(u) || [])[1] || ''
+            const ended = state.endedIds.has(id) || state.endedIds.has('lv' + id)
+            const data = { liveCycle: ended ? 'ended' : 'on_air' }
+            // `state.detailThumb` を立てた時だけ、ライブスクショを返す番組詳細としても振る舞う
             // （notifybox 先行の新番組をフォローAPI抜きで追撃できるかの検証に使う）。
             if (state.detailThumb) {
-                return jsonResponse({ meta: { status: 200 }, data: { providerType: 'user', liveScreenshotThumbnailUrls: { middle: state.detailThumb } } })
+                data.providerType = 'user'
+                data.liveScreenshotThumbnailUrls = { middle: state.detailThumb }
             }
-            return jsonResponse({ data: {} })
+            return jsonResponse({ meta: { status: 200 }, data })
         }
         throw new Error('想定外の fetch: ' + u)
     }
