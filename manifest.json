@@ -47,6 +47,8 @@
     ],
     "optional_host_permissions": [
         "https://kick.com/*",
-        "https://live.nicovideo.jp/*"
+        "https://live.nicovideo.jp/*",
+        "https://*.dlive.nicovideo.jp/*",
+        "https://images.kick.com/*"
     ]
 }

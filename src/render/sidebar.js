@@ -515,6 +515,24 @@ let animThumbFeed = null
 export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
 
 /**
+ * プリロードの取得経路を差し替えるフック。**kick.com 専用。既定は null（＝従来どおり）。**
+ *
+ * 【なぜ要るのか】
+ * 動くサムネは `crossOrigin='anonymous'` で読んだ画像を canvas に描いてコマにする。
+ * ところが **kick.com 上では、ニコ生も Kick も画像の配信元が ACAO を返さない**
+ * （2026-08-04 実測。ニコ生の配信元はニコ生のオリジンだけ許可している）。
+ * CORS はブラウザがページに課す制限で、**拡張の Service Worker からの取得には適用されない**ので、
+ * SW に取ってもらって data URL で受け取れば canvas は汚染されない。
+ *
+ * 🔴 **null のときは1行も挙動が変わらないこと。** ニコ生ページ側はこのフックを設定しないので、
+ *    従来どおり crossOrigin で直接読む。ここを共通化しようとしないこと。
+ *
+ * @param {null | ((url: string) => Promise<string|null>)} fn URL を data URL に解決する関数
+ */
+let imageProxy = null
+export function setThumbnailImageProxy(fn) { imageProxy = typeof fn === 'function' ? fn : null }
+
+/**
  * 給餌が時間内に返らなかったら1回だけ警告する（鳴る罠）。
  *
  * 上限で倒しているので**表示は無事**だが、②のコマ化が詰まっているサインではある。
@@ -834,8 +852,10 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // 動くサムネON時は crossOrigin で読み、読めた画像を②へ給餌（②の自前取得＝二重通信を止める）。
             // CORSで読めない環境でも表示は守るため、失敗時は平文で読み直して表示だけ確保する。
             const feeding = !!(animThumbFeed && animThumbFeed.isEnabled())
+            // プロキシ経由で読む時は data URL になるので crossOrigin は付けない（付けると逆に失敗する）。
+            const viaProxy = feeding && !!imageProxy
             const pre = new Image()
-            if (feeding) pre.crossOrigin = 'anonymous'
+            if (feeding && !viaProxy) pre.crossOrigin = 'anonymous'
             pre.onload = () => {
                 pendingImages--
                 if (feeding) {
@@ -875,7 +895,15 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
                 applyBackoff()
                 maybeSettled()
             }
-            pre.src = urlForAttempt
+            if (viaProxy) {
+                // 失敗しても表示は守る: 素のURLで読み直す（その場合コマ化はできないが絵は出る）。
+                imageProxy(urlForAttempt).then(
+                    (dataUrl) => { pre.src = dataUrl || urlForAttempt },
+                    () => { pre.src = urlForAttempt },
+                )
+            } else {
+                pre.src = urlForAttempt
+            }
         }
         if (index < sourceImgs.length) {
             requestAnimationFrame(tick)

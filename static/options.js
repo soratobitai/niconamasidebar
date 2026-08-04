@@ -23,9 +23,17 @@
 //    - scripting            … kick.com へサイドバーを動的登録する（静的宣言だと必須権限になる）
 //    - live.nicovideo.jp/*  … kick.com 上でニコ生の番組も出すための中継。
 //                             ニコ生の視聴ページでは同一オリジンなので不要
+//    - 画像ホスト2つ … kick.com 上で動くサムネを作るための中継。
+//                       どちらの配信元も kick.com のオリジンに CORS を返さないため、
+//                       SW が取って data URL にして渡す
 const KICK_PERMISSIONS = {
     permissions: ['cookies', 'scripting'],
-    origins: ['https://kick.com/*', 'https://live.nicovideo.jp/*'],
+    origins: [
+        'https://kick.com/*',
+        'https://live.nicovideo.jp/*',
+        'https://*.dlive.nicovideo.jp/*',
+        'https://images.kick.com/*',
+    ],
 }
 
 // ⚠️ **表示方法（kickDisplayMode）とバランス（dwellMinutes）はここで扱わない。**

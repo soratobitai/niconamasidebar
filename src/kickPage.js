@@ -20,14 +20,15 @@
 
 import './styles/main.css'
 import './styles/kickPage.css'
-import { buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, setDwellMinutes, syncServiceTabs, setupServiceTabHandlers } from './render/sidebar.js'
+import { buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, setDwellMinutes, syncServiceTabs, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy } from './render/sidebar.js'
+import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 import { sortPrograms } from './utils/sorting.js'
 import { fetchKickPrograms } from './services/kickSource.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
-import { getOptions as getOptionsFromStorage, upsertProgramInfos } from './services/storage.js'
+import { getOptions as getOptionsFromStorage, upsertProgramInfos, getProgramInfos } from './services/storage.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { setProgramContainerWidth } from './ui/layout.js'
-import { sidebarMinWidth } from './config/constants.js'
+import { sidebarMinWidth, updateThumbnailInterval } from './config/constants.js'
 
 const SIDEBAR_ROOT_ID = 'niconamasidebar-kick-root'
 
@@ -49,6 +50,7 @@ const defaultOptions = {
 
 let options = { ...defaultOptions }
 let updateTimer = null
+let thumbTimer = null
 let reconcileTimer = null
 let isOpen = false
 
@@ -111,6 +113,34 @@ function insertSidebar() {
 /** いま適用されているサイドバー幅（px）。列数計算と body を寄せる量の両方がこれを使う。 */
 function currentWidth() {
     return Math.max(sidebarMinWidth, Number(options.sidebarWidth) || defaultOptions.sidebarWidth)
+}
+
+// 同じURLへの取得が重ならないようにする。サムネ更新は全カードを同時に走らせるので、
+// 何かの拍子に同じURLが2度来ると SW 往復と base64 化が無駄に倍になる。
+const imageInFlight = new Map()
+
+/**
+ * 画像を SW 経由で取り、data URL を返す。**取れなければ null**（呼び出し側が素のURLへ倒す）。
+ * @param {string} url
+ * @returns {Promise<string|null>}
+ */
+async function fetchImageViaWorker(url) {
+    if (!extensionAlive() || !url) return null
+    if (imageInFlight.has(url)) return imageInFlight.get(url)
+
+    const p = (async () => {
+        try {
+            const res = await chrome.runtime.sendMessage({ type: 'img:fetch', url })
+            return res && res.ok && res.dataUrl ? res.dataUrl : null
+        } catch (e) {
+            return null
+        } finally {
+            // 完了したら覚えておかない。次の周期は新しい `?cache=` 付きの別URLになる。
+            imageInFlight.delete(url)
+        }
+    })()
+    imageInFlight.set(url, p)
+    return p
 }
 
 /** テーマ。ダークが既定で、ライトの時だけクラスを付ける（ニコ生側と同じ規約）。 */
@@ -337,11 +367,40 @@ function startTimer() {
         if (!extensionAlive()) return stopTimer()
         if (isOpen) refreshPrograms()
     }, sec * 1000)
+
+    // 🔴 **ニコ生のライブサムネはリスト更新では差し替わらない。**
+    //    ニコ生は「同じURLで中身が変わる」形式なので、`applyProgramInfoToCard` は
+    //    ライブサムネを表示中のカードに触らない設計になっている（doc/09 項目BB）。
+    //    差し替えは `updateThumbnailsFromStorage` の仕事で、**これを呼ばないと
+    //    初回に描いた絵のまま固まる**。Kick 側だけ専用経路で更新されるので、
+    //    呼び忘れると「Kickは動くのにニコ生だけ止まる」という形で出る。
+    //
+    //    ⚠️ ニコ生ページ側は番組ごとに位相をずらす自己連鎖サイクルを持つが、ここでは持たない。
+    //       Kick ページの主役は Kick 側で、ニコ生は一覧として見えていれば十分なため、
+    //       全件を一定間隔で回すだけの簡素な形にしてある。
+    // 🔴 **`updateThumbnailInterval` は「秒」。ミリ秒ではない。**
+    //    UpdateManager 側も `* 1000` して使っている。そのまま setInterval に渡すと
+    //    **20ミリ秒間隔**になり、カードの枚数ぶん毎フレーム再取得が走る
+    //    （2026-08-04 に実際にやった。コンソールがCORSエラーで埋まり、
+    //     20msごとに画像を差し替えるのでクロスフェードも見えなくなる）。
+    const thumbMs = Math.max(5000, (Number(updateThumbnailInterval) || 20) * 1000)
+    thumbTimer = setInterval(() => {
+        if (!extensionAlive()) return stopThumbTimer()
+        if (!isOpen || document.hidden) return
+        const infos = getProgramInfos()
+        if (infos && infos.length) updateThumbnailsFromStorage(infos, {})
+    }, thumbMs)
 }
 
 function stopTimer() {
     if (updateTimer) clearInterval(updateTimer)
     updateTimer = null
+    stopThumbTimer()
+}
+
+function stopThumbTimer() {
+    if (thumbTimer) clearInterval(thumbTimer)
+    thumbTimer = null
 }
 
 /**
@@ -354,6 +413,9 @@ function stopTimer() {
 function teardown() {
     stopTimer()
     stopReconciler()
+    // 動くサムネが抱えている blob URL とホバーのリスナーを手放す。
+    try { teardownAnimatedThumbnails() } catch (e) { /* 未初期化なら何もしない */ }
+    setThumbnailImageProxy(null)
     isOpen = false
     applyShift() // body のインラインスタイルを外して元の幅へ戻す
     document.documentElement.classList.remove('nns-kick-open')
@@ -367,7 +429,25 @@ async function init() {
     options = await getOptionsFromStorage(defaultOptions)
     setDwellMinutes(options.dwellMinutes)
 
+    // 動くサムネ。**kick.com では画像を SW 経由で取る。**
+    //
+    // 画像の配信元はどちらも kick.com のオリジンに ACAO を返さない（2026-08-04 実測）:
+    //   - ニコ生の `*.dlive.nicovideo.jp` … ニコ生のページでは通るが kick.com からは拒否
+    //   - Kick の `images.kick.com`        … どこからも返さない
+    // CORS はブラウザがページに課す制限なので、**拡張の SW からの取得には適用されない**。
+    // SW に取ってもらって data URL で受け取れば canvas は汚染されない。
+    setAnimThumbnailFeed({ isEnabled: isAnimatedThumbnailEnabled, ingest: ingestAnimatedThumbnailFrame })
+    setThumbnailImageProxy(fetchImageViaWorker)
+
     insertSidebar()
+
+    // 🔴 **`setAnimatedThumbnailEnabled` は insertSidebar の「後」で呼ぶこと。**
+    //    中で `getContainer()`（= `#liveProgramContainer`）にホバーのリスナーを張るため、
+    //    前に呼ぶと **リスナーが一度も付かず、ホバーしても何も起きない**。
+    //    `enabled` フラグだけは立つので取得は走る＝「設定はONで通信も増えるのに動かない」
+    //    という気付きにくい壊れ方をする（2026-08-04 に実際に踏んだ）。
+    setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on')
+
     // 🔴 **この拡張の kick.com 側に MutationObserver は置かない。**
     //    書き換えに反応して書き戻す形にすると、相手の書き換えと噛み合った時に
     //    マイクロタスクの中で延々と往復し、**ブラウザごと固まる**（2026-08-04 に実際に発生）。
@@ -400,6 +480,10 @@ async function init() {
             if (changes.updateProgramsInterval) {
                 options.updateProgramsInterval = changes.updateProgramsInterval.newValue
                 startTimer()
+            }
+            if (changes.animatedThumbnail) {
+                options.animatedThumbnail = changes.animatedThumbnail.newValue
+                setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on')
             }
             if (changes.kickDisplayMode) {
                 options.kickDisplayMode = changes.kickDisplayMode.newValue

@@ -31,10 +31,26 @@ const COOKIE_NAME = 'session_token'
 // （＝拡張が無効化される）。動的登録なら optional のままでいられる。
 // `live.nicovideo.jp` は **kick.com 上でニコ生の番組も出す**ために要る。
 // ニコ生の視聴ページでは同一オリジンなので権限は不要で、Kick 上でだけ中継が必要になる。
+// 画像ホストは **kick.com 上で動くサムネを作る**ために要る。
+// 動くサムネは crossOrigin で読んだ画像を canvas に描く方式だが、
+// どちらの配信元も kick.com のオリジンに ACAO を返さない（2026-08-04 実測）。
+// SW からの取得には CORS が適用されないので、ここで取って data URL にして渡す。
 const KICK_PERMISSIONS = {
     permissions: ['cookies', 'scripting'],
-    origins: ['https://kick.com/*', 'https://live.nicovideo.jp/*'],
+    origins: [
+        'https://kick.com/*',
+        'https://live.nicovideo.jp/*',
+        'https://*.dlive.nicovideo.jp/*',
+        'https://images.kick.com/*',
+    ],
 }
+
+// 画像中継で受け付ける最大サイズ。サムネは数十KBなので、これを超えるものは想定外。
+const IMAGE_PROXY_MAX_BYTES = 2 * 1024 * 1024
+
+// 中継してよいホスト。**ここに無いURLは取りに行かない。**
+// 任意のURLを取れる中継を作ると、ページ側から拡張の権限を借りて何でも読めてしまう。
+const IMAGE_PROXY_ALLOWED = [/^https:\/\/[a-z0-9-]+\.dlive\.nicovideo\.jp\//i, /^https:\/\/images\.kick\.com\//i]
 
 // ニコ生のフォロー中番組API（放送中のみ）。src/services/followPageSource.js と同じURL。
 const NICO_FOLLOW_API = 'https://live.nicovideo.jp/front/api/pages/follow/v1/programs'
@@ -284,8 +300,57 @@ async function fetchNicoFollowed() {
     return { ok: true, programs }
 }
 
+/**
+ * 画像を取得して data URL で返す（**kick.com 上の動くサムネ専用**）。
+ *
+ * 🔴 **CORS はブラウザがページに課す制限で、SW からの取得には適用されない。**
+ *    ここで取って data URL にすれば、ページ側の canvas は汚染されない（同一オリジン扱い）。
+ *
+ * ⚠️ **許可ホストを必ず確認すること。** 任意のURLを取れる中継にすると、
+ *    ページ側から拡張のホスト権限を借りて何でも読めてしまう。
+ */
+async function fetchImageAsDataUrl(url) {
+    if (typeof url !== 'string' || !IMAGE_PROXY_ALLOWED.some((re) => re.test(url))) {
+        return { ok: false, reason: 'not-allowed' }
+    }
+    if (!(await hasKickPermission())) return { ok: false, reason: 'no-permission' }
+
+    let res
+    try {
+        res = await fetch(url, { credentials: 'omit', cache: 'no-store' })
+    } catch (e) {
+        return { ok: false, reason: 'network' }
+    }
+    if (!res.ok) return { ok: false, reason: 'http', status: res.status }
+
+    let buf
+    try {
+        buf = await res.arrayBuffer()
+    } catch (e) {
+        return { ok: false, reason: 'read' }
+    }
+    if (buf.byteLength > IMAGE_PROXY_MAX_BYTES) return { ok: false, reason: 'too-large' }
+
+    // btoa は SW でも使える。文字列化は分割しないと引数が多すぎて落ちる。
+    const bytes = new Uint8Array(buf)
+    let bin = ''
+    const CHUNK = 0x8000
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
+    }
+    const type = res.headers.get('content-type') || 'image/jpeg'
+    return { ok: true, dataUrl: 'data:' + type + ';base64,' + btoa(bin) }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg.type !== 'string') return undefined
+
+    if (msg.type === 'img:fetch') {
+        fetchImageAsDataUrl(msg.url).then(sendResponse, (e) => {
+            sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
+        })
+        return true
+    }
 
     if (msg.type === 'nico:followed') {
         fetchNicoFollowed().then(sendResponse, (e) => {

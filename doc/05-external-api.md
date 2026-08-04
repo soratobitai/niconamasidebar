@@ -275,6 +275,26 @@ div.program_container[id=<数値ID>, active-point=<盛り上がり>, data-total=
 | `kick:status` | 権限の有無を返す |
 | `kick:openOptions` | オプションページを開く（コンテンツスクリプトからは `openOptionsPage()` を呼べない） |
 | `kick:stateChanged` | **SW から各タブへの通知**。権限が外れた時に Kick のカードを即座に消すため |
+| `img:fetch` | **kick.com 上の動くサムネ専用の画像中継。**URLを受けて data URL で返す |
+
+#### 🔴 `img:fetch`（画像中継）について
+
+動くサムネは `crossOrigin='anonymous'` で読んだ画像を canvas に描く。ところが
+**kick.com 上ではどちらの配信元も ACAO を返さない**（2026-08-04 実測）。
+
+| 配信元 | ニコ生のページから | kick.com から |
+|---|---|---|
+| `*.dlive.nicovideo.jp`（ニコ生のライブサムネ） | 通る | **拒否**（ニコ生のオリジンだけ許可している） |
+| `images.kick.com`（Kick のサムネ） | 拒否 | 拒否 |
+
+**CORS はブラウザがページに課す制限で、拡張の Service Worker からの取得には適用されない。**
+SW が取って data URL にして返せば、ページ側の canvas は汚染されない。
+
+⚠️ **許可ホストの検査（`IMAGE_PROXY_ALLOWED`）を外さないこと。** 任意のURLを取れる中継にすると、
+ページ側から拡張のホスト権限を借りて何でも読めてしまう。上限サイズ（2MB）も同じ理由で置いてある。
+
+差し込み口は `sidebar.js` の `setThumbnailImageProxy()`。**ニコ生ページ側は設定しない**ので、
+Rollup が分岐ごと畳んで `main.js` からは消える（＝従来の経路と literally 同一）。
 
 戻り値は必ず `{ok:boolean}`。**throw しない。**`reason` は
 `no-permission` / `no-session` / `unauthorized` / `rate-limited` / `network` / `parse` / `http` / `internal`。

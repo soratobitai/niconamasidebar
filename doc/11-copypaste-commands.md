@@ -1,13 +1,12 @@
 # コピペ用コマンド（ホワイトボード）
 
-**どのタブでも可**（ニコ生の視聴ページ / kick.com のどちらでも）。
-Kick のカードがサイドバーに出ている状態で実行してください。
+**kick.com** のサイドバーに**ニコ生の番組が見えている状態**で実行。
+ニコ生のサムネが kick.com 上でちゃんと読めているかを調べます（クロスフェードが出ない原因の切り分け）。
 
-配信者名はサイドバーの Kick カードのリンクから拾います。Kick は任意のオリジンからの取得を
-許可しているので、ニコ生のページからでも調べられます。**落ちません。**
+⚠️ タブで分けている場合は**ニコ生側のタブを表示してから**実行してください。
 
 ```js
-(async()=>{const dump=(label,obj)=>{console.log('=== '+label+' ===');console.log('キー:',Object.keys(obj||{}).join(', '));for(const[k,v]of Object.entries(obj||{})){if(v&&typeof v==='object'){console.log('  '+k+': {'+Object.keys(v).join(', ')+'}')}else{console.log('  '+k+' =',typeof v==='string'?v.slice(0,100):v)}}};const img=(o)=>{const hit=JSON.stringify(o||{}).match(/"[a-z_]*(pic|image|avatar|photo|thumb)[a-z_]*":"https?:[^"]{6,140}"/gi)||[];console.log('画像らしきフィールド:',hit.length);hit.slice(0,12).forEach(h=>console.log('  '+h))};let slug='';if(location.hostname.endsWith('kick.com'))slug=location.pathname.split('/')[1]||'';if(!slug){const a=[...document.querySelectorAll('#liveProgramContainer a')].map(x=>x.href||'').find(h=>/^https:\/\/kick\.com\/[^/]+$/.test(h));if(a)slug=a.split('/').pop()}if(!slug){console.log('Kickの配信者が見つからない。Kickのカードが見えている状態で実行するか、kick.com/<配信者> を開いてください');return}console.log('対象の配信者:',slug);try{const ch=await fetch('https://kick.com/api/v2/channels/'+slug,{headers:{Accept:'application/json'}}).then(r=>r.json());dump('channel',ch);dump('channel.user',ch.user);img(ch)}catch(e){console.log('取得に失敗:',e.name,e.message)}})();
+(async()=>{const cards=[...document.querySelectorAll('#liveProgramContainer .program_container')].filter(c=>c.getAttribute('data-service')!=='kick');console.log('ニコ生カード数:',cards.length);if(!cards.length){console.log('ニコ生のカードが見えていません');return}let shown=0;for(const c of cards.slice(0,5)){const i=c.querySelector('.program_thumbnail_img');if(!i)continue;shown++;console.log(`  #${c.id} complete=${i.complete} naturalWidth=${i.naturalWidth} thumbLive=${i.dataset.thumbLive} errors=${i.dataset.errors||0} src=${(i.currentSrc||i.src||'').slice(0,80)}`)}const img0=cards.map(c=>c.querySelector('.program_thumbnail_img')).find(i=>i&&(i.currentSrc||i.src));if(!img0){console.log('判定できる画像がありません');return}const url=(img0.currentSrc||img0.src).split('?')[0];console.log('検証URL:',url);const t=(label,co)=>new Promise(ok=>{const im=new Image();if(co)im.crossOrigin='anonymous';const to=setTimeout(()=>ok(label+': タイムアウト'),8000);im.onload=()=>{clearTimeout(to);ok(label+': 成功 '+im.naturalWidth+'px')};im.onerror=()=>{clearTimeout(to);ok(label+': 失敗')};im.src=url+'?probe='+Date.now()});console.log(await t('[A] 平文で読み込み',false));console.log(await t('[B] crossOriginで読み込み',true))})();
 ```
 
-`=== channel.user ===` のキーと値、`画像らしきフィールド` の一覧を貼ってください。
+`ニコ生カード数` 以下の一覧と、`[A]` `[B]` の2行を貼ってください。

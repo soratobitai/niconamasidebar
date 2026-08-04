@@ -285,6 +285,20 @@ export function ingestAnimatedThumbnailFrame(id, img) {
 
 // ①が「crossOriginで読んで②へ給餌するか」を判断するためのフラグ。
 // taint(CORS汚染)後は false に戻し、①を平文取得へ自動フォールバックさせる。
+/**
+ * 各番組に何コマ貯まっているかを返す（読み取り専用）。
+ *
+ * 再生は `frames.length >= 2` で始まる。**「ingest が成功した回数」と「貯まった枚数」は違う**
+ * （同じ絵は知覚ハッシュで重複排除されるため）。動かない時にどちらで詰まっているかを
+ * 切り分けられるようにしておく。
+ * @returns {Record<string, number>} 番組ID -> コマ数
+ */
+export function getAnimBufferSizes() {
+    const out = {}
+    for (const [id, buf] of buffers) out[id] = buf && buf.frames ? buf.frames.length : 0
+    return out
+}
+
 export function isAnimatedThumbnailEnabled() {
     return enabled && !captureUnsupported
 }
