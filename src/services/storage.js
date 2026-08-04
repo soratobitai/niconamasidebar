@@ -1,6 +1,6 @@
 import { maxSaveProgramInfos } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
-import { nextMomentum } from '../utils/momentum.js'
+import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
 
 /**
  * Get options from chrome.storage.local and merge with defaults.
@@ -187,6 +187,10 @@ export function upsertProgramInfos(programInfos) {
         //    書くと、画面が使うオブジェクトは momentum を知らないまま＝**計算しても順位に何も反映されない**。
         //    例外もログも出ないので、気付けるのは「人気順にしても並びが変わらない」という形だけになる。
         info.momentum = nextMomentum(byId.get(info.id), info, now)
+        // 推定同接（人気順の第1キー）の材料。**来場者だけ**の到着レート。
+        // momentum と同じ理由でここが唯一の計算地点であり、同じ理由で渡された info 自身へ
+        // 破壊的に書き戻す（保存用のコピーにだけ書くと画面に反映されない）。
+        info.viewerRate = nextViewerRate(byId.get(info.id), info, now)
         // 既存idは一度消してから入れ直し、touchしたレコードを末尾（=最新）へ移す。
         // これで上限トリム(先頭shift)は「今回更新されなかった古いレコード(=放送終了済み等)」から落ちる。
         byId.delete(info.id)

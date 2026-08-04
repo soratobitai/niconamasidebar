@@ -48,7 +48,12 @@ function copyAssetsPlugin() {
       
       // imagesフォルダをコピー
       copyDir('images', 'dist/images');
-      
+
+      // staticフォルダの中身をdist直下へコピー。
+      // ここはバンドル対象外のファイル（Service Worker・オプションページ）。
+      // manifest の "service_worker" / "options_page" は dist 直下のパスを指す。
+      copyDir('static', 'dist');
+
       console.log('✅ Assets copied successfully!');
     }
   }
@@ -86,7 +91,8 @@ export default defineConfig({
       'src/**/*',
       'manifest.json',
       'icons/**/*',
-      'images/**/*'
+      'images/**/*',
+      'static/**/*'
     ],
     exclude: [
       'node_modules/**/*',

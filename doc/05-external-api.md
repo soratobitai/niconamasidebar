@@ -206,3 +206,97 @@ div.program_container[id=<数値ID>, active-point=<盛り上がり>, data-total=
 | **追っかけ再生 / TS** | ※用語は一般的だが**本コードベースに専用実装・セレクタ・APIパラメータは無し**。本拡張は放送中番組の一覧・詳細・サムネ・自動移動のみ扱う | （該当実装なし） |
 
 > ⚠️ 「追っかけ再生・TS」はソース中に対応処理が無い。README更新履歴 1.3.4 に「TSや追っかけ再生のシーク時…」の記述はあるが、これは**過去に存在したシーク位置ズレ対策**の名残で、現行コードには専用機能として残っていない（`window.dispatchEvent(new Event('resize'))` によるレイアウト補正が関連の可能性）。
+
+---
+
+## 6. Kick の API（2026-08-04 追加・すべて実測で確定）
+
+### 6-1. フォロー中の放送中番組 — `GET https://kick.com/api/v1/user/livestreams`
+
+**1リクエストで全件・完成データが返る。**ページングは実質不要（念のため `?page=N` を空まで回す実装）。
+
+| 項目 | 内容 |
+|---|---|
+| 認証 | `Authorization: Bearer <session_token cookie を decodeURIComponent した値>` |
+| 形式 | Laravel Sanctum の personal access token（`<id>\|<文字列>`） |
+| 返るもの | 配列。フォロー中の**放送中**番組のみ |
+| 主なフィールド | `session_title` / `start_time` / `created_at` / `viewer_count` / `show_view_count` / `thumbnail.src`（720p）/ `thumbnail.srcset`（1080・720・360・160 webp）/ `categories` / `tags` / `channel.slug` / `channel.user` |
+| 番組URL | `https://kick.com/<channel.slug>` |
+
+- 🔴 **cookie の自動付与だけでは 401。**Bearer が必須。逆に **Bearer だけで 200**（cookie も `x-app-platform` も不要）
+- 🔴 **`start_time` は UTC。**`"2026-08-04 01:08:08"` 形式でオフセットが無いので、
+  `Date.parse(raw.replace(' ','T') + 'Z')` でパースする。**そのまま渡すと9時間ずれて新着順が壊れる**
+- 🔴 **`viewer_count` は同時視聴者数**（ニコ生の `viewers` ＝累計来場者とは意味が違う）。
+  `programInfo.viewers` に入れないこと。`concurrentViewers` に入れる
+- サムネURLは **`?versionId=` 付きで、画像が更新されるたびに変わる**。
+  キャッシュバスターは不要。versionId を比べれば「本当に更新されたか」が判定できる
+- サムネの更新間隔は**平均約60秒**（実測 16〜96秒のばらつき）。
+  **チャンネルごとにタイミングが分散している**ので、ニコ生で必要だったドリフト設計は不要
+- 🔴 **`images.kick.com` は `Access-Control-Allow-Origin` を返さない**（2026-08-04 実測で確定）。
+  `mode:'no-cors'` では取得できる（`type=opaque`）が、`mode:'cors'` はブラウザが明示的に拒否する。
+  → **Kick では「動くサムネ」を作れない。**あの機能は `crossOrigin='anonymous'` で読んだ画像を
+  canvas に描いて `toBlob` する経路なので、CORS が無いと canvas が汚染されて取り出せない。
+  静止サムネのクロスフェードは `<img>` に URL を入れるだけなので**影響を受けない**
+
+### 6-1-2. 🔴 配信者アイコンは `user/livestreams` では取れない
+
+`/api/v1/user/livestreams` が返す `channel` は**軽量版**（11キー）で、
+公開API `/api/v2/channels/<slug>` の `channel`（21キー）とは別物。
+`channel.user` も削られており、**`profile_pic` が入っていない**（2026-08-04 実測）。
+
+| | livestreams の channel | 公開API の channel |
+|---|---|---|
+| キー数 | 11 | 21 |
+| `user.profile_pic` | **無い** | ある |
+
+→ `kickSource.js` の `fillMissingIcons` が、アイコンが空の配信者だけ
+**`GET https://kick.com/api/v2/channels/<slug>`（認証不要）** で補完し、
+`chrome.storage.local` の `kickIconCache` に slug 単位で覚える。
+
+- アイコンは滅多に変わらないので**1配信者につき一度だけ**取る
+- **取れなかったことも覚える**（空文字を記録）。毎周期リトライして無駄に叩かないため
+- 1周期あたり `MAX_ICON_FETCH_PER_CYCLE`（12件）で頭打ち。残りは次の周期
+- Kick は任意のオリジンからの取得を許可しているので、ニコ生のページからでも叩ける
+
+### 6-2. 使ってはいけないエンドポイント
+
+| URL | 何が起きるか |
+|---|---|
+| `/api/v2/channels/followed` | フォロー**全件**（放送中でないものも）が **5件固定**で返る。`limit`/`per_page`/`page_size` は全て無視。**サムネURLも開始時刻も無い**（あるのは配信者アイコンだけ） |
+| `/api/v1/channels/followed` | 🔴 **罠。**汎用の `/api/v1/channels/{slug}` にマッチして「followed という名前のチャンネル」が **200 で返る**。エラーにならないので誤用に気づけない |
+| `api.kick.com/public/v1`（公式API） | **フォロー中一覧のエンドポイントが存在しない**。スコープにも無い |
+
+### 6-3. Service Worker 経由の中継（`static/sw.js`）
+
+| メッセージ | 用途 |
+|---|---|
+| `kick:fetch` | 上記 6-1 を叩いて**生の JSON** を返す。写像は `kickSource.js` の仕事 |
+| `nico:followed` | **kick.com 上でニコ生の番組も出すため**の中継。`https://live.nicovideo.jp/front/api/pages/follow/v1/programs` を叩いて生の配列を返す。ニコ生の視聴ページでは同一オリジンなので通さない |
+| `kick:status` | 権限の有無を返す |
+| `kick:openOptions` | オプションページを開く（コンテンツスクリプトからは `openOptionsPage()` を呼べない） |
+| `kick:stateChanged` | **SW から各タブへの通知**。権限が外れた時に Kick のカードを即座に消すため |
+
+戻り値は必ず `{ok:boolean}`。**throw しない。**`reason` は
+`no-permission` / `no-session` / `unauthorized` / `rate-limited` / `network` / `parse` / `http` / `internal`。
+**`no-permission` はエラーではなく既定の状態**なので、ログも警告も出さないこと。
+
+### 6-4. 権限（すべて optional）
+
+```json
+"optional_permissions": ["cookies", "scripting"],
+"optional_host_permissions": ["https://kick.com/*", "https://live.nicovideo.jp/*"]
+```
+
+- `cookies` … `session_token` を読む
+- `scripting` … kick.com へサイドバーを**動的登録**する
+- `live.nicovideo.jp/*` … kick.com 上でニコ生の番組を出すための中継
+
+🔴 **`sw.js` と `static/options.js` の `KICK_PERMISSIONS` は必ず一致させること。**
+`static/` はバンドルされないので import で共有できず、二重管理になっている。
+
+### 6-5. その他の実測事実
+
+- kick.com のレスポンスに **CSP ヘッダは無い**（注入の障害なし）
+- CORS は **Origin を反射**し `access-control-allow-credentials: true` を返す
+- Cloudflare は素の curl だと 403 だが、Chrome の UA を付ければ 200
+- Next.js App Router の SPA。**ソフトナビゲーションでサイドバーが消えうる**ので差し込み直しが要る

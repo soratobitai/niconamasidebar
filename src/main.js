@@ -3,7 +3,7 @@ import './styles/main.css'
 import { sidebarMinWidth, loadingSessionTimeoutMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
@@ -16,6 +16,10 @@ import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimated
 // フォロー中ページ・スクレイプ方式（番組詳細の一括取得）。
 // 副作用インポート: window.__testFollowScrape() を登録し、実ページのConsoleから動作確認できるようにする。
 import './services/followPageSource.js'
+// Kick 取得元。副作用インポート: window.__testKickFetch() を登録する。
+// ⚠️ この window 登録は**コンテンツスクリプトの分離ワールド**に入る。既定のコンソールからは
+//    呼べず、DevTools で実行コンテキストを拡張側へ切り替える必要がある（__testFollowScrape も同様）。
+import './services/kickSource.js'
 // 【診断コード】原因が分かったら import ごと消す
 import { diagEvent, diagFail } from './utils/diag.js'
 import { onExtensionInvalidated } from './utils/extensionAlive.js'
@@ -32,6 +36,10 @@ let defaultOptions = {
     sidebarTheme: 'light', // 'dark' | 'light'（既定ライト）
     autoNextProgram: 'off',
     animatedThumbnail: 'off', // β版・既定OFF
+    // Kick 連携。**有効かどうかはここに持たない**（chrome.permissions が唯一の真実）。
+    // 保存するのは表示方法と、推定同接の W だけ。どちらも拡張のオプションページで変更する。
+    kickDisplayMode: 'mixed',  // 'mixed' | 'tabs'
+    dwellMinutes: 10,          // W（平均滞在時間・分）
 };
 let options = {};
 let elems = {};
@@ -469,6 +477,28 @@ chrome.storage.onChanged.addListener(function (changes) {
     let needsRestart = false;
     
     if (changes.autoOpen) options.autoOpen = changes.autoOpen.newValue;
+    // Kick 連携の設定は**拡張のオプションページ（別コンテキスト）**で変更される。
+    // この onChanged がそれを受け取る唯一の経路なので、ここで反映しないと
+    // ページを再読込するまで効かない。
+    if (changes.kickDisplayMode) {
+        options.kickDisplayMode = changes.kickDisplayMode.newValue;
+        const container = document.getElementById('liveProgramContainer');
+        // 表示の出し分けだけなので再取得は不要。CSS の属性を付け替えれば済む。
+        if (container) {
+            const count = syncServiceTabs(container, options.kickDisplayMode);
+            if (updateManager) updateManager.updateProgramCount(count);
+        }
+    }
+    if (changes.dwellMinutes) {
+        options.dwellMinutes = changes.dwellMinutes.newValue;
+        setDwellMinutes(options.dwellMinutes);
+        // ⚠️ **`sortPrograms` だけでは直らない。** 順位が読む `active-point` 属性は
+        //    `applyRankAttributes` が描画時に書いた値なので、W を変えても属性は古いまま。
+        //    そのまま並べ替えても古い値で並ぶだけで、直ったように見えて直っていない。
+        //    属性ごと書き直す必要があるので、リスト更新を1回走らせる。
+        //    設定を触った時にしか起きないので、取得が増えることは問題にならない。
+        updateSidebar();
+    }
     if (changes.updateProgramsInterval) {
         options.updateProgramsInterval = changes.updateProgramsInterval.newValue;
         needsRestart = true;
@@ -585,4 +615,10 @@ async function updateSidebar() {
  */
 const reflectOptions = () => {
     setupOptionsHandler(options, sortPrograms);
+    // 推定同接の W（平均滞在時間）。Kick のオプションページで変更される。
+    setDwellMinutes(options.dwellMinutes);
+    // タブのクリック配線（1回だけ効く。2回目以降は内部で弾く）
+    setupServiceTabHandlers((count) => {
+        if (updateManager) updateManager.updateProgramCount(count);
+    });
 };

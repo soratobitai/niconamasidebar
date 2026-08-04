@@ -21,6 +21,13 @@
  * 人気順に第2キー（累計 `data-total` の降順）を足した。スコアが「開始からの平均」から
  * 「直近の勢い」へ変わり、**静かな番組が軒並み 0 で同点になる**ため（利用者決定・doc/09 項目AY）。
  * それ以前は tie-break 無しで、同点は現状順が保たれていた。
+ *
+ * 【2026-08-04 に変えたこと】
+ * 第1キーが「勢い」から**推定同時視聴者数**になった（`estimateConcurrentViewers`）。
+ * 人気順の本来の目的が同接での比較であり、Kick 対応で同接が実測で手に入ったため。
+ * これに伴い第2キーを `data-total`（累計エンゲージメント）から `data-begin-at`（放送開始が
+ * 新しい順）へ差し替えた。**`data-total` はコメントを含むので Kick では常に 0 になり、
+ * 混在時に Kick が必ず下へ沈む**。開始時刻なら両サービスが同じ意味で持っている。
  */
 
 /**
@@ -33,7 +40,7 @@
 export function compareByActivePoint(a, b) {
     const d = parseFloat(b.getAttribute('active-point')) - parseFloat(a.getAttribute('active-point'))
     if (d) return d
-    return (parseFloat(b.getAttribute('data-total')) || 0) - (parseFloat(a.getAttribute('data-total')) || 0)
+    return (parseFloat(b.getAttribute('data-begin-at')) || 0) - (parseFloat(a.getAttribute('data-begin-at')) || 0)
 }
 
 /**

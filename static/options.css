@@ -1,0 +1,210 @@
+/* ニコ生サイドバー — 拡張オプションページ。
+   🔴 このファイルはバンドルされない（static/ から dist/ へコピー）。
+   サイドバー本体の styles/main.css とは別物。共有していない。 */
+
+:root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --fg: #1c1e21;
+    --muted: #6b7076;
+    --border: #dcdfe3;
+    --accent: #2f7bd6;
+    --ok: #1c7c4a;
+    --ng: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #1b1d20;
+        --card: #26292d;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --border: #3c4045;
+        --accent: #6aa9f0;
+        --ok: #5fd08a;
+        --ng: #f2837c;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 32px 20px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+.card {
+    max-width: 560px;
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 26px 20px;
+}
+
+h1 {
+    margin: 0 0 20px;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+.section {
+    border-top: 1px solid var(--border);
+    padding-top: 18px;
+}
+
+.row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    cursor: pointer;
+}
+
+.row input[type="checkbox"] {
+    margin: 3px 0 0;
+    width: 16px;
+    height: 16px;
+    flex: none;
+    accent-color: var(--accent);
+}
+
+.row-text {
+    display: block;
+}
+
+.row-title {
+    display: block;
+    font-weight: 600;
+}
+
+.row-desc {
+    display: block;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.sub {
+    margin: 16px 0 0 28px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.sub[hidden] {
+    display: none;
+}
+
+.sub-title {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+.segment {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.segment input[type="radio"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.segment label {
+    flex: 1;
+    text-align: center;
+    padding: 7px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    background: transparent;
+}
+
+.segment label + input + label,
+.segment input + label:not(:first-of-type) {
+    border-left: 1px solid var(--border);
+}
+
+.segment input[type="radio"]:checked + label {
+    background: var(--accent);
+    color: #fff;
+}
+
+.sub-title-spaced {
+    margin-top: 16px;
+}
+
+.hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
+.test {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.test button {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+}
+
+.test button:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+.test button:disabled {
+    opacity: .5;
+    cursor: default;
+}
+
+.test-result {
+    font-size: 13px;
+}
+
+.test-result.ok {
+    color: var(--ok);
+}
+
+.test-result.ng {
+    color: var(--ng);
+}
+
+.note {
+    margin: 14px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+    min-height: 1.7em;
+}
+
+.note.ng {
+    color: var(--ng);
+}
+
+.footnote {
+    margin: 20px 0 0;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+}

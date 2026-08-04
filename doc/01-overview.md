@@ -16,7 +16,7 @@
 | 項目 | 内容 |
 |------|------|
 | 種別 | Chrome拡張機能 / **Manifest V3** |
-| 構成 | **content script のみ**（background/service worker・popup・options ページはなし） |
+| 構成 | content script 2本（`main.js` = ニコ生 / `kickpage.js` = kick.com・動的登録）＋ Service Worker（`sw.js`）＋ オプションページ（`options.html`）<br>⚠️ 2026-08-04 に「content script のみ」ではなくなった。Kick 連携のため |
 | 言語 | 素の JavaScript（ES Modules で記述、フレームワーク未使用） |
 | ビルド | **Vite 5**（`rollupOptions` で **IIFE** 出力、minify なし、target es2015） |
 | 出力 | `dist/main.js`（1ファイル）＋ `dist/style.css` ＋ アセット |

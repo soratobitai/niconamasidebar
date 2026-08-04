@@ -1,7 +1,8 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs } from '../render/sidebar.js';
+import { fetchKickPrograms } from '../services/kickSource.js';
+import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, syncServiceTabs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
@@ -814,10 +815,21 @@ export class UpdateManager {
             // ⚠️ 旧実装は notifybox を「絞り込み」に使っていた（notifybox に載った番組だけカード化）。
             // notifybox は rows=100 でページングが無いため、**放送中が100件を超えると101件目以降が
             // 表示されなかった**（詳細だけ取得して捨てていた）。和集合にすることでこれも解消する。
-            const [notifyList, fetched] = await Promise.all([
+            //
+            //   Kick        … フォロー中の放送中番組。1リクエストで完成データが揃う。
+            //                  権限が無ければ即 {ok:false,reason:'no-permission'}（＝既定の状態）。
+            //
+            // 🔴 **Kick をこの Promise.all に並べるのは await 地点を増やさないため。**
+            //    取得後に別の await を足すと「自分がまだ最新か」の世代確認（項目AP）を
+            //    もう1箇所足す必要が出る。ここに並べれば既存の確認がそのまま効く。
+            const [notifyList, fetched, kickResult] = await Promise.all([
                 fetchLivePrograms(),             // 失敗時 false（件数は api.js が持つ＝失敗で下がる）
                 this._refreshDetailsViaScrape(), // 失敗時 null
+                fetchKickPrograms(),             // 失敗時 {ok:false}
             ]);
+            const kickPrograms = (kickResult && kickResult.ok && Array.isArray(kickResult.programs))
+                ? kickResult.programs
+                : [];
 
             // 🔴 自分より後に始まった取得が既に描画を終えていたら、ここで降りる（doc/09 項目AP）。
             //
@@ -865,14 +877,26 @@ export class UpdateManager {
 
             this._seedNewProgramsToStorage(merged);
 
+            // 🔴 **Kick を足すのはここ。`_seedNewProgramsToStorage` より後。**
+            //
+            //  - **ニコ生の localStorage キャッシュに入れない。** あのキャッシュは「詳細を別APIで
+            //    後から補う」ために在る。Kick は毎回の取得でサムネURL・開始時刻・同接が揃って
+            //    返るので、補う対象が無い。入れると `lv` 前提のキー生成に手を入れることになる。
+            //  - **`_dropEndedPrograms`（ニコ生の詳細APIで終了確認）も通さない。**
+            //    Kick は「今回のリストに居ない＝終了」で判定できる。詳細APIも存在しない。
+            //  - **`updateThumbnailsFromStorage` の対象にもならない**（storage に居ないため）。
+            //    Kick のサムネは毎周期のリスト取得で新しい URL が来る（versionId が変わる）。
+            const combined = kickPrograms.length ? merged.concat(kickPrograms) : merged;
+
             // 空のときは既存DOMを維持（取得は成功していて放送中0件）
-            if (merged.length === 0) {
+            if (combined.length === 0) {
                 this.updateProgramCount(0);
                 return sessionId;
             }
 
             // 新着順の基準（放送開始が新しい順）。data-api-index はこの並びの位置を表す。
-            const livePrograms = this._orderByBeginAtDesc(merged);
+            // Kick も `onAirTime.beginAt` を持つので、そのまま同じ土俵で並ぶ。
+            const livePrograms = this._orderByBeginAtDesc(combined);
 
             const container = document.getElementById('liveProgramContainer');
             if (!container) return sessionId;
@@ -991,8 +1015,12 @@ export class UpdateManager {
             }
             // else: その場更新のみ（DOMの組み替え・並べ替えはしない＝差分だけ触る）
 
+            // タブ分離モードの表示状態を実態へ合わせる。Kick のカードが無ければタブは出ない。
+            // 戻り値は「いま見えている件数」（混在モードなら全件）。
+            const visibleCount = syncServiceTabs(container, this.options.kickDisplayMode);
+
             // 番組数更新
-            this.updateProgramCount(livePrograms.length);
+            this.updateProgramCount(visibleCount);
 
             // 新規/削除カードに合わせてサムネ更新の期限表を同期する。
             this._refreshThumbSchedule();

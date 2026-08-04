@@ -119,7 +119,120 @@ export function initialMomentum(info, now) {
 }
 
 /**
+ * 来場者「だけ」の到着レートの初期値（1分あたり）。推定同接の材料。
+ *
+ * `initialMomentum` との違いはコメントを足さないことだけ。分母の下限も同じものを使う
+ * （入室ラッシュがそのままレートに化けるのを防ぐ。項目BG）。
+ * @param {object} info programInfo
+ * @param {number} now 現在時刻(ms)
+ * @returns {number} 1分あたりの来場者到着レート
+ */
+export function initialViewerRate(info, now) {
+    if (!info) return 0
+    const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
+    const elapsed = Number.isFinite(beginAt) ? (now - beginAt) / 60000 : 0
+    const minutes = Math.max(initialMomentumMinWindowMin, elapsed)
+    const v = (Number(info.viewers) || 0) / minutes
+    return Number.isFinite(v) && v > 0 ? v : 0
+}
+
+/**
+ * 来場者「だけ」の到着レートを更新する（指数移動平均）。
+ *
+ * 🔴 **`momentum` とは別に持つこと。** `momentum` は `Δ来場者 + w×Δコメント` で、
+ *    弾幕補正が入っている。推定同接に使うのは**純粋な到着レート**でなければならない
+ *    （コメントが混ざると人数の推定として意味を失う）。
+ *
+ * 平滑化の理由・時定数は `nextMomentum` と同じ。ニコ生の統計は約60秒粒度でしか動かず、
+ * 生の差分をそのまま順位に使うと跳ねる。
+ *
+ * @param {object|null} prev 前回保存したレコード（`viewerRate` と `_fetchedAt` を持つ）
+ * @param {object} next 今回の programInfo
+ * @param {number} now 現在時刻(ms)
+ * @returns {number} 更新後の到着レート（1分あたり）
+ */
+export function nextViewerRate(prev, next, now) {
+    if (!next) return 0
+    // notifybox 由来の最小レコード（来場者0）を前回値に使わない。理由は nextMomentum と同じ。
+    if (prev && prev._source === 'notifybox') return initialViewerRate(next, now)
+    const prevR = prev ? Number(prev.viewerRate) : NaN
+    if (!Number.isFinite(prevR)) return initialViewerRate(next, now)
+
+    const dtMs = now - (Number(prev._fetchedAt) || 0)
+    if (!(dtMs >= 1000)) return prevR
+
+    // 累計来場者は減らないはずだが、取得元の揺れで減ることがある。負のレートは作らない。
+    const dv = Math.max(0, (Number(next.viewers) || 0) - (Number(prev.viewers) || 0))
+    const instant = dv / (dtMs / 60000)
+    const alpha = 1 - Math.exp(-dtMs / momentumTauMs)
+    const v = prevR + (instant - prevR) * alpha
+    return Number.isFinite(v) && v > 0 ? v : 0
+}
+
+/**
+ * **推定同時視聴者数。人気順の唯一の第1キー。**
+ *
+ * 【なぜこれなのか】
+ * 人気順の本来の目的は「同時視聴者数で並べること」。ニコ生が同接を公表していないので
+ * `momentum`（勢い）という代替指標を作っていたが、Kick 対応で同接が実測で手に入るように
+ * なったため、本来の目的に戻した（2026-08-04 決定）。
+ * これにより弾幕補正（`commentWeight`）は順位計算の経路から外れている。
+ *
+ * 【式】リトルの法則。
+ * ```
+ *   推定同接 = 到着レート(人/分) × min(W, 放送開始からの経過分)
+ * ```
+ * `W` は平均滞在時間（分）。`min` は「開始から W 分たっていない番組は、まだ誰も帰っていない
+ * とみなす」ことを表す（若い番組では実質 `累計来場者` がそのまま同接になる）。
+ *
+ * 🔴 **W が順位に効く範囲を取り違えないこと。**
+ *    - 経過が W を**超えている**番組どうし → 一律に W を掛けるだけなので**順位は変わらない**
+ *    - 経過が W **未満**の番組が混ざると → その番組の係数は W ではなく「経過分」なので、
+ *      **W を大きくすると、続いている番組が若い番組より上に来やすくなる**
+ *
+ *    つまり W のつまみは2つのことを同時に動かす:
+ *      (1) ニコ生と Kick の釣り合い
+ *      (2) ニコ生内部の「立ち上がったばかりの番組 vs 続いている番組」の釣り合い
+ *
+ *    2026-08-04 の設計時に (2) を見落として「W はニコ生内部の順位を変えない」と説明していた。
+ *    検証で反例が出た（若5分/毎分30人 と 古60分/毎分10人 は W=10 と W=20 で順位が入れ替わる）。
+ *
+ * Kick は同接が実測で返るので、推定せずそのまま使う（呼び出し側で平滑化済みの値が入る）。
+ *
+ * @param {object} info programInfo
+ * @param {number} now 現在時刻(ms)
+ * @param {number} dwellMinutes W（平均滞在時間・分）
+ * @returns {number} 推定同時視聴者数
+ */
+export function estimateConcurrentViewers(info, now, dwellMinutes) {
+    if (!info) return 0
+
+    // Kick は実測値。推定しない。
+    if (info.service === 'kick') {
+        const c = Number(info.concurrentViewersSmoothed)
+        if (Number.isFinite(c) && c > 0) return c
+        return Number(info.concurrentViewers) || 0
+    }
+
+    const stored = Number(info.viewerRate)
+    const rate = Number.isFinite(stored) ? stored : initialViewerRate(info, now)
+    if (!(rate > 0)) return 0
+
+    const W = Number(dwellMinutes) > 0 ? Number(dwellMinutes) : 1
+    const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
+    // 開始時刻が不明なら定常とみなす（W をそのまま掛ける）。若い番組だと分からないので
+    // 過大にならない方へ倒したいところだが、beginAt が無いのは異常系で数も少ない。
+    const elapsedMin = Number.isFinite(beginAt) ? Math.max(0, (now - beginAt) / 60000) : W
+    const v = rate * Math.min(W, elapsedMin)
+    return Number.isFinite(v) && v > 0 ? v : 0
+}
+
+/**
  * 新しい取得値で勢いを更新する（指数移動平均）。
+ *
+ * ⚠️ **2026-08-04 以降、この値は順位計算に使われていない。**推定同接
+ * （`estimateConcurrentViewers`）へ移行した。弾幕補正の実効値を実機で観察するための
+ * 覗き窓（`data-total` / `data-comment-weight`）としてのみ残っている。
  *
  * @param {object|null} prev 前回保存したレコード（`momentum` と `_fetchedAt` を持つ）
  * @param {object} next 今回の programInfo

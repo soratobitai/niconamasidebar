@@ -75,6 +75,53 @@
 
 ## 2.2 レイヤー構成
 
+### 2.2.0 全体像（2026-08-04 に構成が変わった）
+
+**エントリは2本、それに Service Worker とオプションページが加わった。**
+以前の「content script のみ・background なし」ではない。
+
+```
+      ニコ生の視聴ページ                      kick.com
+  live.nicovideo.jp/watch/*            （動的登録・Kick 連携ON時のみ）
+   ┌──────────────────┐                ┌──────────────────┐
+   │  dist/main.js    │                │ dist/kickpage.js │
+   │  （静的注入）     │                │ （scripting で   │
+   │                  │                │   動的登録）      │
+   └────────┬─────────┘                └────────┬─────────┘
+            │                                    │
+            │  ニコ生API は同一オリジンで直接      │ どちらのAPIも自分では叩けない
+            │                                    │（クロスオリジン）
+            │        chrome.runtime.sendMessage  │
+            └──────────────┬─────────────────────┘
+                           ▼
+                  ┌──────────────────┐        ┌──────────────────┐
+                  │   dist/sw.js     │        │ dist/options.html│
+                  │ Service Worker   │        │ Kick 連携の ON/OFF│
+                  │ ・cookie 読み出し │        │ （権限の要求は    │
+                  │ ・API の中継のみ  │        │  拡張ページでしか │
+                  │ ・登録/解除       │        │  できない）       │
+                  └──────────────────┘        └──────────────────┘
+```
+
+- **サイドバーの中身は両ページで完全に同一。**描画・並び替え・設定パネル・タブの出し分けは
+  すべて同じモジュール（`render/sidebar.js` ほか）を共有している。違うのは
+  「どうやってデータを取るか」と「ページのどこに置くか」だけ
+- **SW は薄く保つ。**やるのは「cookie を読む → fetch する → **生の JSON** を返す」だけ。
+  写像・並び替え・キャッシュはバンドル側の仕事。SW に寄せるとバンドル外のコードが増え、
+  `import` で共有できないぶん二重管理になる
+- **タイマーを SW に置かない。**定期取得は各コンテンツスクリプトの更新サイクルから叩く。
+  置くと `alarms` 権限が要るうえ、MV3 の SW スリープを相手にすることになる
+
+🔴 **ビルドは2回走る。** 出力形式が iife で、Rollup は iife/umd で複数エントリを出せない。
+`vite.config.js`（main）と `vite.kickpage.config.js`（kickpage）を順に実行する。
+後者は `emptyOutDir: false` が必須（true だと1本目の成果物を消す）。
+
+🔴 **`static/` はバンドルされない。** `sw.js` / `options.html` / `options.js` / `options.css` は
+`icons/` `images/` と同じく dist へそのままコピーされる。`import` が書けないので、
+権限定義・API URL・cookie 名が本体と**二重管理**になっている（doc/09 項目 BL）。
+
+### 2.2.1 ニコ生ページ側（`main.js`）の内部構成
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  entry:  src/main.js                                          │
@@ -111,7 +158,11 @@
 
 | モジュール | 責務 | 主なエクスポート |
 |-----------|------|----------------|
-| `main.js` | エントリ。初期化・イベント配線・各層への委譲・UI状態ブリッジ | （エントリのため export なし） |
+| `main.js` | エントリ①。ニコ生の視聴ページ。初期化・イベント配線・各層への委譲・UI状態ブリッジ | （エントリのため export なし） |
+| `kickPage.js` | **エントリ②。kick.com 用**（動的登録）。サイドバーを `<html>` 直下へ差し込み、両サービスの番組を描画。ニコ生固有の機能（自動移動・番組終了検知・notifybox・動くサムネ）は持たない | （エントリのため export なし） |
+| `services/kickSource.js` | Kick の取得（SW へ依頼）と programInfo への写像、同接の平滑化。**`viewer_count` は同接なので `viewers` に入れない**（`concurrentViewers`）。`start_time` は UTC なので `+'Z'` を付けてパースする | `fetchKickPrograms`, `mapKickLivestreamToInfo`, `parseKickTimeToIso`（デバッグ用に `window.__testKickFetch` を配線） |
+| `static/sw.js` 📦 | Service Worker。**バンドルされない。**cookie 読み出し・Kick API とニコ生APIの中継・kick.com への動的登録／解除・権限変化の全タブ通知 | （`chrome.runtime.onMessage` で `kick:fetch` / `nico:followed` / `kick:status` / `kick:openOptions`） |
+| `static/options.js` 📦 | 拡張のオプションページ。**バンドルされない。**Kick 連携の ON/OFF（`chrome.permissions.request/remove`）と接続テスト | — |
 | `config/constants.js` | エンドポイントURL・各種間隔/上限などの定数 | `notifyboxAPI`, `liveInfoAPI`（サムネ補完専用）, `watchPageBaseUrl`, `sidebarMinWidth`, `maxSaveProgramInfos`, `updateThumbnailInterval`, `thumbnail*`, `animatedThumbnail*`, `loadingSessionTimeoutMs` |
 | `core/AppState.js` | 全グローバル状態の集約と一括クリーンアップ | `class AppState` |
 | `services/api.js` | notifybox API の fetch（放送中番組リスト）＋番組詳細API の fetch（サムネ補完専用。ともに in-flight 重複排除つき） | `fetchLivePrograms`, `fetchProgramInfo` |
@@ -129,7 +180,7 @@
 | `services/animFrameStore.js` 🧪 | 動くサムネのフレーム永続化（IndexedDB, blob保存, TTL/件数掃除）。リロード/番組移動をまたいで復元 | `saveFrames`, `loadFrames`, `cleanupFrames` |
 | `utils/dom.js` | `debounce` | `debounce` |
 | `utils/error.js` | エラー分類・ログ・リトライ戦略 | `handleError`（`ErrorManager`/`ErrorType`/`ErrorLevel` は内部専用・未export） |
-| `utils/momentum.js` | **「盛り上がり」（人気順のスコア）の唯一の定義**。直近の増分レートを指数移動平均で均す。計算するのは `storage.upsertProgramInfos` だけ（前回値と出会う唯一の場所／doc/09 AY） | `totalEngagement`, `initialMomentum`, `nextMomentum` |
+| `utils/momentum.js` | **人気順スコアの唯一の定義**。2026-08-04 に「盛り上がり」から**推定同時視聴者数**へ変わった（doc/09 項目 BL-5）。到着レートの EMA を計算するのは `storage.upsertProgramInfos` だけ（前回値と出会う唯一の場所／doc/09 AY）。`momentum`・`commentWeight` は残っているが**順位には使っていない**（実機観察用の覗き窓） | `estimateConcurrentViewers`（第1キー）, `initialViewerRate`, `nextViewerRate`, `totalEngagement`, `initialMomentum`, `nextMomentum` |
 | `utils/programOrder.js` | **並び順の比較器の唯一の定義**。実際に並べ替える処理と「並べ替えが要るか」の判定が同じ比較器を使う（食い違うと全カードが毎周期スライドする／doc/09 AR） | `compareByActivePoint`, `compareByApiIndex`, `orderComparator` |
 | `utils/sorting.js` | 番組リストのソート（新着順=`beginAt` 降順＝`data-api-index` 昇順 / 人気順=active-point）。比較器は `programOrder.js` から取る | `sortPrograms` |
 

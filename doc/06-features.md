@@ -24,6 +24,20 @@
 | サイドバー開閉 | （フォーム外・ボタン） | — | `isOpenSidebar` | `false` | — | onChanged→開閉反映 |
 | ライト/ダーク | （設定画面**末尾**のセグメント） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `input[name="sidebarTheme"]`） | onChanged→`applyTheme` |
 | サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。常設ループが更新完了後に置き直す基準間隔） | — | — |
+| **Kick 連携 ON/OFF** | （フォーム外・**拡張のオプションページ**） | — | **保存しない**（`chrome.permissions.contains()` が唯一の真実） | 無効 | options.html | `permissions.onAdded/onRemoved` → SW が各タブへ `kick:stateChanged` |
+| **Kickの表示** | `kickDisplayMode` | `mixed`(混ぜる)/`tabs`(タブで分ける) | `kickDisplayMode` | `'mixed'` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`syncServiceTabs`（再描画せず CSS で出し分け） |
+| **ニコ生とのバランス（W）** | `dwellMinutes` | `5`/`10`/`20`/`40`（分） | `dwellMinutes` | `10` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`setDwellMinutes` ＋ リスト更新を1回 |
+
+🔴 **「Kick を有効にするか」だけは設定値として保存していない。**
+ユーザーは `chrome://extensions` からこの画面を通さずに権限を取り消せるため、
+別に真偽値を持つと必ずズレる。`chrome.permissions.contains()` の結果を唯一の真実にしている。
+
+🔴 **ON/OFF だけが拡張のオプションページにある。**`chrome.permissions.request()` は
+コンテンツスクリプトから呼べず、サイドバー内の設定 UI はニコ生ページの DOM だから。
+権限を伴わない「表示方法」と「バランス」はサイドバー内にある（利用者要望・2026-08-04）。
+
+⚠️ **W（バランス）の効き方**は doc/09 項目 BL-5 を読むこと。
+「ニコ生と Kick の釣り合いだけ」ではなく、**ニコ生内部の「新しい番組 vs 続いている番組」も動かす。**
 
 ---
 

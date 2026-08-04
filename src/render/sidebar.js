@@ -1,6 +1,6 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
-import { initialMomentum, totalEngagement, commentWeight, commentRatio } from '../utils/momentum.js'
+import { totalEngagement, commentWeight, commentRatio, estimateConcurrentViewers } from '../utils/momentum.js'
 
 /**
  * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
@@ -73,9 +73,15 @@ export function deriveCardFields(data) {
     // だけがレガシーとして残っている。表示・命名を API の古い語彙に引きずられないこと。
     const provider_name = owner.name || '配信者名不明'
     const icon_url = owner.icon || ''
-    const thumbnail_link_url = `${watchPageBaseUrl}lv${id}`
+    // 🔴 **URL をここで組み立てるのはニコ生だけ。** Kick は `watchUrl` を持って来る。
+    //    `watchPageBaseUrl + 'lv' + id` という規約は Kick には通じないので、
+    //    programInfo 側が完成した URL を持つ形にしてある（無ければ従来どおり）。
+    const thumbnail_link_url = data.watchUrl || `${watchPageBaseUrl}lv${id}`
     let user_page_url = ''
-    if (owner.id) {
+    if (data.service === 'kick') {
+        // Kick の配信者ページ＝チャンネルページ＝番組ページ。分かれていない。
+        user_page_url = data.watchUrl || ''
+    } else if (owner.id) {
         user_page_url = data.providerType === 'channel'
             ? `https://ch.nicovideo.jp/${owner.id}`
             : `https://www.nicovideo.jp/user/${owner.id}`
@@ -151,7 +157,23 @@ export function applyProgramInfoToCard(card, data) {
     //     ②が '1' を立てるまでの間、**カードの数だけ無駄な再取得**が走る。
     //   - `?cache=` は付けない。同一URLなら再代入されないので無駄な再取得も起きない。
     //     「同じURLで中身が変わる」ライブサムネの更新は従来どおりループの仕事。
-    if (img && img.dataset.thumbLive === '0') {
+    // 🔴 **Kick のサムネを差し替える唯一の経路がここ。**
+    //
+    // Kick はニコ生の localStorage キャッシュに入れていないので、storage 駆動の
+    // サムネ更新ループ（`updateThumbnailsFromStorage`）が拾えない。あちらは
+    // `infoMap.get(\`lv${card.id}\`)` で引くため、Kick の id では必ず undefined になる。
+    //
+    // 代わりに、毎周期のリスト更新で来る新しい URL をそのまま反映する。Kick のサムネURLは
+    // 画像が更新されるたび `?versionId=` が変わるので、**URL が変わった＝絵が変わった**。
+    // 同じ URL なら差し替えない＝無駄なクロスフェードが起きない（ニコ生側では
+    // 「同じURLで中身が変わる」ため、この判定は使えなかった）。
+    //
+    // ⚠️ 下のニコ生用の分岐（thumbLive / バックオフ / storage 前提）へ落とさないこと。
+    //    Kick は `isLiveSrc` が真になるので `thumbLive` が未設定で、あの条件には入らない。
+    if (img && data.service === 'kick') {
+        const next = f.thumbnail_url
+        if (next && img.src !== next) crossfadeThumbnail(img, next)
+    } else if (img && img.dataset.thumbLive === '0') {
         const best = resolveLiveThumbnailBaseUrl(data) || f.thumbnail_url
         // 🔴 **バックオフ中は触らないこと。** 直接表示はループのバックオフ状態を持っていないので、
         // ここを見ないと**読み込みに失敗し続けるURLをリスト更新のたびに叩き直す**ことになる
@@ -260,6 +282,18 @@ export function makeProgramElement(data, loadingImageURL) {
     providerNameDiv.textContent = provider_name
     providerDiv.appendChild(providerNameDiv)
 
+    // サービスのラベル。**Kick のカードにだけ付ける**（無印＝ニコ生）。
+    // サムネ上に置かない: `.program_thumbnail` には既にクロスフェード層と
+    // 動くサムネのオーバーレイが重なっており、3層目は z-index の管理が増えるうえ、
+    // 動くサムネの再生中にラベルが覆われる。`.provider` 行は高さが安定していて崩れない。
+    // 混在時だけ見せる（タブ分離時はタブ自体がラベルなので CSS で隠す）。
+    if (data.service === 'kick') {
+        const badge = document.createElement('span')
+        badge.className = 'service_badge service_badge_kick'
+        badge.textContent = 'Kick'
+        providerDiv.appendChild(badge)
+    }
+
     container.appendChild(providerDiv)
 
     // サムネイルセクション
@@ -267,6 +301,9 @@ export function makeProgramElement(data, loadingImageURL) {
     thumbnailDiv.className = 'program_thumbnail program-card_'
     const thumbnailLink = document.createElement('a')
     thumbnailLink.href = thumbnail_link_url
+    // ⚠️ **同じタブで移動する（target は付けない）。**
+    //    一時期 Kick だけ別タブにしていたが、kick.com にもサイドバーを注入するようになったので
+    //    移動先でも一覧が残る。ニコ生と挙動を揃える（利用者の要望・2026-08-04）。
     const thumbnailImg = document.createElement('img')
     thumbnailImg.className = 'program_thumbnail_img'
     thumbnailImg.src = live_thumbnail_url
@@ -310,9 +347,89 @@ export function makeProgramElement(data, loadingImageURL) {
  */
 export function calculateActivePoint(data) {
     if (!data) return 0
-    const m = Number(data.momentum)
-    if (Number.isFinite(m)) return m
-    return initialMomentum(data, Date.now())
+    return estimateConcurrentViewers(data, Date.now(), dwellMinutes)
+}
+
+// W（平均滞在時間・分）。推定同接の唯一の調整つまみ。
+// 🔴 効き方は2通りある（momentum.js の estimateConcurrentViewers 参照）。
+//    「ニコ生と Kick の釣り合い」だけだと思って触らないこと。
+let dwellMinutes = defaultDwellMinutes
+
+/**
+ * W を差し替える。オプション読み込み時と変更時に main.js から呼ぶ。
+ * @param {number|string} value 分
+ */
+export function setDwellMinutes(value) {
+    const v = Number(value)
+    dwellMinutes = Number.isFinite(v) && v > 0 ? v : defaultDwellMinutes
+}
+
+/**
+ * タブ分離モードの表示状態を実態に合わせる。描画のたびに呼ぶ。
+ *
+ * 🔴 **タブの切り替えで再描画しない。** カードは常に両サービスぶん DOM に入れておき、
+ *    `#liveProgramContainer[data-service-tab]` と CSS で出し分ける。
+ *    再描画方式にすると、差分更新・FLIP・ソートという最も壊れやすい経路に
+ *    「今どのタブか」という条件が増える（doc/09 の警告領域）。
+ *
+ * @param {HTMLElement} container `#liveProgramContainer`
+ * @param {string} mode `options.kickDisplayMode`（'mixed' | 'tabs'）
+ * @returns {number} 表示対象のカード数（件数表示に使う）
+ */
+export function syncServiceTabs(container, mode) {
+    const tabs = document.getElementById('serviceTabs')
+    if (!container) return 0
+
+    const total = container.children.length
+    // Kick のカードが1件も無いならタブを出さない（Kick 無効・未ログイン・放送中0件）。
+    const hasKick = !!container.querySelector('.program_container[data-service="kick"]')
+    const useTabs = mode === 'tabs' && hasKick
+
+    if (tabs) tabs.hidden = !useTabs
+
+    if (!useTabs) {
+        container.removeAttribute('data-service-tab')
+        return total
+    }
+
+    const activeBtn = tabs && tabs.querySelector('.service_tab.is-active')
+    const active = (activeBtn && activeBtn.dataset.serviceTab) || 'nicolive'
+    container.setAttribute('data-service-tab', active)
+    return countVisibleByTab(container, active)
+}
+
+/** タブで表示されるカード数。件数表示が「見えていない番組」を数えないようにする。 */
+function countVisibleByTab(container, active) {
+    let n = 0
+    for (const el of container.children) {
+        const svc = el.getAttribute('data-service') || 'nicolive'
+        if (active === 'kick' ? svc === 'kick' : svc !== 'kick') n++
+    }
+    return n
+}
+
+/**
+ * タブのクリックを配線する。サイドバー挿入後に一度だけ呼ぶ。
+ * @param {(count:number)=>void} onCountChange 表示件数が変わった時に呼ぶ
+ */
+export function setupServiceTabHandlers(onCountChange) {
+    const tabs = document.getElementById('serviceTabs')
+    if (!tabs || tabs.dataset.wired === '1') return
+    tabs.dataset.wired = '1'
+
+    tabs.addEventListener('click', (event) => {
+        const btn = event.target.closest('.service_tab')
+        if (!btn || btn.classList.contains('is-active')) return
+
+        for (const b of tabs.querySelectorAll('.service_tab')) {
+            b.classList.toggle('is-active', b === btn)
+        }
+        const container = document.getElementById('liveProgramContainer')
+        if (!container) return
+        const active = btn.dataset.serviceTab || 'nicolive'
+        container.setAttribute('data-service-tab', active)
+        if (typeof onCountChange === 'function') onCountChange(countVisibleByTab(container, active))
+    })
 }
 
 /**
@@ -334,8 +451,17 @@ export function calculateActivePoint(data) {
  */
 export function applyRankAttributes(el, data) {
     if (!el) return
+    // どのサービスの番組か。タブ分離モードの表示切り替え（CSS）とラベル表示が読む。
+    el.setAttribute('data-service', (data && data.service) || 'nicolive')
     el.setAttribute('active-point', String(calculateActivePoint(data)))
-    // 弾幕補正で整数でなくなったので丸める。第2キーの粗さとしては小数1桁で十分。
+    // 人気順の第2キー（同点時）。放送開始が新しい方を上にする。
+    // 🔴 **`data-total` から差し替えた**（2026-08-04）。累計エンゲージメントはコメントを含むが、
+    //    Kick はコメント数を返さないので常に 0 になり、ニコ生と混ぜた時に Kick が必ず下へ沈む。
+    //    開始時刻なら両サービスが同じ意味で持っている。
+    const beginMs = data && data.onAirTime && data.onAirTime.beginAt ? Date.parse(data.onAirTime.beginAt) : NaN
+    el.setAttribute('data-begin-at', Number.isFinite(beginMs) ? String(beginMs) : '0')
+    // ⚠️ 以下3つは**順位計算に使っていない**。弾幕補正の効き方を実機で見るための覗き窓。
+    //    順位が推定同接へ移行した今、消してよい候補（doc/09 項目BE の後日談）。
     el.setAttribute('data-total', String(Math.round(totalEngagement(data) * 10) / 10))
     el.setAttribute('data-comment-weight', commentWeight(data).toFixed(3))
     el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))
@@ -857,6 +983,12 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <a href="https://account.nicovideo.jp/login">ログイン</a>
                                     </div>
                                     <div id="optionContainer"></div>
+                                    <!-- タブ分離モードでのみ表示。混在モードと Kick 無効時は hidden。
+                                         切り替えは再描画ではなく CSS の出し分けで行う（描画経路に触らないため）。 -->
+                                    <div id="serviceTabs" class="service_tabs" hidden>
+                                        <button type="button" class="service_tab is-active" data-service-tab="nicolive">ニコ生</button>
+                                        <button type="button" class="service_tab" data-service-tab="kick">Kick</button>
+                                    </div>
                                     <div id="liveProgramContainer"></div>
                                 </div>
                             </div>
@@ -916,7 +1048,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         動くサムネ<span class="opt-beta-badge">β版</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネを切り替えてアニメ表示します。（ベータ版：不具合や重い場合はOFFに）</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネを切り替えてアニメ表示します。（ベータ版：不具合や重い場合はOFFに）<br><br>⚠️ <b>ニコ生の番組のみ。</b>Kick のサムネは配信元が CORS を許可していないため、コマを取り出せません。</span></span>
                                     </div>
                                     <div class="opt-segment">
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
@@ -928,6 +1060,41 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div class="opt-segment">
                                         <input type="radio" id="sidebarThemeLight" name="sidebarTheme" value="light"><label for="sidebarThemeLight">ライト</label>
                                         <input type="radio" id="sidebarThemeDark" name="sidebarTheme" value="dark"><label for="sidebarThemeDark">ダーク</label>
+                                    </div>
+                                </div>
+                                <!-- Kick 連携だけは他の設定と置き場所が違う。chrome.permissions.request() は
+                                     コンテンツスクリプトから呼べず、この設定 UI はニコ生ページ内の DOM なので
+                                     ここでは ON/OFF できない。拡張のオプションページを開く導線だけを置く。 -->
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        Kick 連携
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">Kick でフォロー中の配信をサイドバーに表示します。kick.com へのアクセス許可が必要なため、拡張機能の設定ページで有効にします。</span></span>
+                                    </div>
+                                    <div class="opt-external">
+                                        <button type="button" id="open_kick_settings" class="opt-external-button">連携設定を開く</button>
+                                        <span id="kick_status" class="opt-external-status"></span>
+                                    </div>
+                                </div>
+                                <!-- 以下2つは Kick が有効な時だけ出す。ON/OFF と違って権限を伴わないので、
+                                     ここ（サイドバー内）で完結できる。表示/非表示は optionsHandler が
+                                     kick:status の応答で切り替える。 -->
+                                <div class="opt-section opt-kick-only" hidden>
+                                    <div class="opt-label">Kickの表示</div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="kickDisplayModeMixed" name="kickDisplayMode" value="mixed"><label for="kickDisplayModeMixed">混ぜる</label>
+                                        <input type="radio" id="kickDisplayModeTabs" name="kickDisplayMode" value="tabs"><label for="kickDisplayModeTabs">タブで分ける</label>
+                                    </div>
+                                </div>
+                                <div class="opt-section opt-kick-only" hidden>
+                                    <div class="opt-label opt-title-with-help">
+                                        ニコ生とのバランス
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">人気順は同時視聴者数で並べます。ニコ生は同時視聴者数を公表していないので、来場者が増えるペースから推定しています。ニコ生が下に沈むと感じたら右へ、上に来すぎるなら左へ。<br>右にするほど、始まったばかりの番組より長く続いている番組が上に来ます。</span></span>
+                                    </div>
+                                    <div class="opt-segment opt-segment-4">
+                                        <input type="radio" id="dwellMinutes5" name="dwellMinutes" value="5"><label for="dwellMinutes5">Kick寄り</label>
+                                        <input type="radio" id="dwellMinutes10" name="dwellMinutes" value="10"><label for="dwellMinutes10">標準</label>
+                                        <input type="radio" id="dwellMinutes20" name="dwellMinutes" value="20"><label for="dwellMinutes20">ニコ生寄り</label>
+                                        <input type="radio" id="dwellMinutes40" name="dwellMinutes" value="40"><label for="dwellMinutes40">かなり</label>
                                     </div>
                                 </div>
                             </form>

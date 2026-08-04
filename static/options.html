@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>ニコ生サイドバー — 連携設定</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+
+<body>
+    <main class="card">
+        <h1>連携設定</h1>
+
+        <section class="section">
+            <label class="row row-main">
+                <input type="checkbox" id="kick_enabled">
+                <span class="row-text">
+                    <span class="row-title">Kick を有効にする</span>
+                    <span class="row-desc">
+                        Kick でフォロー中の配信を、ニコ生のサイドバーに表示します。
+                        有効にすると kick.com へのアクセス許可を求めます。
+                    </span>
+                </span>
+            </label>
+
+            <div class="sub" id="kick_sub" hidden>
+                <p class="hint">
+                    表示方法（混ぜる／タブで分ける）とニコ生とのバランスは、
+                    <strong>ニコ生の視聴ページのサイドバー内の設定</strong>で変更できます。
+                    このページで扱うのは、権限が必要な連携の ON/OFF だけです。
+                </p>
+
+                <div class="test">
+                    <button type="button" id="kick_test">接続テスト</button>
+                    <span id="kick_test_result" class="test-result"></span>
+                </div>
+            </div>
+
+            <p class="note" id="kick_note"></p>
+        </section>
+
+        <p class="footnote">
+            この設定はいつでも取り消せます。無効にすると kick.com へのアクセス許可も削除されます。
+        </p>
+    </main>
+
+    <script src="options.js"></script>
+</body>
+
+</html>

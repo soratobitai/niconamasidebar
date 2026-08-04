@@ -93,6 +93,17 @@ export const momentumTauMs = 180000; // 3分
 // カードが立つのが遅れた番組（放送開始から2分以上）には影響しない＝分母が既に下限を超えている。
 export const initialMomentumMinWindowMin = 2;
 
+// W（平均滞在時間・分）。推定同接 = 到着レート × min(W, 経過分) の W。
+// 🔴 W が効くのは2箇所。「ニコ生と Kick の釣り合い」だけではない。
+//    経過が W を超えた番組どうしの順位は変わらないが、経過が W 未満の若い番組が混ざると
+//    W を大きくするほど「続いている番組」が上に来る（係数が W ではなく経過分になるため）。
+//    詳細は momentum.js の estimateConcurrentViewers を参照。
+export const defaultDwellMinutes = 10;
+
+// Kick の同接（実測値）を均す時定数。生値は大きく飛ぶ（実測 155〜1275）ので、
+// そのまま順位に使うとカードが跳ねる。ニコ生側の平滑化と揃えて momentumTauMs を使う。
+export const kickConcurrentTauMs = momentumTauMs;
+
 // 弾幕（少人数が大量に投稿していて、実際には盛り上がっていない番組）への補正。
 //
 // 🔴 **「弾幕かどうか」を判定して下げる方式にはしないこと。** 判定は必ず境界を持ち、

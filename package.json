@@ -1,12 +1,12 @@
 {
   "name": "niconamasidebar",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "ニコ生の番組視聴ページにサイドバーを設置します。",
   "author": "MynicoTools",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.kickpage.config.js",
     "postbuild": "node scripts/remove-maps.js",
     "preview": "vite preview",
     "verify:loop": "node scripts/verify-sidebar-loop.mjs",

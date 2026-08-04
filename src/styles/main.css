@@ -1,5 +1,12 @@
-/* ===== テーマ変数（ダーク=既定 / ライト=body.nicosidebar-light 付与時） ===== */
-body {
+/* ===== テーマ変数（ダーク=既定 / ライト=.nicosidebar-light 付与時） =====
+   🔴 **`body` だけに定義しないこと。** kick.com 用のサイドバーは `<body>` の外
+   （`<html>` 直下）に置いてある。ページ本体を寄せるのに body へ transform を掛けており、
+   body の中に居ると サイドバー自身も一緒に動いてしまうため。
+   カスタムプロパティは継承なので、body の外の要素には body の定義が届かない。
+   届かないと `--sb-line`（開閉ボタンの背景）も `--sb-arrow`（矢印）も透明になり、
+   **見た目が崩れたうえ開閉ボタンが消える**（2026-08-04 に実際にこれを踏んだ）。 */
+body,
+#niconamasidebar-kick-root {
     --sb-bg: #111;
     --sb-line: #111;
     --sb-fg: #ccc;
@@ -16,7 +23,8 @@ body {
     --sb-switch-track: #2a6fd8; /* ダーク=ON=色付き */
     --sb-switch-knob: #fff;
 }
-body.nicosidebar-light {
+body.nicosidebar-light,
+#niconamasidebar-kick-root.nicosidebar-light {
     --sb-bg: #ffffff;
     /* ライト時は本サイト背景が白でも境目が分かるよう、左端ライン/開閉ボタンに色を付ける（薄め） */
     --sb-line: #d5d9df;
@@ -258,6 +266,73 @@ body.nicosidebar-light {
     overflow: hidden;
 }
 
+/* サービスのラベル。Kick のカードにだけ付く（無印＝ニコ生）。
+   タブ分離モードでは data-service-tab が付くので、その時は隠す（タブ自体がラベルになる）。 */
+.program_container .provider .service_badge {
+    flex: none;
+    margin-left: auto;
+    padding: 1px 6px;
+    font-size: 0.68em;
+    font-weight: bold;
+    line-height: 1.6;
+    border-radius: 4px;
+    letter-spacing: .02em;
+}
+
+.program_container .provider .service_badge_kick {
+    color: #0f1a0f;
+    background: #53fc18; /* Kick のブランドカラー */
+}
+
+#liveProgramContainer[data-service-tab] .service_badge {
+    display: none;
+}
+
+/* タブ分離モードの出し分け。再描画せず表示だけ切り替える。 */
+#liveProgramContainer[data-service-tab="nicolive"] .program_container[data-service="kick"],
+#liveProgramContainer[data-service-tab="kick"] .program_container:not([data-service="kick"]) {
+    display: none;
+}
+
+.service_tabs {
+    display: flex;
+    gap: 0;
+    margin: 0 8px 6px;
+    border: 1px solid var(--sb-popup-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.service_tabs[hidden] {
+    display: none;
+}
+
+/* 設定を開いている間はタブを出さない。番組リストと設定は入れ替え表示なので、
+   設定の下にリストのタブだけが残ると宙に浮く。 */
+.sidebar_body.show-settings #serviceTabs {
+    display: none;
+}
+
+.service_tab {
+    flex: 1;
+    font: inherit;
+    font-size: 0.85em;
+    padding: 5px 8px;
+    border: 0;
+    background: var(--sb-segment-bg);
+    color: var(--sb-fg);
+    cursor: pointer;
+}
+
+.service_tab + .service_tab {
+    border-left: 1px solid var(--sb-popup-border);
+}
+
+.service_tab.is-active {
+    background: var(--sb-accent);
+    color: #fff;
+}
+
 .program_container .provider .provider_name {
     padding-left: 7px;
     width: 100%;
@@ -492,6 +567,39 @@ body.nicosidebar-light {
     background: #ffd54f;
     border-radius: 8px;
     vertical-align: middle;
+}
+
+/* 外部（拡張のオプションページ）へ飛ばす行。今は Kick 連携だけが使う。
+   .opt-segment と違い値を持たないので、optionForm の change では拾われない。 */
+#optionContainer .opt-external {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#optionContainer .opt-external-button {
+    font: inherit;
+    font-size: 0.9em;
+    padding: 5px 12px;
+    border: 1px solid var(--sb-popup-border);
+    border-radius: 6px;
+    background: var(--sb-segment-bg);
+    color: var(--sb-fg);
+    cursor: pointer;
+}
+
+#optionContainer .opt-external-button:hover {
+    border-color: var(--sb-accent);
+}
+
+#optionContainer .opt-external-status {
+    font-size: 0.85em;
+    opacity: .6;
+}
+
+#optionContainer .opt-external-status.is-on {
+    opacity: 1;
+    color: var(--sb-accent);
 }
 
 #optionContainer .help-wrap {
