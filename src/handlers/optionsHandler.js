@@ -74,7 +74,8 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted, onDwel
      * 新着順は `data-api-index` で並ぶので `active-point` を見ず、この設定は何も変えない。
      */
     const syncActiveOnlySections = () => {
-        const on = options.programsSort === 'active';
+        // おすすめ順も同点は人気順で並ぶので、この設定が効く（2026-08-10）。
+        const on = options.programsSort === 'active' || options.programsSort === 'recommend';
         for (const el of document.querySelectorAll('.opt-active-only')) el.hidden = !on;
     };
 

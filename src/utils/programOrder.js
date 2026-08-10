@@ -59,6 +59,31 @@ export function compareByApiIndex(a, b) {
  * 設定値から比較器を選ぶ。
  * @param {string} sortType - 'active' なら人気順、それ以外は新着順（既定）
  */
+/**
+ * おすすめ順。**見た回数の多い配信者を上に。**
+ *
+ * ⚠️ **同じ回数の時の第2キーが要る。** 導入直後は全員 0 回なので、これが無いと
+ *    並びが不定になり、毎周期カードが入れ替わってちらつく。
+ *    第2キーは人気順（推定同接）にしてある＝**履歴が育つまでは実質いまの人気順**。
+ *
+ * 🔴 回数はカードの `data-watch-count` から読む。書き手は `applyRankAttributes` だけ。
+ */
+export function compareByWatchCount(a, b) {
+    const ca = parseInt(a.dataset ? a.dataset.watchCount : '', 10) || 0
+    const cb = parseInt(b.dataset ? b.dataset.watchCount : '', 10) || 0
+    if (ca !== cb) return cb - ca
+    return compareByActivePoint(a, b)
+}
+
+/**
+ * 並び替えの比較器。**表示順序の解釈はここが唯一の定義。**
+ *
+ * 🔴 **呼ぶ側で if を書き直さないこと**（2026-08-10 まで `utils/sorting.js` が独自に
+ *    分岐していた）。`_sortOrderChanged` はこの関数を使うので、食い違うと
+ *    「並べ替えが要る」と毎周期判定されて replaceChildren と FLIP が走り続ける。
+ */
 export function orderComparator(sortType) {
-    return sortType === 'active' ? compareByActivePoint : compareByApiIndex
+    if (sortType === 'active') return compareByActivePoint
+    if (sortType === 'recommend') return compareByWatchCount
+    return compareByApiIndex
 }

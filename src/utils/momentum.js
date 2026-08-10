@@ -243,7 +243,19 @@ export function estimateConcurrentViewers(info, now, dwellMinutes) {
     // 過大にならない方へ倒したいところだが、beginAt が無いのは異常系で数も少ない。
     const elapsedMin = Number.isFinite(beginAt) ? Math.max(0, (now - beginAt) / 60000) : W
     const v = rate * Math.min(W, elapsedMin)
-    return Number.isFinite(v) && v > 0 ? v : 0
+
+    // 🔴 **累計来場者を超えないこと**（2026-08-10・利用者報告で発覚）。
+    //    「今見ている人数」が「これまでに入ってきた人数」を超えるのはあり得ない。
+    //    上限を入れていなかったため、**累計200人の番組で800人**と出ていた。
+    //
+    //    なぜ超えるのか: 到着レートは**直近数分**の値。そこへ滞在時間（最大45分）を掛けるので、
+    //    一時的に人が集まった瞬間を捕まえると、その勢いが何十分も続いた前提の数になる。
+    //    長い放送ほど「直近の勢い」と「これまでの実績」が乖離しやすい。
+    //
+    // ⚠️ これは恣意的な係数ではなく**動かせない事実**なので、設定では変えられないようにする。
+    const cap = Number(info.viewers) || 0
+    const capped = cap > 0 ? Math.min(v, cap) : v
+    return Number.isFinite(capped) && capped > 0 ? capped : 0
 }
 
 /**

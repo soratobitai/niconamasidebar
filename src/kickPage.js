@@ -37,6 +37,7 @@ import { AppState } from './core/AppState.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { observeKickProgramEnd } from './services/kickStatus.js'
 import { consumeAutoNextHopMark } from './services/status.js'
+import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement } from './ui/placement.js'
 import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs } from './config/constants.js'
@@ -103,6 +104,10 @@ let autoNextManager = null
 let arrivedByAutoNext = false
 // サムネ更新の tick 回数。Kick を混ぜる周期を数えるのに使う。
 let thumbTickCount = 0
+// おすすめ順: 直近で数えたチャンネル。Kick は SPA なのでページ読み込みが起きず、
+// 起動時の1回だけでは**別のチャンネルへ移っても数えられない**。突き合わせで拾う。
+// ⚠️ 二重に数えない仕組みは watchHistory 側（タブ単位）。ここは呼びすぎを避けるだけ。
+let lastCountedOwnerKey = ''
 
 // 寄せが打ち消されていないか確かめる間隔。短くしても目に見えて良くならず、
 // 長いと打ち消された状態が見えてしまう。
@@ -299,6 +304,19 @@ function watchPointerForNudge() {
     window.addEventListener('blur', release)
 }
 
+/**
+ * 取得せずに順位だけ計算し直して並べ替える。
+ * 「人気順の基準」を動かした時と、**別のタブで視聴回数が増えた時**に使う。
+ * ⚠️ Kick は保存領域に入れていないので、直近の取得結果を足す。
+ */
+function rerankInPlace() {
+    const c = document.getElementById('liveProgramContainer')
+    if (!c) return
+    const stored = getProgramInfos() || []
+    reapplyRankAttributes(c, lastKickPrograms.length ? stored.concat(lastKickPrograms) : stored)
+    sortPrograms(c, options.programsSort)
+}
+
 function startReconciler() {
     stopReconciler()
     watchPointerForNudge()
@@ -309,6 +327,17 @@ function startReconciler() {
         // pointer capture の取りこぼし（掴んだままハンドルごと差し替えられた等）で
         // ここに落ちる。付いたままだと開閉のアニメが死んだままになる。
         if (!isDraggingLine) document.documentElement.classList.remove('nns-kick-dragging')
+
+        // おすすめ順: SPA でチャンネルを移った時にも数える（ページ読み込みが起きないため）。
+        // ⚠️ 自動移動で飛んできた直後は数えない。その判定は起動時に済んでいる。
+        // 🔴 ここで `arrivedByAutoNext` を見ないこと。あれは**このページに来た時**の話で、
+        //    ずっと true のまま残る。見てしまうと、飛んできた後に**自分で選んだ**チャンネルまで
+        //    数えられなくなる。最初のチャンネルは起動時に処理済み（下で印を置いてある）。
+        const ownerKey = currentOwnerKeyOnKickPage()
+        if (ownerKey && ownerKey !== lastCountedOwnerKey) {
+            lastCountedOwnerKey = ownerKey
+            recordWatch(ownerKey)
+        }
 
 
         // SPA 対策も兼ねる。Kick は Next.js App Router なので、遷移で body 配下が
@@ -505,11 +534,7 @@ function wireControls(root) {
         // Kick は保存領域に入れていないので、直近の取得結果を足す。
         (minutes) => {
             setDwellMinutes(minutes)
-            const c = document.getElementById('liveProgramContainer')
-            if (!c) return
-            const stored = getProgramInfos() || []
-            reapplyRankAttributes(c, lastKickPrograms.length ? stored.concat(lastKickPrograms) : stored)
-            sortPrograms(c, options.programsSort)
+            rerankInPlace()
         },
     )
     setupServiceTabHandlers((count) => {
@@ -913,6 +938,11 @@ async function init() {
     //    書き換えに反応して書き戻す形にすると、相手の書き換えと噛み合った時に
     //    マイクロタスクの中で延々と往復し、**ブラウザごと固まる**（2026-08-04 に実際に発生）。
     //    差し込み直しも寄せの復帰も、この定期の突き合わせ1本に集約する。
+    // 🔴 **突き合わせを始める前に、今のチャンネルへ印を置くこと（同期で）。**
+    //    あちらは「印と違うチャンネルなら数える」なので、印が空のまま回ると
+    //    **自動移動で飛んできた先を数えてしまう**。await を挟むと間に合わない。
+    lastCountedOwnerKey = currentOwnerKeyOnKickPage()
+
     startReconciler()
     startTimer()
 
@@ -921,6 +951,18 @@ async function init() {
     // 「飛んできた先か」が未確定のまま最初の判定が走る。
     arrivedByAutoNext = await consumeAutoNextHopMark(watchTargetIdOf(location.href))
     startKickAutoNext()
+
+    // おすすめ順の材料。**自分で開いた時だけ数える**（自動移動で飛んできた分は除く）。
+    // ⚠️ **上の2行の間に挟まないこと。** 「印を読み切ってから監視を始める」という順序が肝で、
+    //    間に await を入れると最初の終了判定がそのぶん遅れる（検査BUが鳴って気付いた）。
+    //    印の値は `arrivedByAutoNext` に取ってあるので、こちらは後で構わない。
+    // ⚠️ 今のチャンネルの印（lastCountedOwnerKey）は startReconciler より前に同期で置いてある。
+    await loadWatchHistory()
+    // 別のタブで視聴した分をこのタブへも反映する（反映後に並べ直す）。
+    startWatchHistorySync(() => rerankInPlace())
+    if (!arrivedByAutoNext && !isPageReload()) await recordWatch(lastCountedOwnerKey)
+    // 見続けている間の加点（上限あり・裏タブでは加点しない）。
+    startDwellPoints(lastCountedOwnerKey)
 
     try {
         chrome.runtime.onMessage.addListener((msg) => {

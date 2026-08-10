@@ -314,6 +314,21 @@ body.nicosidebar-light,
     background: #53fc18; /* Kick のブランドカラー */
 }
 
+/* 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
+   おすすめ順の材料（視聴回数）が正しく数えられているかを実機で見るためのもの。 */
+.program_container .provider .watch_count_badge {
+    margin-left: auto;
+    padding: 0 4px;
+    font-size: calc(9px * var(--nns-card-scale));
+    line-height: 1.6;
+    color: var(--sb-fg);
+    border: 1px solid var(--sb-line);
+    border-radius: 3px;
+    opacity: 0.7;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
 /* 🔴 **「統合」タブではバッジを出すこと。** 片方だけのタブは**タブ自体がラベル**なので
    バッジは要らないが、統合は両方が混ざるので**どちらのカードか分からなくなる**。
    ここを `[data-service-tab]` の一括指定にすると統合でも消える（2026-08-07 に足した時の注意点）。 */
@@ -415,6 +430,27 @@ body.nicosidebar-light,
     inset: 0;
     pointer-events: none;
     opacity: 0;
+}
+
+/* 同時視聴者数（ニコ生は推定・Kick は実測）。サムネの左上に重ねる。
+   🔴 **pointer-events:none は必須。** 実サムネは <a> の中なので、覆うとリンクが押せなくなる
+      （クロスフェード層と同じ理由）。
+   ⚠️ z-index は 2。動くサムネのオーバーレイ（1）より上に置かないと、ホバー中に隠れる。
+      他拡張がサムネに出すホバーボタンも 2 なので同列。小さな角の表示なので、
+      重なっても実害が小さいほうへ倒している。 */
+.program_container .program_thumbnail .viewer_overlay {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    pointer-events: none;
+    padding: 0 5px;
+    font-size: calc(10px * var(--nns-card-scale));
+    line-height: 1.6;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.62);
+    border-radius: 3px;
+    white-space: nowrap;
 }
 
 /* 動くサムネ（ホバー中のオーバーレイ・2レイヤーでクロスフェード） */

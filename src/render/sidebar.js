@@ -1,5 +1,6 @@
 import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes, autoUpdateOffValue, fallbackUpdateIntervalSec } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
+import { getWatchPoints, ownerKeyOf } from '../services/watchHistory.js'
 import { totalEngagement, commentWeight, commentRatio, estimateConcurrentViewers } from '../utils/momentum.js'
 
 /**
@@ -405,6 +406,15 @@ export function makeProgramElement(data, loadingImageURL) {
         providerDiv.appendChild(badge)
     }
 
+    // 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
+    //    中身は applyRankAttributes が書く（順位属性と同じ値を使う＝表示と並びがずれない）。
+    //    ⚠️ 生成時は `applyRankAttributes` がこれより**前**に走っているので、ここで一度埋める。
+    //       埋めないと、次のリスト更新（最大120秒後）まで空欄のままになる。
+    const watchBadge = document.createElement('span')
+    watchBadge.className = 'watch_count_badge'
+    watchBadge.textContent = getWatchPoints(ownerKeyOf(data)) + 'pt'
+    providerDiv.appendChild(watchBadge)
+
     container.appendChild(providerDiv)
 
     // サムネイルセクション
@@ -429,6 +439,15 @@ export function makeProgramElement(data, loadingImageURL) {
     thumbnailImg.addEventListener('error', handleThumbnailError)
     thumbnailLink.appendChild(thumbnailImg)
     thumbnailDiv.appendChild(thumbnailLink)
+
+    // 同時視聴者数（ニコ生は推定・Kick は実測）をサムネの左上に重ねる。
+    // ⚠️ 中身は applyRankAttributes が書く（順位に使うのと同じ値＝表示と並びがずれない）。
+    //    生成時はそれより後なので、ここで一度埋める。
+    const viewerOverlay = document.createElement('span')
+    viewerOverlay.className = 'viewer_overlay'
+    viewerOverlay.textContent = formatViewers(calculateActivePoint(data))
+    thumbnailDiv.appendChild(viewerOverlay)
+
     container.appendChild(thumbnailDiv)
 
     // タイトルセクション
@@ -754,11 +773,28 @@ export function reapplyRankAttributes(container, infos) {
  * @param {HTMLElement} el カードのコンテナ
  * @param {Object} data 番組データ
  */
+/**
+ * 同時視聴者数の表示。
+ *
+ * ニコ生は**推定値**（リトルの法則。到着レート × 滞在時間）、Kick は**実測値**。
+ * どちらも `calculateActivePoint` が返すので、ここは見せ方だけを決める。
+ *
+ * ⚠️ 小数を出さない。推定値に小数点以下の意味は無く、桁が揺れて読みにくいだけ。
+ */
+function formatViewers(v) {
+    const n = Math.round(Number(v) || 0)
+    return n > 0 ? n.toLocaleString('ja-JP') : '—'
+}
+
 export function applyRankAttributes(el, data) {
     if (!el) return
     // どのサービスの番組か。タブ分離モードの表示切り替え（CSS）とラベル表示が読む。
     el.setAttribute('data-service', (data && data.service) || 'nicolive')
-    el.setAttribute('active-point', String(calculateActivePoint(data)))
+    const concurrent = calculateActivePoint(data)
+    el.setAttribute('active-point', String(concurrent))
+    // サムネ左上の同時視聴者数。**順位に使うのと同じ値**なので、表示と並びがずれない。
+    const viewers = el.querySelector ? el.querySelector('.viewer_overlay') : null
+    if (viewers) viewers.textContent = formatViewers(concurrent)
     // 人気順の第2キー（同点時）。放送開始が新しい方を上にする。
     // 🔴 **`data-total` から差し替えた**（2026-08-04）。累計エンゲージメントはコメントを含むが、
     //    Kick はコメント数を返さないので常に 0 になり、ニコ生と混ぜた時に Kick が必ず下へ沈む。
@@ -767,6 +803,14 @@ export function applyRankAttributes(el, data) {
     el.setAttribute('data-begin-at', Number.isFinite(beginMs) ? String(beginMs) : '0')
     // ⚠️ 以下3つは**順位計算に使っていない**。弾幕補正の効き方を実機で見るための覗き窓。
     //    順位が推定同接へ移行した今、消してよい候補（doc/09 項目BE の後日談）。
+    // おすすめ順の材料。**書き手はここだけ**（他の順位属性と同じ扱い）。
+    // 履歴が未読み込みなら 0。全員 0 なら第2キー（人気順）で並ぶので、順位が壊れることはない。
+    const watchPoints = getWatchPoints(ownerKeyOf(data))
+    el.setAttribute('data-watch-count', String(watchPoints))
+    // 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
+    //    消すのは3箇所: この2行 / makeProgramElement のバッジ生成 / main.css の .watch_count_badge。
+    const badge = el.querySelector ? el.querySelector('.watch_count_badge') : null
+    if (badge) badge.textContent = watchPoints + 'pt'
     el.setAttribute('data-total', String(Math.round(totalEngagement(data) * 10) / 10))
     el.setAttribute('data-comment-weight', commentWeight(data).toFixed(3))
     el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))
@@ -1416,10 +1460,17 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                             </div>
                             <form id="optionForm">
                                 <div class="opt-section">
-                                    <div class="opt-label">表示順序</div>
+                                    <div class="opt-label opt-title-with-help">
+                                        表示順序
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>おすすめ</b>: よく見る配信者ほど上に来ます。<br><br>おすすめは、あなたが番組を開いた回数を配信者ごとに数えたものです。回数が同じ番組どうしは人気順で並びます。<br>この記録は端末の中だけに保存され、どこにも送信しません。</span></span>
+                                    </div>
+                                    <!-- ⚠️ **値を変えないこと。** 保存済みの設定に対応するラジオが無くなると、
+                                         その利用者は設定を一切保存できなくなる（doc/09 項目BQ と同じ罠）。
+                                         'recommend' は 2026-08-10 追加。既定は 'newest' のまま。 -->
                                     <div class="opt-segment">
                                         <input type="radio" id="programsSort1" name="programsSort" value="newest"><label for="programsSort1">新着順</label>
                                         <input type="radio" id="programsSort2" name="programsSort" value="active"><label for="programsSort2">人気順</label>
+                                        <input type="radio" id="programsSort3" name="programsSort" value="recommend"><label for="programsSort3">おすすめ</label>
                                     </div>
                                 </div>
                                 <!-- ⚠️ この HTML はテンプレートリテラルの中。バックティックを書かないこと（文字列がそこで終わる）。

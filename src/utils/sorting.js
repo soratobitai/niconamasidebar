@@ -1,26 +1,21 @@
-import { sortProgramsByActivePoint } from '../render/sidebar.js';
-import { compareByApiIndex } from './programOrder.js';
+import { orderComparator } from './programOrder.js';
 
 /**
- * 番組リストをソート
+ * 番組リストを並べ替える。
+ *
+ * 🔴 **比較器は `utils/programOrder.js` の `orderComparator` ただ1つ。**
+ *    2026-08-10 まではここで独自に if 分岐しており、`orderComparator` を使う
+ *    `UpdateManager._sortOrderChanged` と**同じ規則が2箇所**にあった。食い違うと
+ *    「並べ替えが必要」と毎周期判定され、replaceChildren と FLIP が走り続ける。
+ *    おすすめ順を足す時にここを1本化した。
+ *
  * @param {HTMLElement} container - 番組コンテナ
- * @param {string} sortType - ソートタイプ ('active' or 'newest')
+ * @param {string} sortType - 'newest' | 'active' | 'recommend'
  */
 export function sortPrograms(container, sortType) {
     if (!container || container.children.length === 0) return;
-    
-    if (sortType === 'active') {
-        // 人気順：active-point属性でソート
-        sortProgramsByActivePoint(container);
-    } else {
-        // 新着順：data-api-index 昇順を保つ。この属性は updateSidebar が「beginAt 降順」で
-        // 並べた位置を書き込んだもの（＝放送開始が新しい順）。
-        // ※lv番号(ID)は予約/作成順で放送開始順とズレる（予約枠など）ため、番号では並べない。
-        // 比較器は utils/programOrder.js が唯一の定義。ここに書き直さないこと
-        // （_sortOrderChanged と食い違うと、毎周期 replaceChildren＋FLIP が走る）。
-        const programs = Array.from(container.children);
-        programs.sort(compareByApiIndex);
-        programs.forEach((program) => container.appendChild(program));
-    }
-}
 
+    const programs = Array.from(container.children);
+    programs.sort(orderComparator(sortType));
+    programs.forEach((program) => container.appendChild(program));
+}

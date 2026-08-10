@@ -3,7 +3,9 @@ import './styles/main.css'
 import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
+import { consumeAutoNextHopMark } from './services/status.js'
+import { loadWatchHistory, recordWatch, currentOwnerKeyOnNicoPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { applySidebarPlacement } from './ui/placement.js'
 import { adjustWatchPageChild, setProgramContainerWidth, setCardSize } from './ui/layout.js'
@@ -108,6 +110,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 const setup = async () => {
+    // おすすめ順の材料。**最初の描画より前に読むこと**（applyRankAttributes が同期で参照する）。
+    await loadWatchHistory()
+    // 別のタブで視聴した分をこのタブへも反映する（反映後に並べ直す）。
+    startWatchHistorySync(() => rerankInPlace())
+    // 🔴 **自動移動で飛んできた分は数えない。** 自分で選んでいないため。
+    //    印は chrome.storage 側（kick.com とのやり取り用）。status.js が使う sessionStorage の
+    //    印とは別物なので、ここで消費しても終了判定には影響しない。
+    // ⚠️ リロードでは数えない（同じ視聴を2回にしない）。**遷移とは区別できる。**
+    if (!isPageReload() && !(await consumeAutoNextHopMark(watchTargetIdOf(location.href)))) {
+        await recordWatch(currentOwnerKeyOnNicoPage())
+    }
+    // 見続けている間の加点（上限あり・裏タブでは加点しない）。
+    startDwellPoints(currentOwnerKeyOnNicoPage())
     // テーマ（ダーク/ライト）を先に適用してからサイドバー挿入（初回のちらつき回避）
     applyTheme(options.sidebarTheme);
 

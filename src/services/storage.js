@@ -1,6 +1,9 @@
-import { maxSaveProgramInfos } from '../config/constants.js'
+import { maxSaveProgramInfos, dwellMinutesScale, dwellMinutesScaleLegacy } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
+
+/** 目盛り校正の移行が済んだ印。**消さないこと**（消すと毎回移行が走る）。 */
+const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV2'
 
 /**
  * Get options from chrome.storage.local and merge with defaults.
@@ -21,6 +24,18 @@ function migrateOptions(options) {
     // 自動更新の「180秒」を廃止し「OFF」に置き換えた（2026-08-07・doc/09 項目BQ）。
     // ⚠️ **OFF ではなく 120秒へ寄せる。** 黙って取得が止まるほうが利用者にとって驚きが大きい。
     if (String(options.updateProgramsInterval) === '180') options.updateProgramsInterval = '120'
+
+    // 「人気順の基準」の目盛りを校正し直した（2026-08-10・doc/09 項目CN）。
+    //
+    // 🔴 **最寄りの値で引き当てないこと。** 旧目盛りの真ん中(10分)は新目盛りでは左端なので、
+    //    そのままだと「真ん中に居た人が端へ飛ぶ」。**添字を保って**移す。
+    // ⚠️ **1回だけ動かすこと。** 印を残さないと、新目盛りの 10分（左端）を選んだ人が
+    //    次の起動で旧目盛りの 10分（添字3）と読まれ、40分へ飛ばされ続ける。
+    if (!options[DWELL_SCALE_MIGRATED_KEY]) {
+        const i = dwellMinutesScaleLegacy.indexOf(Number(options.dwellMinutes))
+        if (i >= 0 && dwellMinutesScale[i] != null) options.dwellMinutes = dwellMinutesScale[i]
+        options[DWELL_SCALE_MIGRATED_KEY] = true
+    }
     return options
 }
 

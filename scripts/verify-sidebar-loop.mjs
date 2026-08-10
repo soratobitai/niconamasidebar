@@ -554,6 +554,186 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
  * ニコ生の来場者は入ってすぐ閉じた人も数えるため、新着は実際の数倍で出る。
  * 以前はその仮置きを普通に均していたので、**根拠の弱い値が20分居座っていた。**
  */
+/**
+ * CM. 表示順序「おすすめ」。見た回数の多い配信者を上に出す。
+ *
+ * 🔴 **いちばん危ないのはキーの食い違い。** 記録する側（視聴ページの埋め込みデータ／URL）と
+ *    カード側（programInfo）で**別々にキーを作っている**。文字列がずれても例外は出ず、
+ *    ただ全部 0 のまま並ぶ。実機では「おすすめにしても何も変わらない」としか見えない。
+ */
+async function recommendOrder() {
+    console.log('=== CM 表示順序「おすすめ」（よく見る配信者を上に・点数制） ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const kpc = stripComments(rd('kickPage.js'))
+    const mn = stripComments(rd('main.js'))
+    const wh = stripComments(rd('services/watchHistory.js'))
+
+    const { orderComparator, compareByWatchCount } = await import('../src/utils/programOrder.js')
+
+    // --- ① 比較器: 回数の多い順、同点は人気順 ---
+    const card = (watch, point, beginAt = 0) => ({
+        dataset: { watchCount: String(watch) },
+        getAttribute: (k) => (k === 'active-point' ? String(point) : String(beginAt)),
+    })
+    check('CM ① 回数が多いほど上',
+        compareByWatchCount(card(5, 1), card(2, 999)) < 0, '回数が第1キー')
+    check('CM ② 同じ回数なら人気順（推定同接の多い順）',
+        compareByWatchCount(card(3, 10), card(3, 99)) > 0)
+    // 🔴 全員 0 でも並びが決まること。決まらないと毎周期入れ替わってちらつく。
+    check('CM ③ 履歴が空（全員0）でも人気順で決まる',
+        compareByWatchCount(card(0, 10), card(0, 99)) > 0
+        && compareByWatchCount(card(0, 99), card(0, 10)) < 0)
+    check('CM 表示順序の解釈は orderComparator ただ1つ',
+        orderComparator('recommend') === compareByWatchCount)
+
+    // --- 🔴 ④ キーの作り方が両側で一致すること ---
+    const { ownerKeyOf, currentOwnerKeyOnKickPage } = await import('../src/services/watchHistory.js')
+    check('CM ④ ニコ生: カード側のキー',
+        ownerKeyOf({ contentOwner: { id: '10856175' } }) === 'nico:10856175')
+    check('CM ④ Kick: カード側のキー',
+        ownerKeyOf({ service: 'kick', contentOwner: { id: 'someone' } }) === 'kick:someone')
+    // 記録側（URL）とカード側が同じ文字列になること
+    check('CM 🔴 ④ Kick: 記録側とカード側のキーが一致する',
+        currentOwnerKeyOnKickPage('https://kick.com/someone')
+        === ownerKeyOf({ service: 'kick', contentOwner: { id: 'someone' } }),
+        'ずれても例外は出ず、全部 0 のまま並ぶだけ')
+    check('CM ④ Kick: 大文字のURLでも同じキーになる',
+        currentOwnerKeyOnKickPage('https://kick.com/SomeOne') === 'kick:someone')
+    for (const url of ['https://kick.com/', 'https://kick.com/browse', 'https://kick.com/categories/x',
+        'https://kick.com/someone/videos', 'https://example.com/someone']) {
+        check(`CM ④ チャンネルページ以外は数えない: ${url}`,
+            currentOwnerKeyOnKickPage(url) === '')
+    }
+    // ニコ生側は埋め込みデータの `/user/<数字>` を読む（2026-08-10 実測の形）
+    check('CM ④ ニコ生: 記録側は埋め込みデータの user ID を読む',
+        /\/\\\/user\\\/\(\\d\+\)\//.test(wh) || /\\\/user\\\/\(\\d\+\)/.test(wh),
+        'program.supplier.pageUrl から取る（詳細APIを叩かない）')
+    check('CM ④ ニコ生: 詳細APIを叩いていない',
+        !/fetchProgramInfo/.test(wh), 'ページに最初から入っているので取得は不要')
+
+    // --- ⑤⑥⑦ 記録の作法 ---
+    // 🔴 **条件式の「形」を写さないこと。** 条件を1つ足しただけで、実装は正しいのに落ちる
+    //    （2026-08-10 にリロード判定を足して実際に落ちた。この型は今日だけで5回目）。
+    //    見たいのは「記録の呼び出しが自動移動の判定に守られているか」だけ。
+    // ⚠️ **狙うのは「起動時の記録」だけ。** kick.com には SPA 用の突き合わせからの呼び出しも
+    //    あり、あちらは**わざと**自動移動を見ない。素朴に最初の `recordWatch(` を拾うと
+    //    そちらに当たって誤検知する（この検査を書いた時に実際に踏んだ）。
+    //    起動時のものだけが `await` つき。
+    const guardOf = (src) => {
+        const lines = src.split('\n')
+        const hits = lines.map((l, i) => [l, i]).filter(([l]) => /await recordWatch\(/.test(l))
+        if (hits.length !== 1) return `（await つきの呼び出しが ${hits.length} 件）`
+        const i = hits[0][1]
+        return lines.slice(Math.max(0, i - 1), i + 1).join(' ')  // 呼び出し行とその1つ前
+    }
+    check('CM 🔴 ⑤ 自動移動で飛んできた分は数えない（ニコ生）',
+        /consumeAutoNextHopMark/.test(guardOf(mn)), guardOf(mn).trim().slice(0, 100))
+    check('CM 🔴 ⑤ 自動移動で飛んできた分は数えない（kick.com）',
+        /arrivedByAutoNext/.test(guardOf(kpc)), guardOf(kpc).trim().slice(0, 100))
+    // 🔴 突き合わせ側で arrivedByAutoNext を見ないこと。あれはずっと true のまま残るので、
+    //    飛んできた後に**自分で選んだ**チャンネルまで数えられなくなる。
+    check('CM 🔴 ⑤ SPA の突き合わせでは arrivedByAutoNext を見ない',
+        !/ownerKey !== lastCountedOwnerKey[\s\S]{0,200}?arrivedByAutoNext/.test(kpc),
+        'あれは「来た時」の話。ずっと true なので、後で自分で選んだ分まで数えなくなる')
+    check('CM ⑤ 最初のチャンネルの印は突き合わせを始める前に置く',
+        /lastCountedOwnerKey = currentOwnerKeyOnKickPage\(\)[\s\S]{0,200}?startReconciler\(\)/.test(kpc),
+        '印が空のまま回ると、飛んできた先を数えてしまう')
+    // 🔴 **リロードだけを弾くこと。** 「そのタブで既に見た相手」を弾く形にすると、
+    //    同じ配信者を続けて開いた時まで弾かれ、**何回開いても増えない**（実機で発覚）。
+    check('CM ⑥ リロードでは数えない', /isPageReload/.test(wh))
+    check('CM 🔴 ⑥ 「既に見た相手」では弾かない（続けて開いても数える）',
+        !/countedInThisTab|sessionStorage/.test(wh),
+        'タブ単位で弾くと、同じ配信者を続けて開いた時に回数が伸びない')
+    for (const [page, src] of [['ニコ生ページ', mn], ['kick.com', kpc]]) {
+        check(`CM ⑥ ${page} がリロード判定を通している`, /isPageReload\(\)/.test(src))
+    }
+    // ⚠️ 並べ替えの**書き方**（Map か素のオブジェクトか）を写さないこと。2026-08-10 に
+    //    保存の作りを変えた時、実装は正しいのにここだけ落ちた。見たいのは2つだけ:
+    //    「上限があること」と「落とす順が最後に見た時刻であること」。
+    check('CM ⑦ 上限を超えたら最後に見たのが古い順に落とす',
+        /watchHistoryMaxOwners/.test(wh) && /lastAt \|\| 0\) - \(/.test(wh))
+
+    // 🔴 保存先。localStorage だとニコ生と kick.com で履歴が別々になる。
+    check('CM 🔴 保存は chrome.storage.local（localStorage を使わない）',
+        /chrome\.storage\.local/.test(wh) && !/localStorage/.test(wh),
+        'localStorage はオリジンごと＝両ページで履歴が分かれる')
+
+    // --- ⑧ 並び替えの規則が1本であること ---
+    const srt = stripComments(rd('utils/sorting.js'))
+    check('CM 🔴 ⑧ sortPrograms は orderComparator を使う（独自に分岐しない）',
+        /orderComparator\(sortType\)/.test(srt) && !/sortType === 'active'/.test(srt),
+        '_sortOrderChanged と食い違うと毎周期 replaceChildren と FLIP が走る')
+
+    // --- 設定 ---
+    check('CM 設定に「おすすめ」がある', /name="programsSort" value="recommend"/.test(sb))
+    check('CM 既存の値を変えていない（保存済みの設定が無効にならない）',
+        /name="programsSort" value="newest"/.test(sb) && /name="programsSort" value="active"/.test(sb))
+    check('CM カードが回数を持つ（書き手は applyRankAttributes だけ）',
+        /setAttribute\('data-watch-count'/.test(sb)
+        && (sb.match(/data-watch-count/g) || []).length === 1)
+    const oh = stripComments(rd('handlers/optionsHandler.js'))
+    // --- 点数制（2026-08-10・利用者要望「長く見た番組に加点」）---
+    const { watchPointIntervalMs, watchPointMaxPerVisit } = await import('../src/config/constants.js')
+
+    // 🔴 旧版のデータ（回数）を点数として引き継ぐこと。移行が無いと貯めた記録がゼロに戻る。
+    check('CM 🔴 旧版の count を points として読み込む（移行）',
+        wh.includes('v.points != null ? v.points : v.count'),
+        '移行が無いと、貯まっていた記録が消える')
+    check('CM 加点は上限つき（付けっぱなしのタブが稼ぎ続けない）',
+        /watchPointMaxPerVisit/.test(wh) && watchPointMaxPerVisit > 0 && watchPointMaxPerVisit <= 20,
+        '上限=' + watchPointMaxPerVisit)
+    check('CM 加点の間隔が現実的（分単位）',
+        watchPointIntervalMs >= 60000, watchPointIntervalMs + 'ms')
+    // 裏タブでも加点する（利用者判断・2026-08-10。音声だけ聞く使い方があるため）。
+    check('CM 裏タブでも加点する（可視判定で止めない）',
+        !/visibilityState/.test(wh), '止めると音声だけ聞いている時間が入らない')
+    check('CM 両ページが加点タイマーを始める',
+        /startDwellPoints\(/.test(mn) && /startDwellPoints\(/.test(kpc))
+
+    // 点数の積み上げを実物で確かめる（開いた分＋見続けた分）。
+    // 🔴 **保存が残るスタブを用意すること。** 全体のスタブは `get`/`set` が何もしない空実装で、
+    //    そのままだと毎回 0 から数え直して「1点しか入らない」と出る＝実装ではなく土台のせい。
+    const { recordWatch, getWatchPoints } = await import('../src/services/watchHistory.js')
+    const realChromeForPoints = globalThis.chrome
+    const box = {}
+    globalThis.chrome = {
+        ...realChromeForPoints,
+        storage: {
+            local: {
+                get: async (k) => (k in box ? { [k]: box[k] } : {}),
+                set: async (o) => { Object.assign(box, o) },
+                remove: async (k) => { delete box[k] },
+            },
+            onChanged: { addListener: () => {} },
+        },
+    }
+    try {
+        const K = 'nico:pointtest'
+        await recordWatch(K, 1)          // 開いた
+        await recordWatch(K, 1)          // 5分たった
+        await recordWatch(K, 1)          // さらに5分
+        check('CM 点数が積み上がる（開いた1点＋見続けた2点）', getWatchPoints(K) === 3,
+            String(getWatchPoints(K)))
+        await recordWatch(K, 0)
+        check('CM 0点や負の加点は受け付けない', getWatchPoints(K) === 3, String(getWatchPoints(K)))
+
+        // 🔴 **他のタブの加点を消さないこと**（利用者報告「点数が減る」）。
+        //    保存を読み直さずにメモリの表を丸ごと書くと、別タブの加点が消える。
+        box.watchCounts = { ...(box.watchCounts || {}), 'nico:other': { points: 9, lastAt: 1 } }
+        await recordWatch(K, 1)
+        const other = (box.watchCounts || {})['nico:other']
+        check('CM 🔴 別のタブが足した点を消さない（点数が減らない）',
+            !!other && other.points === 9, JSON.stringify(other))
+    } finally {
+        globalThis.chrome = realChromeForPoints
+    }
+
+    check('CM おすすめの時も「人気順の基準」を出す（同点の並びに効くため）',
+        /programsSort === 'recommend'/.test(oh))
+}
+
 async function seededRateReplacement() {
     console.log('=== CL 新着の推定同接が、実測が取れ次第すぐ正しい値へ寄ること ===')
     const { nextViewerRate, initialViewerRate, estimateConcurrentViewers } =
@@ -594,18 +774,43 @@ async function seededRateReplacement() {
         fourth.rate > 12 && fourth.rate < 60, `rate=${fourth.rate}`)
 
     // --- 🔴 ⑤ 若い番組を抑えるクランプは残す（外すと倍になる） ---
-    const young = { ...prog(300), viewerRate: 60 }
+    // ⚠️ **累計来場者を大きくしておくこと。** ここで見たいのは「係数が経過分か W か」だけ。
+    //    累計が小さいと上限（項目⑦）に当たって、係数の違いが見えなくなる（実際に踏んだ）。
+    const young = { ...prog(100000), viewerRate: 60 }
     const W = defaultDwellMinutes
     check('CL 🔴 ⑤ 経過が W 未満なら係数は「経過分」（W ではない）',
         Math.abs(estimateConcurrentViewers(young, at(5), W) - 60 * 5) < 1e-6,
         `${estimateConcurrentViewers(young, at(5), W)}（W を掛けると ${60 * W} になり倍に跳ねる）`)
+    // ⚠️ 経過は W から導くこと。固定の分数を書くと、既定値を変えた時に落ちる（実際に踏んだ）。
     check('CL ⑤ 経過が W を超えたら係数は W',
-        Math.abs(estimateConcurrentViewers(young, at(30), W) - 60 * W) < 1e-6)
+        Math.abs(estimateConcurrentViewers(young, at(W * 2), W) - 60 * W) < 1e-6)
+
+    // --- 🔴 ⑦ 累計来場者を超えないこと（利用者報告・2026-08-10） ---
+    // 到着レートは直近数分の値。そこへ滞在時間（最大45分）を掛けるので、一時的に人が
+    // 集まった瞬間を捕まえると **累計200人の番組で800人** のような数が出ていた。
+    // 「今見ている人数」が「これまでに入ってきた人数」を超えるのはあり得ない。
+    const burst = { ...prog(200), viewerRate: 18 } // 直近18人/分 × 45分 = 810 になる形
+    for (const w of [10, 45]) {
+        const got = estimateConcurrentViewers(burst, at(180), w)
+        check(`CL 🔴 ⑦ 累計来場者を超えない（滞在時間 ${w}分）`,
+            got <= 200 + 1e-9, `推定=${got.toFixed(0)} / 累計=200`)
+    }
+    check('CL ⑦ 上限に当たらない番組は素通し',
+        Math.abs(estimateConcurrentViewers({ ...prog(100000), viewerRate: 12 }, at(180), 10) - 120) < 1e-6)
+    // ⚠️ Kick は実測値。上限（累計来場者）を持たないので、この処理より前に返ること。
+    check('CL ⑦ Kick は累計0でも実測値がそのまま出る',
+        estimateConcurrentViewers({ service: 'kick', viewers: 0, concurrentViewers: 900 }, at(180), 10) === 900,
+        'Kick に来場者の概念は無い。上限を当てると 0 になる')
 
     // --- 🔴 ⑥ 通しで、数周期のうちに真値へ寄ること（回帰の砦） ---
-    // 立ち上がりで300人 → 以後 12人/分。本当の同接は 12 × W = 120。
-    const TRUE = 12 * W
-    const arrivals = (m) => (m <= 5 ? 60 * m : 300 + 12 * (m - 5))
+    // 🔴 **ここで見たいのは「仮置きをどれだけ早く手放すか」だけ。** 既定の滞在時間には依存させない
+    //    （2026-08-10 に既定を 10分→40分 へ校正した時、実装は正しいのにここが落ちた）。
+    //    係数 min(W, 経過) が伸びきるまでの時間が混ざると、測っているものが変わってしまう。
+    const Wt = 10
+    // 立ち上がりで300人 → 以後 12人/分。本当の同接は 12 × Wt = 120。
+    const TRUE = 12 * Wt
+    // ⚠️ 累計来場者は上限（項目⑦）に当たらない大きさにしておく。当たると収束を測れない。
+    const arrivals = (m) => (m <= 5 ? 60 * m : 300 + 12 * (m - 5)) + 100000
     let prev = null
     let settledAt = null
     for (let m = 5; m <= 25; m += 2) {
@@ -613,7 +818,7 @@ async function seededRateReplacement() {
         const r = nextViewerRate(prev, info, at(m))
         info.viewerRate = r.rate
         info.viewerRateSeeded = r.seeded
-        const est = estimateConcurrentViewers(info, at(m), W)
+        const est = estimateConcurrentViewers(info, at(m), Wt)
         if (settledAt === null && m > 5 && Math.abs(est - TRUE) <= TRUE * 0.05) settledAt = m
         prev = { ...info, _fetchedAt: at(m) }
     }
@@ -1285,7 +1490,7 @@ async function commentWeightShape() {
     console.log('=== BE 弾幕補正（コメントの重み）の形 ===')
     const { commentWeight, commentRatio, totalEngagement, nextMomentum, initialMomentum } =
         await import(new URL('../src/utils/momentum.js', import.meta.url).href)
-    const { commentWeightHalfRatio, commentWeightViewerFloor } =
+    const { commentWeightHalfRatio, commentWeightViewerFloor, momentumTauMs } =
         await import(new URL('../src/config/constants.js', import.meta.url).href)
     const NOW = Date.now()
     const p = (v, c) => ({ viewers: v, comments: c })
@@ -1366,7 +1571,10 @@ async function commentWeightShape() {
     // コメントが増えず両方が減らない周期では、旧 `max(0, Δ合計)` と新 `max(0,Δ来場)+w·max(0,Δコメ)`
     // は一致する。**一致しないのは「片方だけ減った周期」だけ**で、そこは新のほうが正しい。
     const legacyEquiv = nextMomentum(prevRec(100, 0), p(160, 0), NOW)
-    const a60 = 1 - Math.exp(-dt / 180000)
+    // ⚠️ **時定数を直書きしないこと。** 2026-08-10 に 3分→8分 へ変えた時、実装は正しいのに
+    //    ここだけが落ちた。この検査が見たいのは「Δ来場だけに α が掛かる」という**式の形**で、
+    //    α の値そのものではない（効いているのは 60 の係数）。だから実装と同じ定数でよい。
+    const a60 = 1 - Math.exp(-dt / momentumTauMs)
     check('BE コメントが増えない周期は旧実装と一致する', Math.abs(legacyEquiv - 60 * a60) < 1e-9)
     check('BE 🔴 片方だけ減った周期は旧実装と一致しない（新のほうが正しい）',
         nextMomentum(prevRec(100, 100), p(95, 110), NOW) > nextMomentum(prevRec(100, 100), p(95, 105), NOW),
@@ -5026,6 +5234,7 @@ if (real) {
     console.log('')
     await flippedTrap()
     console.log('')
+    await recommendOrder()
     await seededRateReplacement()
     await webAccessibleResourcesScope()
     await thumbUrlSurvivesFailedFill()
