@@ -525,6 +525,98 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
  * ② notifybox が先に見つけた新番組は storage に居ないため、ライブサムネの追撃が始まらず
  *    フォローAPI（20〜101秒遅い）を待っていた。
  */
+/**
+ * CJ. 補完が1回失敗しただけでライブサムネが巻き戻らないか。
+ *
+ * 【何が起きていたか（利用者報告・2026-08-10／再現済み）】
+ * 一覧APIは**縦型配信や固定画像運用のライブスクショを listing-thumbnail プロキシに包んで**返す。
+ * その形は意図的に弾いている（doc/09 項目AA）ので、詳細APIでの補完に回る。
+ * ところが `upsertProgramInfos` はレコードを**丸ごと置き換える**ので、
+ * 詳細APIが一瞬返らなかった周期に**前回埋まったURLが消えた**。
+ * その後は `applyProgramInfoToCard` が `data-src` をアイコンへ戻し、表示もアイコンに戻る。
+ */
+async function thumbUrlSurvivesFailedFill() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl } = await import('./render-harness.mjs')
+    console.log('=== CJ 補完が1回失敗してもライブサムネのURLを失わない ===')
+
+    const h = buildRenderHarness({ programsSort: 'newest' })
+    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+    const NUM = '351143386'
+    const stored = () => JSON.parse(globalThis.localStorage.getItem('programInfos') || '[]')
+        .find((x) => x.id === 'lv' + NUM)
+    const imgOf = () => h.dom.getById(NUM).querySelector('.program_thumbnail_img')
+
+    // 🔴 **実測どおりの形にすること。** 一覧のスクショは「包まれた」URLで来て、
+    //    この形の時 API は flippedListingThumbnail を返さない（2026-08-10 実測）。
+    const wrapped = 'https://listing-thumbnail.live.nicovideo.jp/?url='
+        + encodeURIComponent('https://asset2.dlive.nicovideo.jp/70f3/x/screenshot/12/thumbnail-360x640/screenshot.jpg')
+    const prog = apiProgram({ id: 'lv' + NUM, beginAtMs: Date.now() - 30000, thumb: false })
+    prog.listingThumbnail = wrapped
+    delete prog.flippedListingThumbnail
+    h.state.followPrograms = [prog]
+    h.state.notifyRows = [{ id: NUM, title: '縦型' }]
+
+    // ① スクショがまだ生成されていない周期＝繋ぎは配信者アイコン
+    await run()
+    check('CJ ① スクショ未生成の間は配信者アイコン',
+        (imgOf().getAttribute('src') || '').includes('icon'), imgOf().getAttribute('src'))
+    check('CJ ① （空振り防止）一覧の包まれたURLをライブサムネとして採用していない',
+        !stored().thumbnailUrl, `保存=${stored().thumbnailUrl}`)
+
+    // ② 詳細APIにスクショが出た周期＝補完されて表示が切り替わる
+    h.state.detailThumb = liveThumbUrl(NUM)
+    h.ageStorage(60000)
+    await run()
+    check('CJ ② 補完できたらライブサムネへ切り替わる',
+        (imgOf().getAttribute('src') || '').includes('/screenshot/'), imgOf().getAttribute('src'))
+    check('CJ ② 保存にもURLが入る', !!stored().thumbnailUrl, `保存=${stored().thumbnailUrl}`)
+
+    // 🔴 ③ ここが本題。**詳細APIが1回返らなかっただけで巻き戻らないこと。**
+    h.state.detailFails = true
+    h.ageStorage(60000)
+    await run()
+    check('CJ 🔴 補完が1回失敗しても保存のURLを消さない',
+        !!(stored() && stored().thumbnailUrl), `保存=${stored() && stored().thumbnailUrl}`)
+    check('CJ 🔴 data-src をアイコンへ戻さない（戻すと syncStaticThumb が表示まで押し戻す）',
+        (imgOf().getAttribute('data-src') || '').includes('/screenshot/'),
+        `data-src=${imgOf().getAttribute('data-src')}`)
+    check('CJ 🔴 表示もライブサムネのまま',
+        (imgOf().getAttribute('src') || '').includes('/screenshot/'), imgOf().getAttribute('src'))
+
+    // ④ 失敗が続いても戻らない（1回だけの偶然で通っていないか）
+    h.ageStorage(60000)
+    await run()
+    check('CJ 失敗が2回続いても保たれる', !!(stored() && stored().thumbnailUrl))
+
+    // ⑤ 詳細APIが復活したら、もちろん最新のURLで上書きされる（据え置きが固着しない）
+    h.state.detailFails = false
+    h.state.detailThumb = 'https://dlive.nicovideo.jp/live/' + NUM + '/screenshot/2.jpg'
+    h.ageStorage(60000)
+    await run()
+    // ⚠️ 一覧が空を返し続けるので補完が入り直す。据え置きが**新しい値を邪魔しない**ことを見る。
+    check('CJ 🔴 据え置きが新しいURLの上書きを邪魔しない',
+        (stored().thumbnailUrl || '').endsWith('/screenshot/2.jpg'), `保存=${stored().thumbnailUrl}`)
+
+    h.restore()
+
+    // --- ⑥ 書き戻しが破壊的であること（渡された配列がそのまま描画へ回るため） ---
+    // ⚠️ 今の作りでは保存レコードを `{ ...info }` から作るので、保存と画面は同じ
+    //    オブジェクトに繋がっている＝「保存だけ直って画面はアイコンのまま」は起こり得ない
+    //    （空振り検査で壊し方が成立しないことを確認済み）。
+    //    ここは**将来その2つが分離された時に鳴らすための杭**。momentum で同じ罠を踏んでいる。
+    const { upsertProgramInfos } = await import('../src/services/storage.js')
+    globalThis.localStorage.removeItem('programInfos')
+    const shot = 'https://dlive.nicovideo.jp/live/999/screenshot/1.jpg'
+    const base = { id: 'lv999', title: 'x', providerType: 'user', viewers: 1, comments: 0, onAirTime: { beginAt: new Date().toISOString() } }
+    upsertProgramInfos([{ ...base, thumbnailUrl: shot, liveScreenshotThumbnailUrls: { middle: shot } }])
+    const passed = { ...base, thumbnailUrl: '' } // 補完に失敗した周期の形
+    upsertProgramInfos([passed])
+    check('CJ 🔴 渡された info 自身にも書き戻す（保存だけ直っても画面は直らない）',
+        passed.thumbnailUrl === shot, `渡した側=${passed.thumbnailUrl}`)
+    globalThis.localStorage.removeItem('programInfos')
+}
+
 async function newProgramThumb() {
     const { buildRenderHarness, wireUpdateManager, apiProgram, fixedImageUrl } = await import('./render-harness.mjs')
     console.log('=== AZ 新番組のサムネイルが出るまで ===')
@@ -4798,6 +4890,7 @@ if (real) {
     console.log('')
     await flippedTrap()
     console.log('')
+    await thumbUrlSurvivesFailedFill()
     await newProgramThumb()
     console.log('')
     await twoDisplayPaths()

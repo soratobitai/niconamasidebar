@@ -187,6 +187,32 @@ export function upsertProgramInfos(programInfos) {
         // momentum と同じ理由でここが唯一の計算地点であり、同じ理由で渡された info 自身へ
         // 破壊的に書き戻す（保存用のコピーにだけ書くと画面に反映されない）。
         info.viewerRate = nextViewerRate(byId.get(info.id), info, now)
+        // 🔴 **サムネのURLを「空」で上書きしないこと**（2026-08-10・doc/09 項目CJ）。
+        //    ここは丸ごと置き換えなので、**補完に1回失敗しただけで前回埋まったURLが消える。**
+        //    実際にそれで「ライブサムネが出ず配信者アイコンのまま」になっていた（再現済み）。
+        //
+        //    経路: 一覧APIは縦型配信や固定画像運用のスクショを listing-thumbnail プロキシに
+        //    包んで返す（ライブ判定を通らない形＝意図的に弾いている）。その番組は
+        //    `fillMissingDetails` が詳細APIで埋めるが、詳細APIが一瞬返らなかった周期は
+        //    `thumbnailUrl` が空のまま来る。それをそのまま保存すると前回の成果が消え、
+        //    `applyProgramInfoToCard` が `data-src` をアイコンへ戻し、
+        //    `syncStaticThumb` が表示までアイコンへ押し戻す。
+        //
+        // ⚠️ **ライブサムネは「同じURLで中身が変わる」**（doc/09 項目AA）。URLを覚えておくのは
+        //    古い絵を出し続けることにはならない。番組が終われば レコードごと消える。
+        // 🔴 **渡された info 自身にも書き戻すこと（破壊的）。** momentum と同じ理由で、
+        //    呼び出し元は upsert に渡した配列をそのまま描画へ回す。保存用のコピーにだけ書くと
+        //    **保存は直るのに画面はアイコンのまま**という、いちばん分かりにくい形になる。
+        const prev = byId.get(info.id)
+        if (prev) {
+            if (!info.thumbnailUrl && prev.thumbnailUrl) info.thumbnailUrl = prev.thumbnailUrl
+            if (!info.large1280x720ThumbnailUrl && prev.large1280x720ThumbnailUrl) {
+                info.large1280x720ThumbnailUrl = prev.large1280x720ThumbnailUrl
+            }
+            const nextShot = info.liveScreenshotThumbnailUrls && info.liveScreenshotThumbnailUrls.middle
+            const prevShot = prev.liveScreenshotThumbnailUrls && prev.liveScreenshotThumbnailUrls.middle
+            if (!nextShot && prevShot) info.liveScreenshotThumbnailUrls = prev.liveScreenshotThumbnailUrls
+        }
         // 既存idは一度消してから入れ直し、touchしたレコードを末尾（=最新）へ移す。
         // これで上限トリム(先頭shift)は「今回更新されなかった古いレコード(=放送終了済み等)」から落ちる。
         byId.delete(info.id)
