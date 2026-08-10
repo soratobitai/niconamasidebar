@@ -1,6 +1,5 @@
 import { glob } from 'glob';
 import { unlink } from 'fs/promises';
-import { join } from 'path';
 
 async function removeMapFiles() {
   try {

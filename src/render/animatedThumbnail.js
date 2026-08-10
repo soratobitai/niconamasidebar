@@ -54,26 +54,6 @@ let captureTimer = null
 // CORSが想定外にtaintした場合、無駄な取得を止めるためのフラグ
 let captureUnsupported = false
 
-// ---- 計測（デバッグ用・一本化の効き目確認のため） ----
-// window.showAnimThumbStats() でコンソール確認。
-//   - ingested = ①から再取得なしで受け取ったフレーム数（②は自前取得しないのでこれが全て）
-//   - taintStops = crossOrigin 給餌が汚染で失敗した回数（0が正常。出ると①はURL表示へフォールバック）
-//   - dup破棄率  = 解析したが直前と同じで捨てた割合（ニコ生更新が最速20秒＝想定内。間隔短縮/延長の判断には使わない）
-// ON時のみ意味を持つ（OFF時は一切動作しない）。計測は enable のたびにリセット。
-// ※ 自前取得(fetches/periodic/hover/errors)の計数は、②の自前取得経路を撤去した時点で
-//   どこからも加算されなくなったため削除した（常に0を表示するだけの死にコードだった）。
-const stats = {
-    startedAt: 0,
-    ingested: 0,      // ①(通常サムネ更新)から受け取ったフレーム数
-    loaded: 0,        // 解析まで到達した画像数(storeFrameFromImage)
-    stored: 0,        // 新規フレームとして保存(署名が変化)
-    dupDiscarded: 0,  // 読めたが直前と同じで破棄(重複)
-    taintStops: 0,    // CORS汚染で取得停止（①はURL表示へ戻る）
-}
-function resetStats() {
-    stats.startedAt = Date.now()
-    stats.ingested = stats.loaded = stats.stored = stats.dupDiscarded = stats.taintStops = 0
-}
 
 // ホバー状態（カーソル下のカードと、アニメ再生状態を分離）
 let hoverCard = null   // カーソル下のカード
@@ -208,11 +188,9 @@ function signatureDiffers(a, b) {
 //   - 重複で保存しなかった時は**既存の最新コマ**を返す。署名が同じ＝見た目は同一なので、
 //     「静止サムネは常にバッファ内の最新コマそのもの」という不変条件を保てる。
 function storeFrameFromImage(id, img, b) {
-    stats.loaded++
     const sig = computeSignature(img)
-    if (!sig) { if (captureUnsupported) stats.taintStops++; return Promise.resolve(null) }
+    if (!sig) return Promise.resolve(null)
     if (!signatureDiffers(sig, b.lastSig)) {   // 重複 → 保存はしないが、表示は最新コマを使う
-        stats.dupDiscarded++
         return Promise.resolve(displayHandleOf(b))
     }
 
@@ -237,7 +215,6 @@ function storeFrameFromImage(id, img, b) {
             const objUrl = URL.createObjectURL(blob)
             b2.frames.push({ url: objUrl, sig, blob, seq: ++frameSeq })
             b2.lastSig = sig
-            stats.stored++
             while (b2.frames.length > FRAME_COUNT) {
                 const old = b2.frames.shift()
                 // アニメ表示中カードは、表示中フレームを消さないよう revoke を遅延し、
@@ -274,7 +251,6 @@ export function ingestAnimatedThumbnailFrame(id, img) {
     // 署名/エンコードのみで軽い）。①の描画は requestAnimationFrame 経由なので非表示中はブラウザ側で
     // 自然停止し、非表示中はそもそもここへほぼ到達しない。
     if (!enabled || captureUnsupported || !id || !img) return Promise.resolve(null)
-    stats.ingested++
     const b = getOrCreateBuffer(id) // ①は現在DOMにある番組のみ渡すのでバッファを用意してよい
     try {
         return storeFrameFromImage(id, img, b)
@@ -285,19 +261,6 @@ export function ingestAnimatedThumbnailFrame(id, img) {
 
 // ①が「crossOriginで読んで②へ給餌するか」を判断するためのフラグ。
 // taint(CORS汚染)後は false に戻し、①を平文取得へ自動フォールバックさせる。
-/**
- * 各番組に何コマ貯まっているかを返す（読み取り専用）。
- *
- * 再生は `frames.length >= 2` で始まる。**「ingest が成功した回数」と「貯まった枚数」は違う**
- * （同じ絵は知覚ハッシュで重複排除されるため）。動かない時にどちらで詰まっているかを
- * 切り分けられるようにしておく。
- * @returns {Record<string, number>} 番組ID -> コマ数
- */
-export function getAnimBufferSizes() {
-    const out = {}
-    for (const [id, buf] of buffers) out[id] = buf && buf.frames ? buf.frames.length : 0
-    return out
-}
 
 export function isAnimatedThumbnailEnabled() {
     return enabled && !captureUnsupported
@@ -533,29 +496,6 @@ function onMouseOut(e) {
     if (!to || !container.contains(to)) setHoverCard(null)
 }
 
-// ---- 統計表示（コンソールから手動確認: window.showAnimThumbStats()） ----
-function showAnimThumbStats() {
-    const now = Date.now()
-    const elapsed = stats.startedAt ? (now - stats.startedAt) / 1000 : 0
-    const mins = elapsed / 60
-    const ingPerMin = mins > 0 ? stats.ingested / mins : 0
-    const dupRate = stats.loaded ? (stats.dupDiscarded / stats.loaded) * 100 : 0
-    const container = getContainer()
-    const cards = container ? container.querySelectorAll('.program_container').length : 0
-    console.log('=== 動くサムネ 取得統計（①給餌方式） ===')
-    console.log(`状態: ${enabled ? 'ON' : 'OFF（最後の計測値）'} / 番組カード数: ${cards} / バッファ保持: ${buffers.size}`)
-    console.log(`経過: ${elapsed.toFixed(0)}秒 (${mins.toFixed(1)}分)`)
-    console.log(`①給餌(通常更新から/再取得なし): ${stats.ingested}回  平均: ${ingPerMin.toFixed(1)}回/分`)
-    console.log(`フレーム化: 解析${stats.loaded}  新規保存${stats.stored}  重複破棄${stats.dupDiscarded}（約${dupRate.toFixed(0)}%）`)
-    if (stats.taintStops) console.warn(`⚠️ CORS汚染(tainted): ${stats.taintStops}回 → ①はURL表示へフォールバック（表示は維持）`)
-    console.log('— 効き目 —')
-    console.log('・②は自前取得しない。静止サムネも①が給餌した画像そのものを出すので、1周期のライブサムネ取得は1回。')
-    console.log('・「CORS汚染」が0なら crossOrigin 給餌は安定。出た場合のみ①がURL表示へ自動フォールバックし表示を守る。')
-    return { ...stats }
-}
-// モジュール読込時に無条件で公開（showApiStatsと同様）。ON前でも呼べば「まだ計測なし」を返す。
-// ※content scriptのisolated worldに定義される。コンソールは拡張の実行コンテキストを選ぶこと。
-if (typeof window !== 'undefined') window.showAnimThumbStats = showAnimThumbStats
 
 // ---- 公開API ----
 export function setAnimatedThumbnailEnabled(on) {
@@ -566,7 +506,6 @@ export function setAnimatedThumbnailEnabled(on) {
     const container = getContainer()
     if (enabled) {
         captureUnsupported = false
-        resetStats() // 計測をリセット（enableごと）
         // 起動時に期限切れ/上限超過の保存フレームを掃除（fire-and-forget）
         cleanupFrames(PERSIST_TTL_MS, PERSIST_MAX_ENTRIES)
         if (container) {

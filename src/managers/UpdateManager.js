@@ -2,11 +2,11 @@ import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../s
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
 import { fetchKickPrograms } from '../services/kickSource.js';
-import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, syncServiceTabs } from '../render/sidebar.js';
+import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, syncServiceTabs, cardIdOf, autoUpdateIntervalMs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
-import { updateThumbnailInterval, watchPageBaseUrl, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle } from '../config/constants.js';
+import { updateThumbnailInterval, kickThumbnailInterval, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle, minLoadingDurationMs, fallbackUpdateIntervalSec } from '../config/constants.js';
 import { checkExtensionAlive } from '../utils/extensionAlive.js';
 
 /**
@@ -169,8 +169,38 @@ export class UpdateManager {
     }
 
     /** サムネ1周期の基準間隔(ms)。作業完了後にこの時間だけ待って次サイクルを張る。 */
+    /**
+     * 直近に取得した Kick の番組。**保存領域には入れていない**ので、
+     * 順位を計算し直す時はここから拾う必要がある。
+     */
+    getKickPrograms() {
+        return this._kickPrograms || [];
+    }
+
     _currentThumbCycleMs() {
         return (Number(this.options.updateThumbnailInterval) || updateThumbnailInterval) * 1000;
+    }
+
+    /**
+     * カード1枚ぶんのサムネ更新周期。**サービスごとに違う。**
+     *
+     * ニコ生は20秒、Kick は60秒（2026-08-04 実測: 平均約57秒でしか絵が変わらない）。
+     * 同じ20秒で叩くと Kick は3回に2回が同じ絵の取り直しになる。
+     *
+     * ⚠️ スケジューラ本体（`_thumbNextDelayMs` / `_thumbTick`）には手を入れないこと。
+     *    「いちばん早い期限まで寝る」という作りなので、**期限を配る側だけ**を変えれば
+     *    番組ごとに違う周期が自然に成立する。
+     * ⚠️ **要素を持っているなら要素を渡すこと。** id しか無い場所（tick の完了時）のために
+     *    引き直しにも対応しているが、`getElementById` の戻り値が要素である前提に寄りかからない。
+     *    ここで `getAttribute` を無条件に呼んで verify:loop を落としたことがある（2026-08-04）。
+     * @param {string|HTMLElement} idOrEl カードのDOM id、または要素そのもの
+     */
+    _thumbCycleMsFor(idOrEl) {
+        const el = (idOrEl && typeof idOrEl === 'object')
+            ? idOrEl
+            : (idOrEl ? document.getElementById(idOrEl) : null);
+        const isKick = !!(el && typeof el.getAttribute === 'function' && el.getAttribute('data-service') === 'kick');
+        return isKick ? kickThumbnailInterval * 1000 : this._currentThumbCycleMs();
     }
 
     /**
@@ -210,7 +240,8 @@ export class UpdateManager {
                 // という前提の細工だった。実際の重さは回線ではなく相手の応答待ちで、重ねても問題ない
                 // （doc/09 項目BD）。ズレは「各番組の取得が終わってから20秒」で自然に生まれる。
                 const deferred = initialAssignment || this.isPerformingManualUpdate;
-                this._thumbDueAt.set(id, deferred ? now + cycleMs : now);
+                // 要素をそのまま渡す（引き直さない）。
+                this._thumbDueAt.set(id, deferred ? now + this._thumbCycleMsFor(el) : now);
             }
         });
         // 消えた番組の期限を解放
@@ -335,7 +366,7 @@ export class UpdateManager {
                 // 「完了した時点」から次の期限を数え直す＝作業時間ぶん自然にドリフトする。
                 // カードが消えていたら期限も消す（復活時は _syncThumbDueAt が配り直す）。
                 if (this._thumbDueAt.has(target)) {
-                    this._thumbDueAt.set(target, Date.now() + this._currentThumbCycleMs());
+                    this._thumbDueAt.set(target, Date.now() + this._thumbCycleMsFor(target));
                 }
                 // 飛行中は選ばれないので、終わった時点で起床予定を取り直す
                 // （寝すぎ・起きすぎのどちらも防ぐ）。
@@ -468,12 +499,21 @@ export class UpdateManager {
         this._scheduleSidebarTick(interval);
     }
 
-    /** 目覚ましを張り直す。常に「clear してから set」なので同時に2本存在しない。 */
+    /**
+     * 目覚ましを張り直す。常に「clear してから set」なので同時に2本存在しない。
+     *
+     * 🔴 **自動更新 OFF を弾くのはここ1箇所。** 開始・位相リセット・tick の張り直しの
+     *    3経路がすべてここを通る。上流それぞれで弾く形にすると、経路が増えた時に漏れる。
+     */
     _scheduleSidebarTick(delayMs) {
         if (this._sidebarLoopStopped) return;
         if (this._sidebarLoopTimer !== null) {
             clearTimeout(this._sidebarLoopTimer);
+            this._sidebarLoopTimer = null;
         }
+        // OFF。**張らずに戻る**（上で clear 済みなので、動作中に OFF へ変えても次で止まる）。
+        // ⚠️ サムネのループ（_thumbLoopTimer）はここを通らない。OFF でも回り続ける＝仕様。
+        if (autoUpdateIntervalMs(this.options) === null) return;
         this._sidebarLoopTimer = setTimeout(() => { this._sidebarTick(); }, Math.max(0, delayMs));
     }
 
@@ -511,7 +551,7 @@ export class UpdateManager {
             // 自分が始めたセッションだけを閉じる。await 中に手動更新が別セッションを
             // 立てている可能性があるため、無条件 finish は他人のセッションを閉じてしまう。
             if (sessionId) {
-                await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
+                await this.loadingManager.finishSessionWithMinDuration(minLoadingDurationMs, sessionId);
             }
             // サムネ<img>の反映は各番組の自己連鎖サイクルに任せる（全件同時更新はしない＝
             // リストがいっぺんに切り替わる“一斉感”を無くす）。新規カードは _syncThumbDueAt が拾う。
@@ -566,7 +606,7 @@ export class UpdateManager {
             });
 
             // 最低1秒のローディング時間を確保して終了（自分が持ち主の時だけ）
-            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
+            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(minLoadingDurationMs, sessionId);
 
             // 定期取得の位相をリセット（＝今から1周期後にする）。ループ自体は作り直さない。
             if (this._isSidebarOpen()) {
@@ -574,15 +614,20 @@ export class UpdateManager {
             }
         } catch (error) {
             console.error('[手動更新] エラーが発生しました:', error);
-            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(1000, sessionId);
+            if (sessionId) await this.loadingManager.finishSessionWithMinDuration(minLoadingDurationMs, sessionId);
         } finally {
             this.isPerformingManualUpdate = false;
         }
     }
 
-    /** 現在の更新間隔(ms)。リスト＋詳細サイクルの周期。 */
+    /**
+     * 現在の更新間隔(ms)。リスト＋詳細サイクルの周期。
+     *
+     * ⚠️ **OFF の時もここは数値を返す。** 期限の計算（`_sidebarNextDueAt`）に NaN を
+     *    混ぜないため。実際に止めるのは `_scheduleSidebarTick` 側の1箇所。
+     */
     _currentUpdateIntervalMs() {
-        return Number(this.options.updateProgramsInterval) * 1000;
+        return autoUpdateIntervalMs(this.options) ?? fallbackUpdateIntervalSec * 1000;
     }
 
     /**
@@ -827,9 +872,14 @@ export class UpdateManager {
                 this._refreshDetailsViaScrape(), // 失敗時 null
                 fetchKickPrograms(),             // 失敗時 {ok:false}
             ]);
+            // 🔴 **取れなかった周期は「0件」にせず、前回の結果を据え置くこと。**
+            //    空にすると、Kick の取得が一瞬失敗するたびに**Kick のカードが全部消えて
+            //    次の周期で戻る＝点滅する。** kick.com ページ側は元から据え置きにしてあり、
+            //    ここだけ逆だった（2026-08-07 に発見）。
+            //    「取れなかった」は「居なかった」ではない（doc/09 項目BF-2 と同じ話）。
             const kickPrograms = (kickResult && kickResult.ok && Array.isArray(kickResult.programs))
                 ? kickResult.programs
-                : [];
+                : (this._kickPrograms || []);
 
             // 🔴 自分より後に始まった取得が既に描画を終えていたら、ここで降りる（doc/09 項目AP）。
             //
@@ -887,6 +937,9 @@ export class UpdateManager {
             //  - **`updateThumbnailsFromStorage` の対象にもならない**（storage に居ないため）。
             //    Kick のサムネは毎周期のリスト取得で新しい URL が来る（versionId が変わる）。
             const combined = kickPrograms.length ? merged.concat(kickPrograms) : merged;
+            // サムネ更新ループが Kick も対象にできるよう控えておく。
+            // Kick は localStorage に入れていないので、そこからは引けない。
+            this._kickPrograms = kickPrograms;
 
             // 空のときは既存DOMを維持（取得は成功していて放送中0件）
             if (combined.length === 0) {
@@ -920,7 +973,9 @@ export class UpdateManager {
                 try {
                     // カードのDOM id は「lv を外した数値」。サムネ更新側が `lv${card.id}` で
                     // 引き直す前提になっているので、この規約は変えないこと。
-                    const id = String(data.id).replace(/^lv/, '');
+                    // 🔴 自前で正規化しないこと（cardIdOf が唯一の定義）。ずれると既存カードを
+                    //    引き当てられず、毎周期カードを作り直してリストがチラつく。
+                    const id = cardIdOf(data);
                     const existing = existingMap.get(id);
 
                     if (existing) {
@@ -1005,19 +1060,28 @@ export class UpdateManager {
                         if (el) frag.appendChild(el);
                     }
                     container.replaceChildren(frag);
+                    // 🔴 **カード幅の設定は「ここ」。flipReorder の外（後）でやらないこと。**
+                    //    新規カードは幅が未設定のまま挿入される。flex なので既定幅が効き、
+                    //    **折り返しが崩れたまま Last が測られる**（同じ行の既存カードは
+                    //    新規カードの高さに引き伸ばされ、実測で 199x203 → 199x285 まで伸びていた）。
+                    //    その壊れた座標で FLIP が transform を当て、直後に幅が直って
+                    //    レイアウトが戻るため、**順位が変わっていないカードが飛んだ位置から滑ってくる**
+                    //    （2026-08-04・利用者報告「同じ場所なのにフラップする」）。
+                    //
+                    //    列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅
+                    //    (offsetWidth) を使うと、開いた直後のリスト再描画がアニメ中に走った時に
+                    //    1列⇔多列がパタついてサムネが一瞬巨大化するため。
+                    setProgramContainerWidth(this.elems, this.appState.sidebar.width);
                     // ソート（詳細が揃っているので programsSort で確定できる）
                     this.sortProgramsInContainer(container);
                 }, reorderFlipDurationMs);
-                // 列数は「意図した幅」(appState.sidebar.width)で決める。開閉アニメ中の途中幅(offsetWidth)を
-                // 使うと、開いた直後のリスト再描画がアニメ中に走った時に1列⇔多列がパタついてサムネが一瞬巨大化するため。
-                setProgramContainerWidth(this.elems, this.appState.sidebar.width);
                 this.appState.update.isInserting = false;
             }
             // else: その場更新のみ（DOMの組み替え・並べ替えはしない＝差分だけ触る）
 
             // タブ分離モードの表示状態を実態へ合わせる。Kick のカードが無ければタブは出ない。
             // 戻り値は「いま見えている件数」（混在モードなら全件）。
-            const visibleCount = syncServiceTabs(container, this.options.kickDisplayMode);
+            const visibleCount = syncServiceTabs(container, this.options.kickDisplayMode, this.options.kickActiveTab);
 
             // 番組数更新
             this.updateProgramCount(visibleCount);
@@ -1038,6 +1102,12 @@ export class UpdateManager {
      * 比較器は sortPrograms（utils/sorting.js）と同一にする。
      */
     _sortOrderChanged(container) {
+        // ⚠️ **タブ分離中に「見えているカードだけ」で判定しないこと（2026-08-04 に試して撤回）。**
+        //    隠れている側の並び替えで組み替えが走るのを省く狙いだったが、
+        //    **チラつきの原因はこれではなかった**（flipReorder のスクロール位置リセット）。
+        //    スクロールを直した今、組み替えが走っても見た目には何も起きない。
+        //    残るのは「隠れている側の DOM 順がずれる」という不変条件だけで、
+        //    タブ切り替え時の並べ直しと対にしないと古い順序が見える。割に合わない。
         const els = Array.from(container.children);
         if (els.length < 2) return false;
         // 🔴 比較器を**ここに書き直さないこと**。utils/programOrder.js が唯一の定義。
@@ -1091,7 +1161,11 @@ export class UpdateManager {
             return;
         }
 
-        const programInfos = getProgramInfosFromStorage();
+        // Kick は storage に入れていないので、直近の取得結果を足してから渡す。
+        // これを忘れると Kick のサムネが更新されず、動くサムネのコマも貯まらない。
+        const stored = getProgramInfosFromStorage();
+        const kick = this._kickPrograms || [];
+        const programInfos = kick.length ? (stored || []).concat(kick) : stored;
         if (!programInfos || programInfos.length === 0) {
             if (onComplete) onComplete();
             if (onSettled) onSettled();

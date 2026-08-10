@@ -83,10 +83,16 @@ el.enabled.addEventListener('change', async () => {
     setTestResult('')
 
     if (!el.enabled.checked) {
-        // OFF: 権限を返す。表示方法の設定は消さない（再度 ON にしたとき前回の選択が残る）。
-        chrome.permissions.remove(KICK_PERMISSIONS, async () => {
-            await syncFromPermissions()
-            setNote('Kick 連携を無効にしました。')
+        // 🔴 **権限を外す「前に」タブへ伝えること。**
+        //    外した後だとホスト権限を失っていて chrome.tabs.sendMessage が届かず、
+        //    開いているページの Kick カードが次の更新周期まで残る。
+        chrome.runtime.sendMessage({ type: 'kick:broadcastState', granted: false }, () => {
+            void chrome.runtime.lastError
+            // OFF: 権限を返す。表示方法の設定は消さない（再度 ON にしたとき前回の選択が残る）。
+            chrome.permissions.remove(KICK_PERMISSIONS, async () => {
+                await syncFromPermissions()
+                setNote('Kick 連携を無効にしました。')
+            })
         })
         return
     }

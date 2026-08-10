@@ -282,30 +282,3 @@ export async function fetchFollowedProgramsViaPage() {
         return null
     }
 }
-
-// ---- デバッグ（実ページのConsoleから手動確認） -----------------------------------------
-// window.__testFollowScrape() で、取得結果を件数＋表で表示する。
-// ※ content script の isolated world に定義される。DevToolsのコンソール実行コンテキストで
-//   本拡張のコンテキストを選ぶこと。
-export async function debugTestFollowScrape() {
-    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
-    const t0 = now()
-    const list = await fetchFollowedProgramsViaPage()
-    const ms = Math.round(now() - t0)
-    if (!list) { console.warn('[followApi] 取得失敗（未ログイン/仕様変更/通信エラー）'); return null }
-    console.log(`[followApi] ${list.length}件 / ${ms}ms`)
-    console.table(list.map((p) => ({
-        id: p.id,
-        title: (p.title || '').slice(0, 16),
-        viewers: p.viewers,
-        comments: p.comments,
-        provider: p.providerType,
-        member: p.isMemberOnly,
-        beginAt: p.onAirTime && p.onAirTime.beginAt,
-        thumb: (p.thumbnailUrl || '').slice(0, 44),
-    })))
-    return list
-}
-if (typeof window !== 'undefined') {
-    window.__testFollowScrape = debugTestFollowScrape
-}

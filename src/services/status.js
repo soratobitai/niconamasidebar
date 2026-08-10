@@ -1,5 +1,3 @@
-// 【診断コード】原因が分かったら import ごと消す
-import { diagFail, diagEvent } from '../utils/diag.js'
 
 /**
  * 番組終了を検知したら呼ばれる。
@@ -52,18 +50,6 @@ function detectProgramEndGuide() {
 	// 配信者本人が満足度アンケートを出された時は、上の2つの代わりにこれだけが描画される。
 	if (guide.querySelector('[class*="satisfaction-level-enquete-panel"]')) return true
 
-	// 【診断コード】関門2。終了ガイドの枠はあるのに中身が想定と違う＝ニコ生側の作りが
-	// 変わって終了に気づけない状態。**この時は何も起きないので、記録が無いと分からない。**
-	// 中身が組み上がる前の一瞬でも通るため、同じ枠につき1回だけ出す。
-	if (!guide.__diagWarned) {
-		guide.__diagWarned = true
-		diagFail(
-			'終了ガイドの枠はあるが中身が想定と違う（終了に気づけない）'
-			+ ` / announcement=${hasAnnouncement ? 'あり' : 'なし'}`
-			+ ` / next-action-area=${hasNextActionArea ? 'あり' : 'なし'}`
-			+ ` / 中の class: ${Array.from(guide.querySelectorAll('*')).slice(0, 8).map((e) => e.className).join(' | ') || '(空)'}`
-		)
-	}
 	return false
 }
 
@@ -91,9 +77,50 @@ function detectProgramEndGuide() {
 const AUTO_NEXT_HOP_KEY = 'nicosidebar_autonext_hop'
 const AUTO_NEXT_HOP_VALID_MS = 3 * 60 * 1000 // 印の有効期限（移動は10秒後なので十分長い）
 
-/** 移動する直前に印を置く（AutoNextManager から呼ぶ）。 */
-function markAutoNextHop() {
+// オリジンをまたぐ移動用の印。
+// 🔴 **`sessionStorage` はオリジンごと。**ニコ生 ⇄ kick.com を行き来する自動移動では
+//    飛んだ先で読めない（2026-08-07 に Kick 対応を入れる時に気付いた）。
+//    拡張のストレージにも同じ印を置き、**飛び先の識別子つき**で持つ。
+//    識別子で照合するので、読まれずに残った古い印が別のページで誤って効くことはない。
+const AUTO_NEXT_HOP_STORE_KEY = 'autoNextHop'
+
+/**
+ * 移動する直前に印を置く（AutoNextManager から呼ぶ）。
+ * @param {string} [targetId] 飛び先の識別子（`watchTargetIdOf` の形）。オリジンをまたぐ時に使う
+ */
+function markAutoNextHop(targetId) {
 	try { sessionStorage.setItem(AUTO_NEXT_HOP_KEY, String(Date.now())) } catch (_e) {}
+	try {
+		chrome.storage.local.set({
+			[AUTO_NEXT_HOP_STORE_KEY]: { at: Date.now(), to: String(targetId || '') },
+		})
+	} catch (_e) { /* 拡張が無効化されていれば置けないだけ */ }
+}
+
+/**
+ * このページが「自動移動で飛んできた先」かを1回だけ判定して、印を消す。
+ * **オリジンをまたいでも読める版**（kick.com 側が使う）。
+ *
+ * 🔴 **飛び先の識別子が一致する時だけ true。** 一致で縛らないと、読まれずに残った印が
+ *    「あとから利用者が自分で開いたページ」にまで効いてしまい、
+ *    **見始めた瞬間に別の配信へ連れて行かれる。**
+ *
+ * @param {string} currentId 今いるページの識別子（`watchTargetIdOf(location.href)`）
+ * @returns {Promise<boolean>}
+ */
+async function consumeAutoNextHopMark(currentId) {
+	if (!currentId) return false
+	try {
+		const got = await chrome.storage.local.get(AUTO_NEXT_HOP_STORE_KEY)
+		const mark = got && got[AUTO_NEXT_HOP_STORE_KEY]
+		if (!mark || typeof mark !== 'object') return false
+		// 印は1回で使い切る。残すと次に開いたページでも効いてしまう。
+		try { chrome.storage.local.remove(AUTO_NEXT_HOP_STORE_KEY) } catch (_e) {}
+		if (!Number.isFinite(mark.at) || Date.now() - mark.at > AUTO_NEXT_HOP_VALID_MS) return false
+		return mark.to === currentId
+	} catch (_e) {
+		return false
+	}
 }
 
 /**
@@ -117,9 +144,6 @@ function wasLoadedAlreadyEnded() {
 		if (!props) return loadedEndedCache
 		const status = JSON.parse(props).program.status
 		loadedEndedCache = status === 'ENDED'
-		if (loadedEndedCache) {
-			diagEvent('自動移動: 飛んだ先は最初から終了していた（program.status=ENDED）→ そのまま次を探す')
-		}
 	} catch (_e) {
 		// 読めなければ「終了していない」扱い。**判断材料が無い時は動かさない。**
 	}
@@ -172,6 +196,6 @@ function observeProgramEnd(onEnded) {
 	}
 }
 
-export { observeProgramEnd, markAutoNextHop }
+export { observeProgramEnd, markAutoNextHop, consumeAutoNextHopMark }
 
 

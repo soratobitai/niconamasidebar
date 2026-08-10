@@ -90,68 +90,31 @@ h1 {
     font-size: 13px;
 }
 
-.sub {
-    margin: 16px 0 0 28px;
-    padding: 14px 16px;
-    border: 1px solid var(--border);
+/* サイドバー内の設定にある β版バッジと見た目を揃える（あちらは styles/main.css）。 */
+.beta-badge {
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: bold;
+    color: #111;
+    background: #ffd54f;
     border-radius: 8px;
+    vertical-align: middle;
+}
+
+/* 中身は接続テストのボタンだけ。囲いは付けない。
+   左のインデントはチェックボックスのラベル文字と頭を揃えるためのもの。 */
+.sub {
+    margin: 14px 0 0 28px;
 }
 
 .sub[hidden] {
     display: none;
 }
 
-.sub-title {
-    font-size: 13px;
-    color: var(--muted);
-    margin-bottom: 8px;
-}
-
-.segment {
-    display: flex;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-}
-
-.segment input[type="radio"] {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-}
-
-.segment label {
-    flex: 1;
-    text-align: center;
-    padding: 7px 10px;
-    font-size: 13px;
-    cursor: pointer;
-    background: transparent;
-}
-
-.segment label + input + label,
-.segment input + label:not(:first-of-type) {
-    border-left: 1px solid var(--border);
-}
-
-.segment input[type="radio"]:checked + label {
-    background: var(--accent);
-    color: #fff;
-}
-
-.sub-title-spaced {
-    margin-top: 16px;
-}
-
-.hint {
-    margin: 8px 0 0;
-    font-size: 12px;
-    color: var(--muted);
-    line-height: 1.6;
-}
-
+/* ⚠️ ここに margin-top を付けないこと。親（.sub）が既に間隔を持っているので、
+   足すと上だけ余白が二重になる（実際にそうなっていた）。 */
 .test {
-    margin-top: 14px;
     display: flex;
     align-items: center;
     gap: 10px;

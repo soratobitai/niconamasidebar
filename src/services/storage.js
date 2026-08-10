@@ -7,6 +7,23 @@ import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
  * @param {Record<string, any>} [defaultOptions]
  * @returns {Promise<Record<string, any>>}
  */
+/**
+ * 保存済みの古い値を、今ある選択肢へ寄せる。
+ *
+ * 🔴 **設定の選択肢を消す時は、必ずここへ寄せ先を足すこと。**
+ *    保存値に対応するラジオが設定画面に無いと、`updateCheckedState` は**どれも選ばない**状態にし、
+ *    `saveOptions` は「1つも選ばれていない」で早期 return する。
+ *    その結果、**その利用者はテーマも並び順も含めて設定を一切保存できなくなる**（無言で）。
+ *
+ * ⚠️ 呼び出し元（getOptions）はこの戻り値をそのまま storage へ書き戻すので、寄せた値は永続化される。
+ */
+function migrateOptions(options) {
+    // 自動更新の「180秒」を廃止し「OFF」に置き換えた（2026-08-07・doc/09 項目BQ）。
+    // ⚠️ **OFF ではなく 120秒へ寄せる。** 黙って取得が止まるほうが利用者にとって驚きが大きい。
+    if (String(options.updateProgramsInterval) === '180') options.updateProgramsInterval = '120'
+    return options
+}
+
 export async function getOptions(defaultOptions = {}) {
     try {
         const stored = await new Promise((resolve, reject) => {
@@ -19,7 +36,7 @@ export async function getOptions(defaultOptions = {}) {
             })
         })
 
-        const merged = { ...defaultOptions, ...stored }
+        const merged = migrateOptions({ ...defaultOptions, ...stored })
 
         await new Promise((resolve, reject) => {
             chrome.storage.local.set(merged, () => {
@@ -123,27 +140,6 @@ function setProgramInfos(list) {
     }
 }
 
-/**
- * Insert or replace program info and trim to max size.
- * @param {any} programInfo
- */
-export function upsertProgramInfo(programInfo) {
-    if (!programInfo || !programInfo.id) return
-    const list = getProgramInfos()
-    const idx = list.findIndex((info) => info.id === programInfo.id)
-    // 取得時刻を記録用メタデータとして付与。
-    // 引数オブジェクトを汚さないよう浅いコピーを保存する。
-    const record = { ...programInfo, _fetchedAt: Date.now() }
-    if (idx !== -1) {
-        list[idx] = record
-    } else {
-        list.push(record)
-    }
-    while (list.length > maxSaveProgramInfos) {
-        list.shift()
-    }
-    setProgramInfos(list)
-}
 
 /**
  * 1番組の「ライブサムネ関連フィールドだけ」を、最新の storage レコードにマージして書き込む。

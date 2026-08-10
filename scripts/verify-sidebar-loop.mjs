@@ -33,6 +33,9 @@ globalThis.chrome = {
     runtime: { id: 'test-extension-id', getURL: (p) => 'chrome-extension://test/' + p },
     storage: { local: { get: () => {}, set: () => {} }, onChanged: { addListener: () => {} } },
 }
+/** 本物の要素の style の代わり。書かれた値を持っておくだけ。 */
+const mockStyle = () => ({ _props: {}, setProperty(k, v) { this._props[k] = v }, removeProperty(k) { delete this._props[k] }, getPropertyValue(k) { return this._props[k] ?? "" } })
+
 globalThis.document = {
     getElementById: () => null, // 更新ボタンは無い扱い（.loading の付け外しは検証対象外）
     hidden: false,
@@ -449,7 +452,9 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
     appState.sidebar.isOpen = true
 
     // DOM を差し替えてカードを模す
-    const container = { id: 'liveProgramContainer', children: [], contains: (el) => container.children.includes(el) }
+    // ⚠️ style を持たせること。本物の要素には必ずあり、setProgramContainerWidth が
+    //    カードの拡縮倍率（--nns-card-scale）をここへ書く。無いと描画系の検査が丸ごと落ちる。
+    const container = { id: 'liveProgramContainer', children: [], style: mockStyle(), contains: (el) => container.children.includes(el) }
     const els = Array.from({ length: cards }, (_, i) => ({ id: String(1000 + i) }))
     container.children = els
     globalThis.document.getElementById = (q) =>
@@ -947,12 +952,21 @@ async function momentumScore() {
     check('AY 🔴 更新間隔が違っても同じ実時間なら同じ値になる（30秒×6 と 180秒×1）',
         near(m30, m180), `30秒×6=${m30.toFixed(6)} / 180秒×1=${m180.toFixed(6)}`)
 
-    // --- 同点時の第2キー（静かな番組は勢いが0で並ぶ） ---
-    const el = (ap, total) => ({ getAttribute: (k) => (k === 'active-point' ? ap : k === 'data-total' ? total : null) })
-    check('AY 勢いが違えば勢いが優先',
+    // --- 同点時の第2キー ---
+    // 🔴 **2026-08-04 に `data-total`（累計エンゲージメント）から `data-begin-at` へ変えた。**
+    //    累計はコメントを含むので Kick では常に 0 になり、統合表示で Kick が必ず沈む（項目BL-5）。
+    //    ここが `data-total` に戻ったら、その回帰を意味する。
+    const el = (ap, beginAt) => ({ getAttribute: (k) => (k === 'active-point' ? ap : k === 'data-begin-at' ? beginAt : null) })
+    check('AY 推定同接が違えば推定同接が優先',
         [el('1', '9999'), el('5', '1')].sort(compareByActivePoint)[0].getAttribute('active-point') === '5')
-    check('AY 同点（静かな番組）は累計の多い順',
-        [el('0', '5'), el('0', '50')].sort(compareByActivePoint)[0].getAttribute('data-total') === '50')
+    check('AY 同点なら放送開始が新しい順',
+        [el('0', '1000'), el('0', '5000')].sort(compareByActivePoint)[0].getAttribute('data-begin-at') === '5000')
+    check('AY 第2キーに data-total を使っていない',
+        [
+            { getAttribute: (k) => (k === 'active-point' ? '0' : k === 'data-total' ? '50' : k === 'data-begin-at' ? '1000' : null) },
+            { getAttribute: (k) => (k === 'active-point' ? '0' : k === 'data-total' ? '5' : k === 'data-begin-at' ? '5000' : null) },
+        ].sort(compareByActivePoint)[0].getAttribute('data-total') === '5',
+        '累計が少ない方でも、開始が新しければ上に来る')
     check('AY 属性が欠けたカードが混ざっても落ちない',
         Number.isFinite(compareByActivePoint(el(null, null), el(null, null))))
 }
@@ -985,6 +999,11 @@ async function momentumRanking() {
     // 実際の直近レートへ寄っていくので、**入れ替わりは1周期目ではなく数周期かけて起きる**。
     // これは EMA の暖機であって、旧スコアのような構造的な不利ではない（時定数3分＝実時間で数分）。
     const ap = (id) => parseFloat(h.dom.getById(id).getAttribute('active-point'))
+    // 🔴 **絶対値で判定しないこと。** 2026-08-04 に active-point の中身が
+    //    「勢い（人/分）」から「推定同接（人）＝到着レート×min(W,経過分)」へ変わった。
+    //    W は設定で動くので、167 や 150 のような固定値を書くと目盛りを変えるたびに落ちる。
+    //    **初期値（開始からの平均で立ち上がった値）との比**で見れば、W が変わっても意味が保たれる。
+    const base900 = ap('900'); const base901 = ap('901')
     let v900 = 30000; let v901 = 100
     for (let cycle = 1; cycle <= 3; cycle++) {
         h.ageStorage(60000)
@@ -996,18 +1015,25 @@ async function momentumRanking() {
         await run()
         if (cycle === 1) {
             check('AY 1周期目はまだ暖機中（開始からの平均から寄り始める）',
-                ap('900') < 167 && ap('901') > 10,
-                `lv900 ${ap('900').toFixed(1)}（初期値167から下降中） / lv901 ${ap('901').toFixed(1)}（初期値10から上昇中）`)
+                ap('900') < base900 && ap('901') > base901,
+                `lv900 ${ap('900').toFixed(1)}（初期${base900.toFixed(1)}から下降中）`
+                + ` / lv901 ${ap('901').toFixed(1)}（初期${base901.toFixed(1)}から上昇中）`)
         }
     }
     check('AY 🔴 長時間放送より、いま伸びている番組が上に来る', ids() === '901,900', ids())
     // 3周期後は「初期値(167 / 10)」から「実レート(10 / 300)」の側へ十分寄っているはず。
     // ぴったりの値ではなく“どちらの側に居るか”で見る（時定数を変えても意味が壊れないように）。
     check('AY 🔴 スコアが「開始からの平均」ではなく「直近の勢い」に寄る',
-        ap('901') > ap('900') && ap('900') < 80 && ap('901') > 150,
-        `3周期後: lv901=${ap('901').toFixed(1)}（初期10→実レート300へ） / lv900=${ap('900').toFixed(1)}（初期167→実レート10へ）`
-        + ' ※旧スコアなら lv900=167, lv901=40 で永久に逆転しない')
-    check('AY 第2キー data-total が両方のカードに入っている',
+        ap('901') > ap('900') && ap('900') < base900 * 0.6 && ap('901') > base901 * 3,
+        `3周期後: lv901=${ap('901').toFixed(1)}（初期${base901.toFixed(1)}の3倍超へ）`
+        + ` / lv900=${ap('900').toFixed(1)}（初期${base900.toFixed(1)}の6割未満へ）`
+        + ' ※旧スコア（開始からの平均）なら、どちらも初期値のまま動かず逆転しない')
+    check('AY 第2キー data-begin-at が両方のカードに入っている',
+        Number.isFinite(parseFloat(h.dom.getById('900').getAttribute('data-begin-at')))
+        && Number.isFinite(parseFloat(h.dom.getById('901').getAttribute('data-begin-at'))),
+        `lv900=${h.dom.getById('900').getAttribute('data-begin-at')} / lv901=${h.dom.getById('901').getAttribute('data-begin-at')}`)
+    // data-total は順位に使っていないが、弾幕補正の効き方を実機で見るための覗き窓として残っている。
+    check('AY 覗き窓の data-total も引き続き書かれている',
         h.dom.getById('900').getAttribute('data-total') === String(v900)
         && h.dom.getById('901').getAttribute('data-total') === String(v901),
         `lv900=${h.dom.getById('900').getAttribute('data-total')} / lv901=${h.dom.getById('901').getAttribute('data-total')}`)
@@ -1628,7 +1654,9 @@ async function r1NoSpin() {
     um.options.updateThumbnailInterval = cycleSec
     appState.sidebar.isOpen = true
 
-    const container = { id: 'liveProgramContainer', children: [], contains: (el) => container.children.includes(el) }
+    // ⚠️ style を持たせること。本物の要素には必ずあり、setProgramContainerWidth が
+    //    カードの拡縮倍率（--nns-card-scale）をここへ書く。無いと描画系の検査が丸ごと落ちる。
+    const container = { id: 'liveProgramContainer', children: [], style: mockStyle(), contains: (el) => container.children.includes(el) }
     const els = [{ id: '2001' }, { id: '2002' }]
     container.children = els
     globalThis.document.getElementById = (q) =>
@@ -1997,7 +2025,10 @@ async function inPlaceUpdate() {
     // 最小限の要素モック（querySelector / insertBefore / 属性）
     const mkEl = (cls) => {
         const el = {
-            className: cls || '', children: [], attrs: {}, style: {},
+            // style は素の {} にしないこと。本物は `setProperty` を持つので、
+            // 実装が CSS 変数を書いた瞬間に落ちる（2026-08-07・カードの拡縮で実際に落ちた）。
+            // dataset と同じ話で、実装の正否と無関係な NG が13件出た。
+            className: cls || '', children: [], attrs: {}, style: mockStyle(),
             // 本物の要素は必ず dataset を持つ。省くと「実装が dataset を読んだ瞬間に落ちる」
             // 検証になり、実装の正否と無関係な NG が出る（doc/09 項目AR）。
             dataset: {},
@@ -2111,6 +2142,1910 @@ async function inPlaceUpdate() {
  * 到達可能になる。その分岐は onComplete を呼んで「完了した」と嘘をつくため、
  * サムネが「更新0回・エラー0件」で静かに止まる。区間を機械で守る。
  */
+/**
+ * BM. 同じ番組が続いている間、カードの DOM 要素が**使い回されている**か。
+ *
+ * 既存カードを引き当てる鍵（Map のキー）と、カードの DOM id がずれると、
+ * 引き当てに毎回失敗して**毎周期カードを作り直す**。作り直すと画像も読み直され、
+ * リスト全体が一瞬チラつく。例外もログも出ず、見た目も一応正しいので気付けない。
+ *
+ * 2026-08-04 に kick.com ページで実際に発生。ニコ生の番組は `lv123` で来るのに
+ * カードの DOM id は `123` なので、生の `data.id` で引いていた側が全滅していた
+ * （35枚中23枚＝ニコ生の全件が毎周期「新規」）。
+ *
+ * 🔴 **数ではなく「同じオブジェクトか」で見ること。** 件数だけ数えても、作り直しは
+ *    件数が変わらないので素通りする（この事故がまさにそれだった）。
+ */
+async function cardIdentity() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    console.log('=== BM カードを毎周期作り直していないか ===')
+    const T = Date.now() - 600000
+
+    // --- 実挙動: 同じ番組で2周させて、要素が同一オブジェクトのままか ---
+    {
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        h.state.followPrograms = [
+            apiProgram({ id: 'lv701', beginAtMs: T }),
+            apiProgram({ id: 'lv702', beginAtMs: T - 1000 }),
+        ]
+        await run()
+        const first = ['701', '702'].map((id) => h.dom.getById(id))
+        check('BM カードが立っている（この検査自体が空振りしていない）',
+            first.every(Boolean), first.map((e) => (e ? e.id : 'なし')).join(','))
+
+        await run()
+        const second = ['701', '702'].map((id) => h.dom.getById(id))
+        const reused = first.every((el, i) => el && second[i] === el)
+        check('BM 🔴 番組が変わらなければカードの要素は使い回される（作り直さない）',
+            reused,
+            reused ? '2周とも同一オブジェクト'
+                : '作り直されている。引き当ての鍵とカードの DOM id がずれていないか（cardIdOf）')
+        h.restore()
+    }
+
+    // --- 鍵の作り方が1箇所に閉じているか ---
+    {
+        const { readFileSync } = await import('fs')
+        const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+        check('BM カードidの正規化は sidebar.js の cardIdOf が唯一の定義',
+            (sb.match(/export function cardIdOf\(/g) || []).length === 1)
+
+        // 引き当ての鍵が cardIdOf 由来か。両ページとも「Map を作る」〜「Map を引く」の間に
+        // cardIdOf の呼び出しが無ければ、生の id で引いている疑いがある。
+        for (const [name, rel] of [['ニコ生', '../src/managers/UpdateManager.js'], ['kick.com', '../src/kickPage.js']]) {
+            const t = stripComments(readFileSync(new URL(rel, import.meta.url), 'utf8'))
+            const a = t.indexOf('existingMap = new Map(')
+            const b = t.indexOf('existingMap.get(', a)
+            const seg = a >= 0 && b > a ? t.slice(a, b) : ''
+            check(`BM ${name}ページの引き当ての鍵は cardIdOf から作る`,
+                seg.length > 0 && seg.includes('cardIdOf('),
+                seg.length === 0 ? '引き当ての区間を特定できない（構造が変わった？）'
+                    : '生の data.id で引くと lv 付きの番組を毎回取りこぼす')
+        }
+    }
+}
+
+/**
+ * BN. ニコ生ページと kick.com ページで**同じ仕様**になっているか。
+ *
+ * サイドバーの中身は両ページで同一、というのが利用者の要求（2026-08-04）。
+ * 同じことを2箇所に書くと片方だけ直して食い違うので、共有できるものは共有し、
+ * 「共有されているか」を機械で見る。
+ *
+ * 実際に kick.com 側だけ抜けていたもの:
+ *   更新ボタンのローディング / 境界線ドラッグでの幅変更 / 開いた時の矢印の向き /
+ *   「自動で開く=ON」/ Esc で設定を閉じる / 取得失敗の案内表示
+ */
+async function bothPagesSameSpec() {
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const kp = rd('kickPage.js')
+    const kpc = stripComments(kp)
+    const mn = stripComments(rd('main.js'))
+    const lm = stripComments(rd('managers/LoadingManager.js'))
+    const um = stripComments(rd('managers/UpdateManager.js'))
+    const sb = rd('render/sidebar.js')
+    console.log('=== BN 両ページで同じ仕様になっているか ===')
+
+    // --- 更新ボタンのローディング表示 ---
+    check('BN ローディング表示の実装は sidebar.js に1つだけ',
+        (sb.match(/export function setReloadButtonLoading\(/g) || []).length === 1)
+    // 🔴 実装が1つでも、他所が直接 class を触っていれば意味が無い。そちらも見る。
+    const touchers = []
+    for (const f of await listSrcFiles()) {
+        const t = stripComments(readFileSync(f, 'utf8'))
+        if (/classList\.(add|remove|toggle)\(\s*'loading'/.test(t)) touchers.push(f.split(/[\\/]/).pop())
+    }
+    check('BN ローディングの class を直接触るのは sidebar.js だけ',
+        touchers.length === 1 && touchers[0] === 'sidebar.js', touchers.join(',') || 'なし')
+    check('BN ニコ生ページはその実装を使う', /setReloadButtonLoading\(/.test(lm))
+    check('BN kick.com ページはその実装を使う', /setReloadButtonLoading\(/.test(kpc))
+
+    // 🔴 消灯は finally に置くこと。途中で throw した時に**スピナーが点きっぱなし**になり、
+    //    多重防止のフラグも下りず、そのページでは更新が二度と通らなくなる。
+    const iFinally = kpc.indexOf('} finally {')
+    const iOff = kpc.indexOf('setReloadButtonLoading(false)')
+    check('BN kick.com のスピナー消灯は finally の中（例外で点きっぱなしにしない）',
+        iFinally >= 0 && iOff > iFinally, `finally ${iFinally} / 消灯 ${iOff}`)
+    check('BN kick.com は多重実行を防ぐ', /if \(isRefreshing\) return/.test(kpc))
+    check('BN 最低表示時間は両ページ共通の定数から取る',
+        /minLoadingDurationMs/.test(kpc) && /minLoadingDurationMs/.test(mn),
+        'ここが数値リテラルだと片方だけ変わる')
+
+    // --- 「自動で開く」の解釈 ---
+    check('BN 「自動で開く」の解釈は sidebar.js に1つだけ',
+        (sb.match(/export function shouldOpenSidebarAtStart\(/g) || []).length === 1)
+    for (const [name, t] of [['ニコ生', mn], ['kick.com', kpc]]) {
+        check(`BN ${name}ページは「自動で開く」の共有実装を使う`,
+            /shouldOpenSidebarAtStart\(/.test(t) && !/autoOpen == '1'/.test(t),
+            '自前で条件を書くと、片方だけ「ON」が効かない状態になる')
+    }
+
+    // --- kick.com 側にだけ無かった配線 ---
+    for (const [what, re, why] of [
+        ['境界線ドラッグで幅を変えられる', /addEventListener\('pointerdown'/, 'ニコ生の enableSidebarLine 相当'],
+        ['開くと矢印の向きが変わる', /sidebar_arrow_re/, 'ニコ生と同じクラスを使う'],
+        ['開くと境界線がリサイズカーソルになる', /col_resize/, '掴めることに気付けない'],
+        ['Esc で設定を閉じる', /'Escape'/, 'ニコ生ページと同じ'],
+        ['取得できない時に案内を出す', /api_error/, 'ニコ生ページと同じ場所に出す'],
+    ]) {
+        check(`BN kick.com ${what}`, re.test(kpc), why)
+    }
+
+    // --- 取得失敗を「0件」と混同していないか ---
+    // 🔴 これを混同すると、片方のAPIが一瞬落ちただけでそのサービスのカードが全部消え、
+    //    次の周期で戻る＝リストが点滅する。
+    check('BN kick.com はニコ生の取得失敗と0件を区別する',
+        /ok: false, programs: \[\]/.test(kpc) && /ok: true, programs:/.test(kpc),
+        '両方 [] を返すと「取れなかった」が「居なかった」になる')
+    check('BN kick.com は取得できなかったサービスの前回結果を据え置く',
+        /kickRes\.ok \? kickRes\.programs : lastKickPrograms/.test(kpc)
+        && /nicoRes\.ok \? nicoRes\.programs : lastNicoPrograms/.test(kpc))
+    // 🔴 取れなかった周期に空へ落とすと、Kick のカードが全部消えて次の周期で戻る＝点滅する。
+    //    2026-08-07 まで**ニコ生ページ側だけ**が空に落としていた（kick.com 側は据え置き）。
+    check('BN ニコ生ページも Kick の取得失敗で据え置く（点滅させない）',
+        /kickResult\.programs\s*:\s*\(this\._kickPrograms \|\| \[\]\)/.test(um),
+        '空に落とすと、一瞬の失敗のたびに Kick のカードが消えて戻る')
+    check('BN kick.com は据え置いた値で保存を上書きしない',
+        /if \(nicoRes\.ok && nicoPrograms\.length\) upsertProgramInfos/.test(kpc),
+        '同じ値で上書きすると差分が 0 になり、盛り上がりが実際より低く出る')
+
+    // --- document へ張るリスナーが積み上がらないか ---
+    // kick.com は SPA でサイドバーごと差し込み直す。root の中のリスナーは一緒に消えるが、
+    // document へ張ったものは残る。
+    const docListeners = (kpc.match(/document\.addEventListener\(/g) || []).length
+    check('BN kick.com が document へ張るリスナーには張り直しの歯止めがある',
+        docListeners === 0 || /escKeyWired/.test(kpc),
+        `document へ ${docListeners} 件。差し込み直しのたびに増えないこと`)
+}
+
+/**
+ * 「セレクタ { 宣言 }」に割る。kickPage.css は入れ子（@media 等）を使っていない前提。
+ * 使う側でルール数を確かめること（0件なら割れていない＝検査が空振りしている）。
+ */
+function cssRules(text) {
+    const src = text.replace(/\/\*[\s\S]*?\*\//g, '')
+    const out = []
+    const re = /([^{}]+)\{([^{}]*)\}/g
+    let m
+    while ((m = re.exec(src))) out.push({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] })
+    return out
+}
+
+/**
+ * BO. kick.com のサイドバーは**1枚の箱として動く**か。
+ *
+ * 中身（#sidebar）と境目ライン（#sidebar_line）を別々にアニメーションさせると、
+ * 開閉の 180ms のあいだにメインスレッドが詰まった時に**分離して見える**。
+ * `transform` はコンポジタで進み、`left` はメインスレッドでしか進まないため。
+ * 2026-08-07 まで実際にそうなっており、利用者の実機で「まれに分離する」として出た。
+ *
+ * 直し方は「動く要素を1つに減らす」。root だけを動かし、中身とラインはその箱に貼り付ける。
+ * ここで守るのは **kickPage.css の中でアニメーションする要素が root と body だけ**という一点。
+ */
+async function kickSidebarMovesAsOnePiece() {
+    const { readFileSync } = await import('fs')
+    const css = readFileSync(new URL('../src/styles/kickPage.css', import.meta.url), 'utf8')
+    const kpc = stripComments(readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8'))
+    console.log('=== BO kick.com のサイドバーが1枚で動くか ===')
+
+    const rules = cssRules(css)
+    // 🔴 空振り防止。割れていなければ以下の検査は全部「見つからないから合格」になる。
+    check('BO kickPage.css をルールに割れている', rules.length >= 10, `${rules.length} 件`)
+
+    // --- アニメーションする要素は root と body だけ ---
+    const animated = rules
+        .filter((r) => /transition\s*:/.test(r.body) && !/transition\s*:\s*none/.test(r.body))
+        .map((r) => r.sel)
+        .sort()
+    // 期待値は**べた書き**。実装から作ると、実装が変わった時に一緒に動いて何も検査しなくなる。
+    const want = ['#niconamasidebar-kick-root', 'body']
+    check('BO 開閉でアニメーションするのは root とページ本体だけ',
+        animated.length === want.length && animated.every((s, i) => s === want[i]),
+        `実際: ${animated.join(' / ') || 'なし'}`)
+
+    // --- 中身とラインを個別に動かしていないか ---
+    const perPart = rules.filter((r) => /#sidebar(_line)?\b/.test(r.sel))
+    check('BO 中身とラインを指すルールがある（空振りしていない）', perPart.length >= 3, `${perPart.length} 件`)
+    for (const r of perPart) {
+        check(`BO 個別に transform を持たない: ${r.sel}`,
+            !/(^|[;{\s])transform\s*:/.test(r.body),
+            'root と別に動くと、詰まった時に分離する')
+        check(`BO 個別に位置のアニメを持たない: ${r.sel}`,
+            !/transition\s*:/.test(r.body) || /transition\s*:\s*none/.test(r.body),
+            'left / transform のどちらで動かしても、root と足並みが揃わない')
+    }
+    check('BO 開いた時に中身やラインを個別に動かすルールが無い',
+        !rules.some((r) => /\.is-open/.test(r.sel) && /#sidebar/.test(r.sel)),
+        '.is-open で動かしてよいのは root だけ')
+
+    // --- 貼り付き方 ---
+    const rootRule = rules.find((r) => r.sel === '#niconamasidebar-kick-root')
+    check('BO root 自体が動く箱になっている',
+        !!rootRule && /transform\s*:\s*translateX/.test(rootRule.body) && /position\s*:\s*fixed/.test(rootRule.body))
+    check('BO 閉じている時にラインが切られない（root は overflow: visible）',
+        !!rootRule && /overflow\s*:\s*visible/.test(rootRule.body),
+        '切ると閉じた時にラインが消え、二度と開けなくなる')
+    const lineRule = rules.find((r) => r.sel === '#niconamasidebar-kick-root #sidebar_line')
+    check('BO ラインは root の右隣に貼り付く（left: 100%）',
+        !!lineRule && /left\s*:\s*100%/.test(lineRule.body) && /position\s*:\s*absolute/.test(lineRule.body),
+        'fixed のまま独立した座標を持つと、また分離する')
+
+    // --- ハンドルとページ本体の間の余白 ---
+    // ラインは [W, W+5]、その中の開閉ボタンは [W, W+20] に居る。W だけ寄せると被る。
+    // 閉じている時もハンドルは残る（[0,5] と [0,20]）ので、0 にすると同じく被る。
+    check('BO 余白の定数は constants.js に1つだけ',
+        (readFileSync(new URL('../src/config/constants.js', import.meta.url), 'utf8')
+            .match(/export const kickContentGap\s*=/g) || []).length === 1)
+    // 🔴 開いていても閉じていても余白を足すこと。`kickContentGap` が三項の**外**に無いと、
+    //    閉じた時に 0 になってハンドルがコンテンツに被る。
+    check('BO 閉じていてもハンドルのぶんを空ける',
+        /\(isOpen \? currentWidth\(\) : 0\) \+ kickContentGap/.test(kpc),
+        '余白を三項の中に入れると、閉じた時に 0 になって被りが戻る')
+    // 🔴 **書き方ではなく意図で縛ること。** 以前は `const want = isActive` という字面で
+    //    見ており、条件を1つ足した（重ねる設定のとき外す）だけで落ちた。
+    //    守りたいのは「**閉じただけでは外さない**」＝この条件が `isOpen` を見ないこと。
+    const wantCond = (kpc.match(/const want = ([^\n]*)/) || [])[1] || ""
+    check('BO ページの寄せを外すのは連携を切った時だけ（閉じただけでは外さない）',
+        wantCond.includes('isActive') && !wantCond.includes('isOpen'),
+        `条件: ${wantCond} / isOpen で分岐すると、閉じた瞬間にページが 100vw へ戻ってハンドルの下へ潜り込む`)
+
+    // 🔴 **CSS 側で寄せ幅を計算し直さないこと。** JS が body に当てた数値を変数1本で受け取る。
+    //    以前は CSS が `100vw - 幅 - 余白` と同じ計算をしており、開閉で式が変わった時点で
+    //    2箇所を手で揃える約束が保てなくなった。
+    // ⚠️ 「どこかに式があるか」では駄目。このルールは `width` と `max-width` の2つを書くので、
+    //    片方だけ直っていても通ってしまう（実際に一度そうなった）。**両方を個別に見る。**
+    const remap = rules.find((r) => /w-xvw/.test(r.sel))
+    const EXPECT_W = 'calc(100vw - var(--nns-kick-reserved))'
+    const declW = remap && (remap.body.match(/(?:^|;)\s*width\s*:\s*([^;!]+)/) || [])[1]
+    const declMax = remap && (remap.body.match(/max-width\s*:\s*([^;!]+)/) || [])[1]
+    check('BO 読み替えは JS が出した幅を引くだけ（width / max-width とも）',
+        !!declW && !!declMax && declW.trim() === EXPECT_W && declMax.trim() === EXPECT_W,
+        `width: ${declW} / max-width: ${declMax}。CSS で計算し直すと寄せ幅と食い違う`)
+    check('BO その幅は JS が書き込んでいる',
+        /setHostVar\('--nns-kick-reserved', reservedWidth\(\) \+ 'px'\)/.test(kpc),
+        'CSS が読む変数を誰も書かないと、読み替えが 0 のまま効かない')
+
+    // 🔴 読み替えと保護は「有効な間ずっと」当てること。開いている間だけだと、
+    //    閉じた瞬間に中身が 100vw へ戻ってハンドルの下へ潜り込む。
+    const openGated = rules.filter((r) => /nns-kick-open\b/.test(r.sel)).map((r) => r.sel)
+    check('BO 読み替え・保護は開閉ではなく「連携が有効か」で当てる',
+        openGated.length === 0,
+        `nns-kick-open で当てているルール: ${openGated.join(' / ') || 'なし'}`)
+    check('BO その class を JS が付け外ししている',
+        /classList\.toggle\('nns-kick-active', isActive\)/.test(kpc)
+        && /classList\.remove\('nns-kick-active'\)/.test(kpc),
+        '付け忘れると読み替えが一切効かず、Kick の中身がサイドバーの下へ潜り込む')
+
+    // --- テーマ: 境目ラインが背景に溶けていないか ---
+    // 🔴 `--sb-line` はラインと開閉ボタンの両方の背景色。`--sb-bg` と同じ値にすると
+    //    **開閉ボタンが見えなくなる**（ダークが実際にそうなっていた・2026-08-07）。
+    const mainRules = cssRules(readFileSync(new URL('../src/styles/main.css', import.meta.url), 'utf8'))
+    const themes = mainRules.filter((r) => /--sb-line\s*:/.test(r.body) && /--sb-bg\s*:/.test(r.body))
+    check('BO テーマ定義を2つ（ダーク／ライト）見つけられる', themes.length === 2, `${themes.length} 件`)
+    for (const t of themes) {
+        const bg = (t.body.match(/--sb-bg\s*:\s*([^;]+);/) || [])[1]
+        const line = (t.body.match(/--sb-line\s*:\s*([^;]+);/) || [])[1]
+        check(`BO 境目ラインが背景に溶けていない: ${t.sel.split(',')[0]}`,
+            !!bg && !!line && bg.trim().toLowerCase() !== line.trim().toLowerCase(),
+            `--sb-bg ${bg} / --sb-line ${line}。同じだと開閉ボタンが見えなくなる`)
+    }
+
+    // --- ドラッグは掴んだポインタを取りこぼさないか ---
+    // ウィンドウの外で離すと mouseup が来ない。capture を取れば pointerup は必ず届く。
+    check('BO 幅のドラッグは pointer capture を取る', /setPointerCapture\(/.test(kpc))
+    // ⚠️ 単に `lostpointercapture` の語があるかでは駄目。`removeEventListener` の側にも
+    //    同じ語が出るので、配線を消しても通ってしまう（実際に一度そうなった）。
+    check('BO 掴み終わりを lostpointercapture でも受ける',
+        /addEventListener\('lostpointercapture'/.test(kpc),
+        'pointercancel（OSにポインタを取られた）もここに集まる')
+    check('BO ドラッグに mousemove / mouseup を使っていない',
+        !/addEventListener\('mouse(move|up)'/.test(kpc),
+        '枠外で離すと mouseup が来ず、幅がカーソルに追従し続ける')
+    check('BO 取りこぼした「ドラッグ中」の印を定期の突き合わせが剥がす',
+        /!isDraggingLine\) document\.documentElement\.classList\.remove\('nns-kick-dragging'\)/.test(kpc),
+        '付いたままだと開閉のアニメが死んだままになる')
+}
+
+/**
+ * BP. 設定パネルの ON/OFF の並びが揃っているか。
+ *
+ * オートオープンだけ `ON / OFF` で、他（自動移動・動くサムネ）は `OFF / ON` だった。
+ * 並びが揃っていないと、隣の設定と同じ位置を押したつもりで逆の値を選んでしまう。
+ *
+ * 🔴 **値ではなく表示順だけを見る。** id と value の対応を動かすと既存利用者の保存値の
+ *    意味が変わるので、そこは触らせない前提。この検査は「ラベルの出る順」だけを見る。
+ */
+async function settingsSegmentOrder() {
+    const { readFileSync } = await import('fs')
+    const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    console.log('=== BP 設定パネルの ON/OFF の並び ===')
+
+    // ラジオ群を name ごとに集める。`<input ...name="X"...><label ...>ラベル</label>` の並び順がそのまま表示順。
+    const pairs = [...sb.matchAll(/<input type="radio" id="([^"]+)" name="([^"]+)" value="([^"]+)"><label for="\1">([^<]+)<\/label>/g)]
+    // 🔴 空振り防止。0件なら以下は「見つからないから合格」になる。
+    check('BP 設定のラジオを拾えている', pairs.length >= 10, `${pairs.length} 件`)
+
+    const byName = new Map()
+    for (const [, , name, , label] of pairs) {
+        if (!byName.has(name)) byName.set(name, [])
+        byName.get(name).push(label.trim())
+    }
+
+    // ON と OFF の両方を持つ設定だけが対象。3つ目以降（「記憶」など）は問わない。
+    const targets = [...byName].filter(([, labels]) => labels.includes('ON') && labels.includes('OFF'))
+    check('BP ON/OFF を持つ設定が2つ以上ある（空振りしていない）', targets.length >= 2,
+        targets.map(([n]) => n).join(',') || 'なし')
+    for (const [name, labels] of targets) {
+        check(`BP OFF が ON より先に出る: ${name}`,
+            labels.indexOf('OFF') < labels.indexOf('ON'),
+            `実際の並び: ${labels.join(' / ')}`)
+    }
+}
+
+/**
+ * BQ. 自動更新「OFF」が本当に止まるか / 廃止した選択肢の移行があるか。
+ *
+ * 2026-08-07 に「180秒」を廃止して「OFF」を足した。無言で壊れる形が3つある。
+ *   1. `Number('off')` = NaN → `|| 120` で受けると **OFF が 120秒として動く**（止まらない）
+ *   2. NaN をそのまま `setTimeout` へ渡すと **0ms 扱い**で API を叩き続ける
+ *   3. 保存値 '180' に対応するラジオが無いと、その利用者は**設定を一切保存できなくなる**
+ */
+async function autoUpdateOff() {
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const kpc = stripComments(rd('kickPage.js'))
+    const mn = stripComments(rd('main.js'))
+    const um = stripComments(rd('managers/UpdateManager.js'))
+    console.log('=== BQ 自動更新 OFF ===')
+
+    // --- 実際に動かして確かめる（正規表現より強い） ---
+    const { autoUpdateIntervalMs } = await import('../src/render/sidebar.js')
+    // 🔴 期待値はべた書き。実装側の定数から作ると、定数を何にしても通る検査になる。
+    check('BQ OFF は null を返す（＝タイマーを張らない）',
+        autoUpdateIntervalMs({ updateProgramsInterval: 'off' }) === null)
+    check('BQ 60秒は 60000ms', autoUpdateIntervalMs({ updateProgramsInterval: '60' }) === 60000)
+    check('BQ 壊れた保存値でも NaN を返さない',
+        Number.isFinite(autoUpdateIntervalMs({ updateProgramsInterval: 'ほげ' })),
+        'NaN を setTimeout へ渡すと 0ms 扱いになり、API を叩き続ける')
+    check('BQ 未設定でも NaN を返さない', Number.isFinite(autoUpdateIntervalMs({})))
+    check('BQ 0 や負値を間隔として採用しない',
+        autoUpdateIntervalMs({ updateProgramsInterval: '0' }) > 0
+        && autoUpdateIntervalMs({ updateProgramsInterval: '-5' }) > 0)
+
+    // --- 判定は1箇所。各所で Number() し直さない ---
+    check('BQ 自動更新の解釈は sidebar.js に1つだけ',
+        (sb.match(/export function autoUpdateIntervalMs\(/g) || []).length === 1)
+    const rawReaders = []
+    for (const f of await listSrcFiles()) {
+        const t = stripComments(readFileSync(f, 'utf8'))
+        if (/Number\(\s*[\w.]*\.?updateProgramsInterval/.test(t)) rawReaders.push(f.split(/[\\/]/).pop())
+    }
+    check('BQ 保存値を直接 Number() している場所が無い', rawReaders.length === 0,
+        `${rawReaders.join(',') || 'なし'}。'off' が NaN になり、無言で 120秒 か 0ms に化ける`)
+    check('BQ ニコ生ページは共有実装を使う', /autoUpdateIntervalMs\(/.test(um))
+    check('BQ kick.com ページは共有実装を使う', /autoUpdateIntervalMs\(/.test(kpc))
+    // 張らない判定は1箇所に集めること（開始・位相リセット・張り直しが全部そこを通る）
+    check('BQ ニコ生ページは目覚ましを張る直前で弾く',
+        /_scheduleSidebarTick\(delayMs\) \{[\s\S]*?autoUpdateIntervalMs\(this\.options\) === null\) return;/.test(um),
+        '上流それぞれで弾くと、経路が増えた時に漏れる')
+    check('BQ kick.com ページはリスト更新だけ止める（サムネは止めない）',
+        /if \(listMs !== null\) \{/.test(kpc) && /thumbTimer = setInterval/.test(kpc),
+        'サムネまで止めるとヘルプの記述（サムネはこの設定と無関係）と食い違う')
+
+    // --- 選択肢と保存値の整合 ---
+    const radioVals = [...sb.matchAll(/name="updateProgramsInterval" value="([^"]+)"/g)].map((m) => m[1])
+    check('BQ 自動更新の選択肢を拾えている', radioVals.length >= 3, radioVals.join(' / '))
+    check('BQ OFF の選択肢がある', radioVals.includes('off'))
+
+    // 🔴 廃止した値には必ず寄せ先を用意すること。無いと設定画面のラジオが無選択になり、
+    //    saveOptions が早期 return して**何も保存できなくなる**。
+    const st = stripComments(rd('services/storage.js'))
+    const mig = [...st.matchAll(/updateProgramsInterval\) === '([^']+)'\) options\.updateProgramsInterval = '([^']+)'/g)]
+    check('BQ 廃止した選択肢の移行が書いてある', mig.length >= 1, `${mig.length} 件`)
+    for (const [, from, to] of mig) {
+        check(`BQ 移行元 '${from}' は選択肢から消えている`, !radioVals.includes(from),
+            '残っているなら移行は不要＝書き間違い')
+        check(`BQ 移行先 '${to}' は選択肢に実在する`, radioVals.includes(to),
+            '実在しない値へ寄せると、無選択のまま何も保存できない')
+    }
+    check('BQ 移行は保存値を読む唯一の入口（getOptions）を通る',
+        /const merged = migrateOptions\(/.test(st),
+        'ここを通さないと、片方のページだけ古い値のまま動く')
+
+    // 既定値そのものが選択肢に無い、という壊れ方も同じ結果になる
+    for (const [name, txt] of [['ニコ生', mn], ['kick.com', kpc]]) {
+        const d = (txt.match(/updateProgramsInterval:\s*'([^']+)'/) || [])[1]
+        check(`BQ ${name}ページの既定値が選択肢に実在する`, radioVals.includes(d), `既定 '${d}'`)
+    }
+}
+
+/**
+ * BR. サービスタブ（統合 / ニコ生 / Kick）。
+ *
+ * タブの定義は3箇所に散る: JS の一覧・HTML のボタン・CSS の出し分け。
+ * ずれると**カードが1枚も見えない**か**絞ったはずのカードが残る**という形で出る。
+ * 「統合」を足した時（2026-08-07）に実際に危なかった点を機械で守る。
+ */
+async function serviceTabs() {
+    const { readFileSync } = await import('fs')
+    const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    const css = readFileSync(new URL('../src/styles/main.css', import.meta.url), 'utf8')
+    console.log('=== BR サービスタブ ===')
+
+    // --- 定義が3箇所で一致しているか ---
+    const listed = (stripComments(sb).match(/const SERVICE_TABS = \[([^\]]+)\]/) || [])[1]
+    const inJs = listed ? listed.split(',').map((s) => s.trim().replace(/'/g, '')) : []
+    const inHtml = [...sb.matchAll(/class="service_tab[^"]*" data-service-tab="([^"]+)"/g)].map((m) => m[1])
+    check('BR タブのボタンを拾えている', inHtml.length >= 3, inHtml.join(' / ') || 'なし')
+    // 期待値はべた書き。実装から作ると、どちらを変えても通る検査になる。
+    check('BR 並びは 統合 → ニコ生 → Kick',
+        inHtml.length === 3 && inHtml[0] === 'mixed' && inHtml[1] === 'nicolive' && inHtml[2] === 'kick',
+        `実際: ${inHtml.join(' / ')}`)
+    check('BR JS の一覧と HTML のボタンが完全一致',
+        inJs.length === inHtml.length && inJs.every((v, i) => v === inHtml[i]),
+        `JS: ${inJs.join(',')} / HTML: ${inHtml.join(',')}。ずれると知らない値として既定へ落ちる`)
+
+    // --- 「統合」は何も隠さない ---
+    // 🔴 出し分けの CSS に mixed を書くと、統合タブなのにカードが消える。
+    const rules = cssRules(css)
+    const hideRules = rules.filter((r) => /data-service-tab=/.test(r.sel) && /display\s*:\s*none/.test(r.body))
+    check('BR 出し分けの CSS を拾えている', hideRules.length >= 1, `${hideRules.length} 件`)
+    for (const r of hideRules) {
+        check('BR 統合タブではカードを隠さない',
+            !/data-service-tab="mixed"/.test(r.sel),
+            `${r.sel}。統合は全件出るのが正しい`)
+    }
+    // 🔴 バッジは統合タブでだけ出す。片方だけのタブはタブ自体がラベルなので要らないが、
+    //    統合は両方混ざるので、消すとどちらのカードか分からなくなる。
+    const badgeHide = rules.find((r) => /data-service-tab/.test(r.sel) && /service_badge/.test(r.sel))
+    check('BR バッジの出し分けルールがある', !!badgeHide, badgeHide ? badgeHide.sel : 'なし')
+    check('BR バッジ隠しはタブを名指ししている（一括指定にしない）',
+        !!badgeHide && !/\[data-service-tab\]\s/.test(badgeHide.sel)
+        && /data-service-tab="nicolive"/.test(badgeHide.sel)
+        && /data-service-tab="kick"/.test(badgeHide.sel),
+        '[data-service-tab] の一括指定だと統合タブでもバッジが消える')
+
+    // --- 件数 ---
+    check('BR 統合タブの件数は全件を数える',
+        /if \(active === 'mixed'\) return container\.children\.length/.test(stripComments(sb)),
+        '絞り込みの式に混ぜると Kick のぶんだけ件数が足りなくなる')
+    // 知らない値をそのまま採用すると、どのタブとも一致しない属性が付いて全部消える
+    check('BR 知らないタブ名は採用しない',
+        /SERVICE_TABS\.includes\(activeTab\)/.test(stripComments(sb)),
+        '保存値が壊れていた時にカードが1枚も見えなくなる')
+
+    // --- 余白（見出し→タブ→リスト） ---
+    // 🔴 margin で組むと兄弟間で相殺し、足し算にならない。padding で持つこと。
+    const body = rules.find((r) => r.sel === '.sidebar_body')
+    const list = rules.find((r) => r.sel === '#liveProgramContainer')
+    const header = rules.find((r) => r.sel === '.sidebar_header')
+    // ⚠️ 単位なしの `0` も拾うこと。`px` を必須にすると `margin-bottom: 0` を見落として
+    //    「見つからない＝null」になり、検査が意図と逆の結果を出す（実際に一度そうなった）。
+    const px = (r, prop) => {
+        const m = r && r.body.match(new RegExp(prop + '\\s*:\\s*(-?\\d+)(?:px)?\\s*;'))
+        return m ? Number(m[1]) : null
+    }
+    check('BR 見出しは下余白を持たない（相殺を避ける）', px(header, 'margin-bottom') === 0,
+        `margin-bottom: ${px(header, 'margin-bottom')}`)
+    const above = px(body, 'padding-top')
+    const belowList = px(list, 'padding-top')
+    check('BR 余白を padding で持っている', above !== null && belowList !== null,
+        `.sidebar_body ${above} / #liveProgramContainer ${belowList}`)
+    // タブが無い時の見た目は従来どおり 20px。ここが変わるとタブを使わない利用者にも影響する。
+    check('BR タブ無しの時の余白は従来どおり 20px', above + belowList === 20,
+        `${above} + ${belowList} = ${above + belowList}`)
+    // margin ショートハンドの3つ目（下）。単位なしの 0 も混じるので、値を分解して取る。
+    const tabs = rules.find((r) => r.sel === '.service_tabs')
+    const shorthand = tabs && (tabs.body.match(/(?:^|;)\s*margin\s*:\s*([^;]+)/) || [])[1]
+    const parts = shorthand ? shorthand.trim().split(/\s+/) : []
+    const tabBottom = parts.length >= 3 ? Number(parts[2].replace('px', '')) : null
+    check('BR タブの下余白を読めている', Number.isFinite(tabBottom), `margin: ${shorthand || 'なし'}`)
+    check('BR タブとリストの間は見出しとの間より広い',
+        Number.isFinite(tabBottom) && tabBottom + belowList > above,
+        `タブ上 ${above}px / タブ下 ${tabBottom + belowList}px`)
+}
+
+/**
+ * BS. 番組カードの大きさ（小/中/大）。
+ *
+ * カード幅は「サイドバー幅 ÷ 列数」しか取れない。設定は列の増え方（`columnFactor`）と
+ * 中身の倍率（`contentScale`）の2つを動かす。
+ *
+ * 🔴 **既定の「中」は従来と完全に同じでなければならない。** 全利用者の既定値なので、
+ *    ここがずれると誰も設定を触っていないのにレイアウトが変わる。
+ */
+async function cardSize() {
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const css = rd('styles/main.css')
+    const mn = stripComments(rd('main.js'))
+    const kpc = stripComments(rd('kickPage.js'))
+    console.log('=== BS カードの大きさ ===')
+
+    const { columnsForWidth } = await import('../src/ui/layout.js')
+
+    // --- 「中」＝従来の式と一致するか（**期待値はべた書き**） ---
+    // 旧実装: しきい値 [300,500,700,900,1100,1300,1500] を超えるたび +1列。
+    const widths = [200, 300, 301, 500, 501, 900, 901, 1600]
+    const expected = [1, 1, 2, 2, 3, 4, 5, 8]
+    const got = widths.map((w) => columnsForWidth(w, 'medium'))
+    check('BS 「中」は従来の列数と完全に一致',
+        got.every((c, i) => c === expected[i]),
+        `幅 ${widths.join('/')} → 期待 ${expected.join('/')} / 実際 ${got.join('/')}`)
+
+    // --- 小・大が意図した向きに効くか ---
+    check('BS 「小」は列が増える（＝1枚が狭い）',
+        columnsForWidth(360, 'small') === 3 && columnsForWidth(600, 'small') === 4,
+        `360→${columnsForWidth(360, 'small')}列 / 600→${columnsForWidth(600, 'small')}列`)
+    check('BS 「大」は列が減る（＝1枚が広い）',
+        columnsForWidth(360, 'large') === 1 && columnsForWidth(600, 'large') === 2,
+        `360→${columnsForWidth(360, 'large')}列 / 600→${columnsForWidth(600, 'large')}列`)
+    for (const w of [180, 360, 600, 1200]) {
+        check(`BS 大小の順序が崩れない（幅${w}）`,
+            columnsForWidth(w, 'small') >= columnsForWidth(w, 'medium')
+            && columnsForWidth(w, 'medium') >= columnsForWidth(w, 'large'),
+            `小${columnsForWidth(w, 'small')} / 中${columnsForWidth(w, 'medium')} / 大${columnsForWidth(w, 'large')}`)
+    }
+    // 壊れた保存値・異常な幅で列数が 0 や NaN にならないこと（0 だと幅が Infinity% になる）
+    check('BS 知らない大きさは既定に落ちる',
+        columnsForWidth(360, 'ほげ') === columnsForWidth(360, 'medium'))
+    for (const [label, w] of [['NaN', NaN], ['0', 0], ['負', -100], ['未指定', undefined]]) {
+        check(`BS 幅が${label}でも列数は1以上`, columnsForWidth(w, 'medium') >= 1,
+            `${columnsForWidth(w, 'medium')} 列。0 だと幅が Infinity% になる`)
+    }
+
+    // --- 設定の値と定義がそろっているか ---
+    const { cardSizes, defaultCardSize } = await import('../src/config/constants.js')
+    const radioVals = [...sb.matchAll(/name="cardSize" value="([^"]+)"/g)].map((m) => m[1])
+    check('BS カードの大きさの選択肢を拾えている', radioVals.length === 3, radioVals.join(' / '))
+    check('BS 選択肢と定義（cardSizes）のキーが一致',
+        radioVals.length === Object.keys(cardSizes).length
+        && radioVals.every((v) => !!cardSizes[v]),
+        `選択肢 ${radioVals.join(',')} / 定義 ${Object.keys(cardSizes).join(',')}`)
+    check('BS 既定は「中」で、倍率は 1/1（＝従来のまま）',
+        defaultCardSize === 'medium'
+        && cardSizes.medium.columnFactor === 1 && cardSizes.medium.contentScale === 1,
+        `既定 ${defaultCardSize} / ${JSON.stringify(cardSizes.medium)}`)
+    for (const [name, txt] of [['ニコ生', mn], ['kick.com', kpc]]) {
+        const d = (txt.match(/cardSize:\s*'([^']+)'/) || [])[1]
+        check(`BS ${name}ページの既定値が選択肢に実在する`, radioVals.includes(d), `既定 '${d}'`)
+    }
+
+    // --- 両ページが反映しているか ---
+    // ⚠️ setProgramContainerWidth の呼び出しは10箇所ある。引数ではなく setCardSize で
+    //    流し込む形なので、**呼び忘れるとそのページだけ既定（中）のまま**になる。
+    // ⚠️ 「setCardSize があるか」では駄目。起動時と設定変更時の**2箇所**に要るので、
+    //    片方を消しても残りが引っかかって通ってしまう（実際に一度そうなった）。
+    //    数と、設定変更ブロックの中身の両方を見る。
+    for (const [name, txt] of [['ニコ生', mn], ['kick.com', kpc]]) {
+        const n = (txt.match(/setCardSize\(options\.cardSize\)/g) || []).length
+        check(`BS ${name}ページは起動時と設定変更時の2箇所で反映する`, n >= 2,
+            `${n} 箇所。起動時が抜けると初回だけ既定、変更時が抜けると次の取得まで効かない`)
+        check(`BS ${name}ページは設定変更のブロック内で当て直す`,
+            /changes\.cardSize[\s\S]{0,200}?setCardSize\(options\.cardSize\)/.test(txt),
+            '受けないと、変えても次の取得までカードの大きさが変わらない')
+    }
+    check('BS 設定パネルが cardSize を保存する',
+        /options\.cardSize = cardSizeElement\.value/.test(stripComments(rd('handlers/optionsHandler.js')))
+        && /updateCheckedState\('cardSize'/.test(rd('handlers/optionsHandler.js')),
+        '保存と復元の両方が要る。片方だけだと開くたびに戻る')
+    // 後から足した設定なので、必須ガードに入れて保存全体を止めないこと
+    check('BS cardSize は保存の必須ガードに入っていない',
+        !/!cardSizeElement/.test(stripComments(rd('handlers/optionsHandler.js'))),
+        '古い DOM で無選択だと、設定が何ひとつ保存できなくなる')
+
+    // --- 中身の拡縮 ---
+    const rules = cssRules(css)
+    const listRule = rules.find((r) => r.sel === '#liveProgramContainer')
+    check('BS 倍率の CSS 変数に既定 1 がある',
+        !!listRule && /--nns-card-scale:\s*1\s*;/.test(listRule.body),
+        'JS が入れなかった時に従来どおりにならない')
+    const scaled = rules.filter((r) => /var\(--nns-card-scale\)/.test(r.body)).map((r) => r.sel)
+    check('BS 中身の拡縮が効いている箇所がある', scaled.length >= 3, scaled.join(' / ') || 'なし')
+    // 🔴 アイコンは枠(a)と画像(img)の両方。片方だけだと枠から画像がはみ出す。
+    check('BS アイコンは枠と画像の両方を拡縮している',
+        scaled.includes('.program_container .provider a')
+        && scaled.includes('.program_container .provider img'),
+        `実際: ${scaled.join(' / ')}`)
+}
+
+/**
+ * BT. 自動移動の移動先選び（サービスをまたぐ）。
+ *
+ * 2026-08-07 まで `/watch/(lv\d+)` に一致するリンクだけを見ており、**Kick のカードは
+ * 黙って候補から外れていた**。またぐようにしたので、規則を機械で縛る。
+ *   1. 今のタブで見えているカードから選ぶ
+ *   2. DOM 順の先頭から
+ *   3. 今いる放送と同じものは飛ばす
+ *   4. **今いる放送が分からない時は選ばない**（一覧ページや VOD で飛ばされないため）
+ */
+async function autoNextTarget() {
+    const { readFileSync } = await import('fs')
+    const sb = readFileSync(new URL('../src/render/sidebar.js', import.meta.url), 'utf8')
+    const anm = stripComments(readFileSync(new URL('../src/managers/AutoNextManager.js', import.meta.url), 'utf8'))
+    const css = readFileSync(new URL('../src/styles/main.css', import.meta.url), 'utf8')
+    console.log('=== BT 自動移動の移動先選び ===')
+
+    const { watchTargetIdOf, pickAutoNextTarget, isCardVisibleInTab } = await import('../src/render/sidebar.js')
+
+    // --- URL から放送の識別子（期待値はべた書き） ---
+    const table = [
+        ['https://live.nicovideo.jp/watch/lv346', 'nico:lv346'],
+        ['https://live.nicovideo.jp/follow', ''],
+        ['https://kick.com/muramako', 'kick:muramako'],
+        ['https://kick.com/MuraMako', 'kick:muramako'],   // 大小を無視して同一視する
+        ['https://kick.com/muramako/', 'kick:muramako'],
+        ['https://kick.com/browse', ''],                  // 予約パスはチャンネルではない
+        ['https://kick.com/video/abc', ''],
+        ['https://kick.com/muramako/clips', ''],
+        ['https://example.com/x', ''],
+        ['', ''],
+    ]
+    for (const [url, want] of table) {
+        check(`BT 識別子: ${url || '(空)'} → ${want || '(判定不能)'}`,
+            watchTargetIdOf(url) === want, `実際: ${JSON.stringify(watchTargetIdOf(url))}`)
+    }
+
+    // --- 移動先選び（作り物の DOM で実際に動かす） ---
+    const card = (service, href) => ({
+        getAttribute: (k) => (k === 'data-service' ? service : null),
+        querySelector: (q) => (q === '.program_thumbnail a' ? { href } : null),
+    })
+    const box = (tab, cards) => ({ getAttribute: (k) => (k === 'data-service-tab' ? tab : null), children: cards })
+    const cards = [
+        card('nicolive', 'https://live.nicovideo.jp/watch/lv1'),
+        card('kick', 'https://kick.com/aaa'),
+        card('nicolive', 'https://live.nicovideo.jp/watch/lv2'),
+    ]
+
+    // 今いる番組は飛ばして、次の候補（＝Kick）へ。**ここが従来は動かなかった。**
+    let r = pickAutoNextTarget(box(null, cards), 'https://live.nicovideo.jp/watch/lv1')
+    check('BT ニコ生から Kick のチャンネルへ移動できる', r.id === 'kick:aaa', `選んだ先: ${r.id || 'なし'}`)
+    r = pickAutoNextTarget(box(null, cards), 'https://kick.com/aaa')
+    check('BT Kick からニコ生の番組へ移動できる', r.id === 'nico:lv1', `選んだ先: ${r.id || 'なし'}`)
+
+    // タブで分けている時は見えているものだけ
+    r = pickAutoNextTarget(box('nicolive', cards), 'https://live.nicovideo.jp/watch/lv1')
+    check('BT ニコ生タブでは Kick を飛ばす', r.id === 'nico:lv2', `選んだ先: ${r.id || 'なし'}`)
+    r = pickAutoNextTarget(box('kick', cards), 'https://kick.com/aaa')
+    check('BT Kick タブでは Kick の中から選ぶ（他が居なければ選ばない）',
+        r.id === '', `選んだ先: ${r.id || 'なし'}`)
+    r = pickAutoNextTarget(box('mixed', cards), 'https://kick.com/aaa')
+    check('BT 統合タブでは全部が候補', r.id === 'nico:lv1' && r.candidates.length === 3,
+        `選んだ先: ${r.id} / 候補 ${r.candidates.length}件`)
+
+    // 🔴 今いる放送が分からない時は動かさない
+    for (const [label, url] of [['一覧ページ', 'https://live.nicovideo.jp/follow'], ['Kick の VOD', 'https://kick.com/video/x'], ['空', '']]) {
+        const rr = pickAutoNextTarget(box(null, cards), url)
+        check(`BT 今いる放送が分からない時は選ばない（${label}）`, rr.link === null && rr.id === '',
+            `選んだ先: ${rr.id || 'なし'}。分からない時に動くと一覧ページで飛ばされる`)
+    }
+    // カードが自分1枚だけなら移動先なし（同じ放送へ飛び直さない）
+    r = pickAutoNextTarget(box(null, [cards[0]]), 'https://live.nicovideo.jp/watch/lv1')
+    check('BT 自分しか居なければ移動しない', r.link === null)
+
+    // --- タブの見え方の規則が CSS と JS で1つになっているか ---
+    check('BT 見え方の判定は sidebar.js に1つだけ',
+        (sb.match(/export function isCardVisibleInTab\(/g) || []).length === 1)
+    check('BT 件数もその判定を通す（規則を2つ持たない）',
+        /function countVisibleByTab[\s\S]{0,400}?isCardVisibleInTab\(/.test(stripComments(sb)),
+        '別々に書くと、見えていないカードへ自動移動する形で食い違いが出る')
+    // CSS が隠す組み合わせと、JS が false を返す組み合わせが一致するか
+    // 🔴 CSS の「隠す組み合わせ」を**べた書きの期待値**と突き合わせる。
+    //    CSS を足し引きしたらここが落ちるので、JS の判定も直したか必ず考えることになる。
+    const hideSel = cssRules(css)
+        .filter((r) => /data-service-tab=/.test(r.sel) && /program_container/.test(r.sel))
+        .map((r) => r.sel.replace(/\s+/g, ' ').trim())
+    check('BT カードを隠す CSS を拾えている', hideSel.length === 1, hideSel.join(' || ') || 'なし')
+    check('BT 隠す組み合わせは「ニコ生タブ×Kick」と「Kickタブ×ニコ生」の2つだけ',
+        hideSel[0] === '#liveProgramContainer[data-service-tab="nicolive"] .program_container[data-service="kick"], '
+        + '#liveProgramContainer[data-service-tab="kick"] .program_container:not([data-service="kick"])',
+        `実際: ${hideSel[0] || 'なし'}。増減したら isCardVisibleInTab も直すこと`)
+    for (const [tab, svc, want] of [
+        ['nicolive', 'kick', false], ['nicolive', 'nicolive', true],
+        ['kick', 'nicolive', false], ['kick', 'kick', true],
+        ['mixed', 'kick', true], ['mixed', 'nicolive', true],
+        [null, 'kick', true],
+    ]) {
+        check(`BT 見え方: タブ${tab || '(なし)'} × ${svc} → ${want ? '見える' : '隠れる'}`,
+            isCardVisibleInTab(box(tab, []), card(svc, '')) === want)
+    }
+
+    // --- 呼び出し側が自前で選び直していないか ---
+    check('BT AutoNextManager は共有の選び方を使う', /pickAutoNextTarget\(/.test(anm))
+    check('BT AutoNextManager が lv 決め打ちの判定を持たない',
+        !/watch\\\/\(lv/.test(anm) && !/\/watch\/\(lv/.test(anm),
+        'ここに書き戻すと Kick のカードがまた黙って候補から外れる')
+}
+
+/**
+ * BU. kick.com の自動移動（終了検知）。
+ *
+ * ニコ生側が事故を経て辿り着いた規則を、Kick でも機械で守る。
+ *   ・不在から終了を導かない（本人に聞く）
+ *   ・答えが得られなければ動かない
+ *   ・自分で開いたページを奪わない
+ */
+async function sidebarPlacementGroup() {
+    console.log('=== CE サイドバーの置き方（寄せる／重ねる） ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const stripCss = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ')
+    const mainJs = stripComments(rd('main.js'))
+    const kickJs = stripComments(rd('kickPage.js'))
+    const ctrl = stripComments(rd('ui/sidebarControl.js'))
+    const shell = rd('render/sidebar.js')
+    const optH = stripComments(rd('handlers/optionsHandler.js'))
+    const mainCss = stripCss(rd('styles/main.css'))
+    const kickCss = stripCss(rd('styles/kickPage.css'))
+
+    // --- ① 判定は1箇所（両ページで写し漏れない） ---
+    const { normalizeSidebarPlacement, isOverlayPlacement, applySidebarPlacement, OVERLAY_CLASS } =
+        await import('../src/ui/placement.js')
+    check('CE 既定は「寄せる」（今までの動きを変えない）', normalizeSidebarPlacement(undefined) === 'push')
+    check('CE 🔴 知らない値は「寄せる」に倒す（画面を覆い隠さない）',
+        normalizeSidebarPlacement('zzz') === 'push' && normalizeSidebarPlacement(null) === 'push'
+        && normalizeSidebarPlacement('') === 'push')
+    check('CE overlay は overlay', isOverlayPlacement('overlay') === true)
+    check('CE push は overlay ではない', isOverlayPlacement('push') === false)
+    check('CE 🔴 印を付けるのは <html>（kick のサイドバーは body の外に居る）',
+        /document\.documentElement\.classList\.toggle/.test(stripComments(rd('ui/placement.js')))
+        && !/document\.body\.classList\.toggle\(OVERLAY_CLASS/.test(rd('ui/placement.js')))
+
+    // 🔴 写し漏れ対策（doc/09 項目BN と同じ縛り）
+    check('CE 🔴 ニコ生ページが共有の判定を使う', /applySidebarPlacement\(/.test(mainJs))
+    check('CE 🔴 kick.com ページが共有の判定を使う', /applySidebarPlacement\(/.test(kickJs))
+    check('CE 両ページに既定値がある',
+        /sidebarPlacement:\s*'push'/.test(mainJs) && /sidebarPlacement:\s*'push'/.test(kickJs))
+    check('CE 両ページが設定変更に反応する',
+        /changes\.sidebarPlacement/.test(mainJs) && /changes\.sidebarPlacement/.test(kickJs))
+    check('CE 🔴 印だけ付けて終わりにしない（寄せ幅を当て直す）',
+        /changes\.sidebarPlacement[\s\S]{0,300}setRootWidth\(\)/.test(mainJs)
+        && /changes\.sidebarPlacement[\s\S]{0,300}applyHostStyles\(\)/.test(kickJs))
+
+    // --- ② 設定 UI ---
+    check('CE 設定に「サイドバーの置き方」がある', /name="sidebarPlacement"/.test(shell))
+    check('CE 選択肢は push / overlay の2つ',
+        /value="push"/.test(shell) && /value="overlay"/.test(shell)
+        && (shell.match(/name="sidebarPlacement"/g) || []).length === 2)
+    check('CE 保存する', /input\[name="sidebarPlacement"\]:checked/.test(optH)
+        && /options\.sidebarPlacement = sidebarPlacementElement\.value/.test(optH))
+    check('CE 開いた時に選択状態を復元する', /updateCheckedState\('sidebarPlacement'/.test(optH))
+
+    // --- ③ kick: 寄せ幅 0 で全部止まる ---
+    check('CE 🔴 kick は寄せ幅を 0 にするだけ（置き方ごとに分岐を増やさない）',
+        /function reservedWidth\(\)[\s\S]{0,400}isOverlayPlacement\(options\.sidebarPlacement\)\) return 0/.test(kickJs))
+    check('CE 🔴 寄せ幅 0 なら body の指定ごと外す（0px を書き込まない）',
+        /const want = isActive && w > 0/.test(kickJs))
+    // 寄せ幅 0 で降りることを、実装から確かめる
+    const { nudgeFixedOverlays, nudgedCount } = await import('../src/services/fixedOverlayNudge.js')
+    const { applyGridColumnFix, gridFixCount } = await import('../src/services/gridColumnFix.js')
+    check('CE 寄せ幅 0 なら固定要素を押さない', nudgeFixedOverlays(0) === 0 && nudgedCount() === 0)
+    check('CE 寄せ幅 0 ならカードの列数も触らない', applyGridColumnFix(0) === 0 && gridFixCount() === 0)
+
+    // --- ④ CSS: 重ねる時は読み替えを一切しない ---
+    // 🔴 **セレクタは1本ずつ見ること。** カンマ区切りのまとまりで見ると、4本のうち1本だけ
+    //    元に戻しても、他の行に文字列が残っているので通ってしまう（実際に踏んだ）。
+    const rewriteSelectors = (kickCss.match(/html\.nns-kick-active[^{]*\[class[^{]*\{/g) || [])
+        .flatMap((r) => r.replace(/\{$/, '').split(','))
+        .map((x) => x.trim()).filter((x) => x.includes('[class'))
+    check('CE （空振り防止）読み替えのセレクタを1本ずつ取り出せている',
+        rewriteSelectors.length >= 8, `${rewriteSelectors.length}本`)
+    check('CE 🔴 読み替えのセレクタはすべて「重ねる時は効かない」',
+        rewriteSelectors.every((r) => r.includes(':not(.nns-overlay)')),
+        rewriteSelectors.filter((r) => !r.includes(':not(.nns-overlay)')).join(' / ') || 'なし')
+    check('CE サイドバー自身を守る規則は重ねる時も効く（幅を奪われないため）',
+        /html\.nns-kick-active #niconamasidebar-kick-root \{/.test(kickCss))
+
+    // --- ⑤ CSS: ニコ生は中身とラインの両方を流れから外す ---
+    const overlayRules = (mainCss.match(/html\.nns-overlay[^{]*\{[^}]*\}/g) || [])
+    check('CE （空振り防止）重ねる用の規則がある', overlayRules.length >= 2, `${overlayRules.length}件`)
+    const body = (sel) => (overlayRules.find((r) => r.startsWith(sel)) || '')
+    const sbRule = body('html.nns-overlay body > #sidebar {')
+    const lineRule = body('html.nns-overlay body > #sidebar_line {')
+    check('CE 🔴 中身を流れから外す（fixed）', /position:\s*fixed/.test(sbRule), sbRule.replace(/\s+/g, ' '))
+    check('CE 🔴 ラインも流れから外す（片方だけだと場所を取り続ける）',
+        /position:\s*fixed/.test(lineRule), lineRule.replace(/\s+/g, ' '))
+    check('CE 🔴 ラインは中身の右隣（幅の変数を使う。CSS 側で計算し直さない）',
+        /left:\s*var\(--nns-sb-w/.test(lineRule) && !/calc\(/.test(lineRule),
+        lineRule.replace(/\s+/g, ' '))
+    check('CE 🔴 ニコ生用の規則は body 直下に限定（kick のサイドバーに当てない）',
+        overlayRules.every((r) => r.startsWith('html.nns-overlay body >')),
+        overlayRules.filter((r) => !r.startsWith('html.nns-overlay body >')).map((r) => r.split('{')[0]).join(' / ') || 'なし')
+    check('CE ラインは中身より上（閉じている時に掴めなくならない）',
+        (Number((lineRule.match(/z-index:\s*(\d+)/) || [])[1]) || 0)
+        > (Number((sbRule.match(/z-index:\s*(\d+)/) || [])[1]) || 0))
+
+    // --- ⑥ 幅の受け渡し ---
+    check('CE 🔴 幅を CSS へ渡している（ラインの位置に要る）',
+        /setProperty\('--nns-sb-w'/.test(ctrl))
+    check('CE 🔴 幅が変わる経路すべてが通る場所で渡している（setRootWidth の中）',
+        /function setRootWidth\(\)[\s\S]{0,700}setProperty\('--nns-sb-w'/.test(ctrl))
+    check('CE 🔴 重ねる時はページの幅を触らない',
+        /if \(isOverlay\(\)\) \{[\s\S]{0,200}elems\.root\.style\.width = ''/.test(ctrl))
+    check('CE 🔴 空文字で消す（前の値が残ると切り替えても戻らない）',
+        /elems\.root\.style\.maxWidth = ''/.test(ctrl))
+    check('CE 判定は設定値ではなく <html> の印を見る（渡し忘れが起きない）',
+        /classList\.contains\(OVERLAY_CLASS\)/.test(ctrl))
+
+    // --- ⑦ ラインが遅れて付いてこないこと（CE-2・利用者が実機で発見） ---
+    // 🔴 幅を書く場所と変数を更新する場所が分かれていると、掴んでいる間ラインだけ遅れる。
+    //    kick.com で踏んだ「動かすものが2つに分かれてズレる」と同じ形（doc/09 項目BO）。
+    const widthWrites = (ctrl.match(/elems\.sidebar\.style\.(width|maxWidth|minWidth)\s*=/g) || [])
+    check('CE-2 🔴 サイドバーの幅を書く場所は1箇所だけ（散らばると変数の更新を取りこぼす）',
+        widthWrites.length === 3, `${widthWrites.length}箇所（幅・最大・最小の3つが1関数に収まっている想定）`)
+    check('CE-2 🔴 幅と変数を同じ場所で書く',
+        /function applySidebarWidth\(px\)[\s\S]{0,400}setProperty\('--nns-sb-w', px/.test(ctrl))
+    check('CE-2 🔴 変数の更新を rAF に入れない（1フレーム遅れる）',
+        /function applySidebarWidth\(px\)[\s\S]{0,400}setProperty\('--nns-sb-w'/.test(ctrl)
+        && !/function applySidebarWidth\(px\)[\s\S]{0,400}requestAnimationFrame/.test(ctrl))
+    check('CE-2 🔴 ドラッグ中もその場所を通る（ここが本命）',
+        /function onMouseMove\(e\)[\s\S]{0,400}applySidebarWidth\(width\)/.test(ctrl))
+    check('CE-2 開閉もその場所を通る',
+        /function openSidebar\(\)[\s\S]{0,300}applySidebarWidth\(/.test(ctrl)
+        && /function closeSidebar\(\)[\s\S]{0,300}applySidebarWidth\(0\)/.test(ctrl))
+
+    // 開閉のアニメ中もズレないこと（中身とラインで同じ掛け外し）
+    check('CE-2 🔴 ラインにもアニメの掛け外しをする（片方だけ止めると 0.5秒遅れて追ってくる）',
+        /classList\.remove\('sidebar_transition'\)[\s\S]{0,300}sidebar_line\.classList\.remove\('sidebar_transition'\)/.test(ctrl)
+        && /sidebar\.classList\.add\('sidebar_transition'\)[\s\S]{0,200}sidebar_line\.classList\.add\('sidebar_transition'\)/.test(ctrl))
+    check('CE-2 ラインは最初からアニメ付き（初回の開閉でズレない）',
+        /<div id="sidebar_line" class="sidebar_transition">/.test(shell))
+    check('CE-2 🔴 中身とラインは同じクラスを使う（別々に書くと片方の時間を変えた時に食い違う）',
+        (mainCss.match(/\.sidebar_transition\s*\{/g) || []).length === 1
+        && !/#sidebar_line[^{]*\{[^}]*transition:/.test(mainCss),
+        '重ねる用の規則にラインだけの transition を書かないこと')
+}
+
+async function kickPlaceholderIconGroup() {
+    console.log('=== CD 放送直後の Kick カードに、ローディングではなく配信者アイコンを出す ===')
+    const { readFileSync } = await import('fs')
+    const ks = stripComments(readFileSync(new URL('../src/services/kickSource.js', import.meta.url), 'utf8'))
+
+    // --- ① アイコン取得の失敗を永久に覚えない（ソース検査） ---
+    // 🔴 以前は失敗を空文字でキャッシュしており、`has(slug)` が真になって**二度と取りに行かなかった。**
+    check('CD 🔴 失敗を空文字としてキャッシュへ入れない',
+        !/iconCache\.set\([^)]*,\s*''\s*\)/.test(ks) && !/iconCache\.set\(slug, \(ch/.test(ks),
+        (ks.match(/iconCache\.set\([^\n]*/g) || []).join(' / '))
+    check('CD 🔴 失敗は期限つきで覚える（時間が経てばまた試す）',
+        /iconRetryAfter\.set\([^)]*kickIconRetryMs\)/.test(ks))
+    check('CD 待ちが明けていない相手は飛ばす',
+        /iconRetryAfter\.get\(slug\)[\s\S]{0,40}>\s*now[\s\S]{0,20}continue/.test(ks))
+    check('CD 🔴 空で返ってきた時も覚えない（後でアイコンを設定した人に追従できなくなる）',
+        /if \(url\) iconCache\.set\(slug, url\)/.test(ks))
+    check('CD 以前の版が保存した空文字は読み込まずに捨てる',
+        /Object\.entries\(map\)\) if \(url\) iconCache\.set/.test(ks))
+
+    // --- ② カードの繋ぎ画像（モックDOMで実際に組み立てる） ---
+    const { installMockDom } = await import('./mock-dom.mjs')
+    const restore = {
+        document: globalThis.document, window: globalThis.window,
+        Image: globalThis.Image, chrome: globalThis.chrome,
+    }
+    installMockDom()
+    globalThis.chrome = {
+        runtime: { id: 'test', getURL: (p) => 'chrome-extension://test/' + p },
+        storage: { local: { get: async () => ({}), set: async () => {} } },
+    }
+    try {
+        const { makeProgramElement, applyProgramInfoToCard } =
+            await import('../src/render/sidebar.js')
+        const LOADING = 'chrome-extension://test/images/loading.gif'
+        const ICON = 'https://files.kick.com/icon.webp'
+        const THUMB = 'https://images.kick.com/thumb.webp'
+
+        // 🔴 実測どおりの形（`services/kickSource.js` の写像そのまま）。
+        //    放送直後は **サムネもアイコンも空**で来ることがある。
+        const kick = ({ thumb = '', icon = '' }) => ({
+            id: 'k12345', service: 'kick', title: 'テスト配信',
+            watchUrl: 'https://kick.com/someone', providerType: 'user',
+            contentOwner: { id: 'someone', name: 'someone', icon },
+            thumbnailUrl: thumb, isMemberOnly: false,
+            viewers: 0, comments: 0, concurrentViewers: 3,
+            onAirTime: { beginAt: '2026-08-08T00:00:00.000Z' },
+        })
+        const thumbImg = (card) => card.querySelector('.program_thumbnail_img')
+
+        // サムネ無し・アイコンあり → アイコンが出る
+        const a = makeProgramElement(kick({ icon: ICON }), LOADING)
+        check('CD サムネが無ければ配信者アイコンを出す（ローディングではない）',
+            thumbImg(a).getAttribute('src') === ICON && thumbImg(a).getAttribute('data-src') === ICON,
+            `src=${thumbImg(a).getAttribute('src')}`)
+
+        // 両方無い → ローディング（最後の砦）
+        const b = makeProgramElement(kick({}), LOADING)
+        check('CD アイコンも無ければローディング（最後の砦）',
+            thumbImg(b).getAttribute('src') === LOADING)
+
+        // 🔴 ここが今回の本題。
+        //    アイコンが**後から**埋まった時、ローディングのままにしない。
+        // 🔴 **この行が守る状態を、テスト側で作ること。** 何もしないと生成時から既に
+        //    thumbLive=0 なので、実装から外しても落ちず**空振り**になる（実際に踏んだ）。
+        //    「もし何かの経路でライブ扱いのまま繋ぎ画像に落ちたら、ライブ印を外す」が意図。
+        thumbImg(b).dataset.thumbLive = '1'
+        thumbImg(b).dataset.thumbSeq = '42'
+        applyProgramInfoToCard(b, kick({ icon: ICON }))
+        check('CD 🔴 後からアイコンが埋まったらローディングを置き換える（本題）',
+            thumbImg(b).getAttribute('src') === ICON && thumbImg(b).getAttribute('data-src') === ICON,
+            `src=${thumbImg(b).getAttribute('src')} data-src=${thumbImg(b).getAttribute('data-src')}`)
+        check('CD 置き換えた絵はライブサムネ扱いにしない（動くサムネが最新コマとして混ぜない）',
+            thumbImg(b).dataset.thumbLive === '0' && !thumbImg(b).dataset.thumbSeq,
+            `thumbLive=${thumbImg(b).dataset.thumbLive}`)
+
+        // 本物のサムネが来たら、そちらが勝つ
+        applyProgramInfoToCard(b, kick({ thumb: THUMB, icon: ICON }))
+        check('CD 本物のサムネが来たら data-src はそちらへ',
+            thumbImg(b).getAttribute('data-src') === THUMB,
+            `data-src=${thumbImg(b).getAttribute('data-src')}`)
+
+        // ⚠️ **今出している絵がローディングでないなら触らない。**
+        //    表示中の絵をアイコンで踏み潰すと、出ているサムネが消える。
+        const c = makeProgramElement(kick({ thumb: THUMB, icon: ICON }), LOADING)
+        applyProgramInfoToCard(c, kick({ icon: ICON })) // サムネが一時的に取れなかった周期
+        check('CD 🔴 表示中の絵がローディングでなければ踏み潰さない',
+            thumbImg(c).getAttribute('src') === THUMB,
+            `src=${thumbImg(c).getAttribute('src')}`)
+
+        // ニコ生側（アイコンのみ・サムネ無し）でも同じ扱いになること
+        const nico = {
+            id: '345678901', title: 'ニコ生', providerType: 'user',
+            contentOwner: { id: 'u1', name: '主', icon: ICON },
+            thumbnailUrl: '', onAirTime: { beginAt: '2026-08-08T00:00:00.000Z' },
+        }
+        const d = makeProgramElement(nico, LOADING)
+        check('CD ニコ生でも同じ（繋ぎはアイコン）', thumbImg(d).getAttribute('src') === ICON)
+
+        // ---- CD-2: サムネURLは来るのに画像がまだ無い（Kick の放送開始直後の実態） ----
+        //
+        // 🔴 **ここが CD の穴だった。** 上の CD は「サムネURLが空で来る」形しか試しておらず、
+        //    実際に起きていたのは「**URLは来るが画像がまだ生成されていない**」形。
+        //    この時 data-src は同じURLなので、error フォールバックが
+        //    `this.src !== dataSrc` を偽と見て**アイコンを飛び越しローディング画像へ直行**していた。
+        //    利用者報告（2026-08-10）＝「放送開始直後の Kick カードがローディングのまま」。
+        const e = makeProgramElement(kick({ thumb: THUMB, icon: ICON }), LOADING)
+        const eImg = thumbImg(e)
+        check('CD-2 生成時はサムネURLを出す（ここは従来どおり）',
+            eImg.getAttribute('src') === THUMB && eImg.getAttribute('data-src') === THUMB,
+            `src=${eImg.getAttribute('src')}`)
+        check('CD-2 繋ぎ画像を data-src とは別に持つ',
+            eImg.getAttribute('data-fallback-src') === ICON,
+            `data-fallback-src=${eImg.getAttribute('data-fallback-src')}`)
+
+        // 画像が無い＝読み込み失敗。**本物の DOM と同じく img の error を鳴らして通す。**
+        eImg.fire('error')
+        check('CD-2 🔴 サムネが読めなければ配信者アイコンへ落ちる（ローディングではない・本題）',
+            eImg.getAttribute('src') === ICON,
+            `src=${eImg.getAttribute('src')}`)
+        check('CD-2 落ちた絵はライブサムネ扱いにしない（動くサムネが最新コマとして混ぜない）',
+            eImg.dataset.thumbLive === '0' && !eImg.dataset.thumbSeq,
+            `thumbLive=${eImg.dataset.thumbLive}`)
+
+        // アイコンまで読めない時だけ最後の砦へ。
+        eImg.fire('error')
+        check('CD-2 アイコンも読めなければローディング（最後の砦）',
+            eImg.getAttribute('src') === LOADING, `src=${eImg.getAttribute('src')}`)
+        // 🔴 **上へ戻らないこと。** 戻せるとサムネURL↔アイコンで error が無限に往復する。
+        eImg.fire('error')
+        check('CD-2 🔴 最後の砦から上へ戻らない（error の無限往復を作らない）',
+            eImg.getAttribute('src') === LOADING, `src=${eImg.getAttribute('src')}`)
+
+        // 失敗が続いてバックオフ中のカードは、リスト更新のたびに繋ぎ画像へ戻す。
+        // 🔴 **data-src は初回から一度も変わっていない。** 旧実装はこの入れ替えを
+        //    「data-src が変わった時」の中に置いていたため、ここで素通りしていた。
+        eImg.dataset.nextTryAt = String(Date.now() + 60000)
+        applyProgramInfoToCard(e, kick({ thumb: THUMB, icon: ICON }))
+        check('CD-2 🔴 data-src が変わらなくてもローディングから繋ぎ画像へ戻す',
+            eImg.getAttribute('src') === ICON, `src=${eImg.getAttribute('src')}`)
+
+        // ニコ生の user 番組はライブサムネと静止サムネが別URL。**順番を変えていない**ことを見る
+        // （アイコンを先に出すと、出せるはずの静止サムネが出なくなる）。
+        const g = makeProgramElement({
+            id: '345678902', title: 'ニコ生', providerType: 'user',
+            contentOwner: { id: 'u2', name: '主', icon: ICON },
+            thumbnailUrl: 'https://nico.example/static.jpg',
+            liveScreenshotThumbnailUrls: { middle: 'https://nico.example/live.jpg' },
+            onAirTime: { beginAt: '2026-08-08T00:00:00.000Z' },
+        }, LOADING)
+        thumbImg(g).fire('error')
+        check('CD-2 ライブサムネが読めない時はまず静止サムネ（アイコンを先に出さない）',
+            thumbImg(g).getAttribute('src') === 'https://nico.example/static.jpg',
+            `src=${thumbImg(g).getAttribute('src')}`)
+
+        // **アイコンを持たない配信者**でもローディングから復帰できること。
+        // ⚠️ **これを守っているのは繋ぎ画像の入れ替えではなく、その直後の直接表示
+        //    （`thumbLive === '0'`）**。繋ぎ先をアイコンだけに狭めても落ちないことを
+        //    空振り検査で確認済み（2026-08-10）。ここは**経路をまたいだ挙動**の回帰止め。
+        const h = makeProgramElement(kick({}), LOADING) // サムネもアイコンも無い
+        check('CD-2 前提: 出せる絵が無ければローディング',
+            thumbImg(h).getAttribute('src') === LOADING)
+        applyProgramInfoToCard(h, kick({ thumb: THUMB })) // サムネだけ届いた（アイコンは無いまま）
+        check('CD-2 アイコンが無くても、届いたサムネURLでローディングから復帰する',
+            thumbImg(h).getAttribute('src') === THUMB,
+            `src=${thumbImg(h).getAttribute('src')}`)
+    } finally {
+        globalThis.document = restore.document
+        globalThis.window = restore.window
+        globalThis.Image = restore.Image
+        globalThis.chrome = restore.chrome
+    }
+}
+
+async function widthRewriteSelectorGroup() {
+    console.log('=== CB ビューポート幅の読み替えセレクタが誤爆しない ===')
+    const { readFileSync } = await import('fs')
+    const raw = readFileSync(new URL('../src/styles/kickPage.css', import.meta.url), 'utf8')
+    // 🔴 **コメントを先に剥がすこと。** ここには「こう書いてはいけない」の例が日本語で
+    //    書いてある。剥がさずに走査すると、その例を実物と読み違えて必ず落ちる
+    //    （禁止事項を説明する自分のコメントに引っかかるのは通算3回目）。
+    const css = raw.replace(/\/\*[\s\S]*?\*\//g, ' ')
+    check('CB （空振り防止）コメントを剥がせている（悪い例の記述を実物と読み違えない）',
+        raw.includes('[class*="w-screen"]') && !css.includes('[class*="w-screen"]'),
+        'コメント中の例が残っていないこと')
+
+    // 🔴 **CSS ファイルから実物のセレクタを取り出して判定する。**
+    //    ここに期待するセレクタを書き写すと、実装を変えた時に一緒に書き換えてしまい、
+    //    「同じものを2箇所に書いて手で揃える」いつもの破れ方になる。
+    const rules = []
+    const re = /([^{}]+)\{([^}]*)\}/g
+    let m
+    while ((m = re.exec(css)) !== null) {
+        const sel = m[1].replace(/\/\*[\s\S]*?\*\//g, '').trim()
+        if (!sel.includes('nns-kick-active')) continue
+        if (!/\[class[~*]=/.test(sel)) continue
+        rules.push({ sel, body: m[2] })
+    }
+    check('CB （空振り防止）読み替えの規則を CSS から取り出せている', rules.length >= 3,
+        `${rules.length}件`)
+
+    // `[class~="X"]` / `[class*="X"]` をブラウザと同じ意味で評価する
+    const matches = (sel, cls) => {
+        const tokens = cls.split(/\s+/).filter(Boolean)
+        for (const part of sel.split(',')) {
+            let ok = true
+            const conds = [...part.matchAll(/\[class([~*])="([^"]+)"\]/g)]
+            if (!conds.length) { ok = false }
+            for (const [, op, val] of conds) {
+                const hit = op === '~' ? tokens.includes(val) : cls.includes(val)
+                if (!hit) { ok = false; break }
+            }
+            if (ok) return true
+        }
+        return false
+    }
+    // どの宣言が当たるか
+    const applied = (cls) => {
+        const out = {}
+        for (const r of rules) {
+            if (!matches(r.sel, cls)) continue
+            for (const decl of r.body.split(';')) {
+                const [k, v] = decl.split(':')
+                if (k && v) out[k.trim()] = v.trim()
+            }
+        }
+        return out
+    }
+
+    // --- 拾ってほしいもの ---
+    for (const cls of ['w-xvw', 'w-screen', 'lg:w-screen', '3xl:w-xvw',
+        'group-data-[sidebar=false]/main:w-xvw', 'flex flex-1 w-xvw items-center']) {
+        check(`CB 幅を読み替える: "${cls}"`, !!applied(cls).width,
+            JSON.stringify(applied(cls)))
+    }
+
+    // --- 🔴 拾ってはいけないもの（今回の発端） ---
+    // `max-w-screen-*` は Tailwind の**固定値**。全幅へ広げると隣が潰れる。
+    for (const cls of ['max-w-screen-lg', 'max-w-screen-sm', 'lg:max-w-screen-md',
+        'mx-auto w-full max-w-screen-xl px-4']) {
+        const got = applied(cls)
+        check(`CB 🔴 固定値の上限を全幅にしない: "${cls}"`,
+            !got.width && !got['max-width'], JSON.stringify(got))
+    }
+    for (const cls of ['w-full', 'max-w-lg', 'min-w-0', 'h-xvh', 'w-fit']) {
+        check(`CB 関係ないクラスに当てない: "${cls}"`,
+            Object.keys(applied(cls)).length === 0, JSON.stringify(applied(cls)))
+    }
+
+    // --- 下限・上限は「その性質だけ」当てる ---
+    const minOnly = applied('min-w-xvw')
+    check('CB 🔴 min-w-xvw には下限だけ当てる（width まで固定しない）',
+        !!minOnly['min-width'] && !minOnly.width, JSON.stringify(minOnly))
+    const maxOnly = applied('max-w-xvw')
+    check('CB 🔴 max-w-xvw には上限だけ当てる', !!maxOnly['max-width'] && !maxOnly.width,
+        JSON.stringify(maxOnly))
+    check('CB min-w-screen も下限だけ', !!applied('min-w-screen')['min-width'] && !applied('min-w-screen').width)
+
+    // --- 引く量は1本（CSS 側で計算し直さない） ---
+    const calcs = [...css.matchAll(/calc\(100vw - ([^)]*)\)/g)].map((x) => x[1].trim())
+    check('CB 🔴 引くのは --nns-kick-reserved ただ1つ（2箇所で同じ計算をしない）',
+        // ⚠️ 取り出しは最初の ')' で切れるので 'var(--nns-kick-reserved' になる。閉じ括弧まで求めない。
+        calcs.length >= 4 && calcs.every((c) => c === 'var(--nns-kick-reserved'),
+        [...new Set(calcs)].join(' / '))
+
+    // --- 🔴 部分一致が残っていないか（これが今回の原因そのもの） ---
+    const broad = [...css.matchAll(/\[class\*="([^"]+)"\]/g)].map((x) => x[1])
+    // ⚠️ 対象は**幅の読み替えの一族だけ**。モーダルの中央寄せ（`left-[50%]`）は別件で、
+    //    あちらは `lg:` が付くので部分一致が要る（項目BW）。
+    const widthFamily = broad.filter((v) => /w-screen|w-xvw/.test(v))
+    const bad = widthFamily.filter((v) => !v.startsWith(':'))
+    check('CB 🔴 幅の読み替えの部分一致は必ず ":" 始まり（単語の途中に当たらない）',
+        bad.length === 0 && widthFamily.length >= 4, `悪い=${bad.join(' / ') || 'なし'} / 総数=${widthFamily.length}`)
+    check('CB 🔴 ":max-w-screen" を足さない（lg:max-w-screen-md を拾ってしまう）',
+        !css.includes(':max-w-screen'))
+}
+
+async function gridColumnFixGroup() {
+    console.log('=== CA カードの列数を「使える幅」で決め直す ===')
+    const { columnsOf, minWidthOf, pickColumns, planGridColumns, planFromMeasurement, collectColumnRules,
+        applyGridColumnFix, clearAllGridFixes, gridFixCount, GRID_ATTR } =
+        await import('../src/services/gridColumnFix.js')
+    const { readFileSync } = await import('fs')
+    const kpc = stripComments(readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8'))
+
+    // 🔴 **実測した値をそのまま使う**（2026-08-08・/following・利用者の実機）。
+    //    期待値を実装から作らない。ここに書いてある数字は全部ログから写したもの。
+    const VW = 1920
+    const RESERVED = 702
+    const EFFECTIVE = 1218 // 1920 - 702
+    const OBSERVED = 7 // 実際に適用されていた列数
+    const CONTAINER_W = 1078
+    const GAP = 16
+
+    // --- ① 値の読み取り ---
+    check('CA repeat(4, minmax(0,1fr)) から 4 を読む', columnsOf('repeat(4, minmax(0, 1fr))') === 4)
+    check('CA 🔴 px の並びは読まない（列数に読み替えると意味が変わる）',
+        columnsOf('140.281px 140.281px 140.281px') === null)
+    check('CA 🔴 auto-fill は読まない（本来こちらの出番が無い）',
+        columnsOf('repeat(auto-fill, minmax(240px, 1fr))') === null)
+    check('CA min-width を px から読む', minWidthOf('(min-width: 1600px)') === 1600)
+    check('CA min-width を rem からも読む（Tailwind v4）', minWidthOf('(min-width: 96rem)', 16) === 1536)
+    check('CA メディア指定が無ければ 0（常に効く）', minWidthOf('') === 0)
+
+    // --- ② 実測どおりの規則表で、実測どおりの答えになるか ---
+    // ログの class から起こした表。3xl は Kick 独自なので 1600px と仮定して両方試す。
+    const mk = (list) => list.map(([min, cols], i) => ({ min, cols, index: i + 1 }))
+    const REAL = mk([
+        [0, 1],       // grid-cols-1
+        [640, 2],     // sm:grid-cols-2
+        [1024, 4],    // lg:grid-cols-4
+        [1280, 4],    // xl:grid-cols-4
+        [1280, 5],    // group-data-[sidebar=false]:xl:grid-cols-5
+        [1536, 5],    // 2xl:grid-cols-5
+        [1536, 6],    // group-data-[sidebar=false]:2xl:grid-cols-6
+        [1600, 6],    // 3xl:grid-cols-6
+        [1600, 7],    // group-data-[sidebar=false]:3xl:grid-cols-7
+    ])
+    check('CA 🔴 実測どおり、画面幅1920 で 7列と出る（読み方が合っている）',
+        pickColumns(REAL, VW) === OBSERVED, `${pickColumns(REAL, VW)}列`)
+    check('CA 🔴 使える幅1218 では 4列（これが当てたい値）',
+        pickColumns(REAL, EFFECTIVE) === 4, `${pickColumns(REAL, EFFECTIVE)}列`)
+    check('CA 同じ折り返し幅なら後に書いたほうが勝つ（CSS の順序）',
+        pickColumns(mk([[1536, 5], [1536, 6]]), 1600) === 6)
+
+    // 当てた後のカードの幅が、拡張なしの幅に近いこと（痩せが直る）
+    const cardW = (n, w) => Math.round((w - (n - 1) * GAP) / n)
+    const before = cardW(OBSERVED, CONTAINER_W)          // 140
+    const after = cardW(4, CONTAINER_W)                  // 257
+    const natural = cardW(OBSERVED, CONTAINER_W + RESERVED) // 拡張が無い時の 240
+    check('CA 🔴 直すとカードの幅が「拡張なし」に近づく',
+        before === 140 && after === 258 && natural === 241 && Math.abs(after - natural) < 40,
+        `今${before}px → 直すと${after}px（拡張なしなら${natural}px）`)
+
+    // --- ③ 答え合わせに落ちたら何もしない ---
+    const plan = (o) => planGridColumns({ entries: REAL, observed: o, viewportWidth: VW, effectiveWidth: EFFECTIVE })
+    check('CA 一致すれば当てる', plan(7).target === 4, JSON.stringify(plan(7)))
+    check('CA 🔴 実際の列数と食い違ったら何もしない（理解できていない相手に触らない）',
+        plan(5).target === null, JSON.stringify(plan(5)))
+    check('CA 規則が読めなければ何もしない',
+        planGridColumns({ entries: [], observed: 7, viewportWidth: VW, effectiveWidth: EFFECTIVE }).target === null)
+    check('CA 変える必要が無ければ何もしない',
+        planGridColumns({ entries: REAL, observed: 7, viewportWidth: VW, effectiveWidth: VW }).target === null)
+
+    // 🔴 既定の折り返し表だけで読もうとすると失敗すること（＝CSS から読む必要があった証拠）
+    const TW_ONLY = mk([[0, 1], [640, 2], [1024, 4], [1280, 4], [1536, 5]])
+    check('CA 🔴 Tailwind 既定の表だけでは実測の7列を再現できない（だから CSS から読む）',
+        pickColumns(TW_ONLY, VW) === 5 && pickColumns(TW_ONLY, VW) !== OBSERVED,
+        `既定表の予測=${pickColumns(TW_ONLY, VW)}列 / 実際=${OBSERVED}列`)
+
+    // --- ④ CSS からの収集（偽のスタイルシート） ---
+    const mkSheet = (rules) => ({ cssRules: rules })
+    const rule = (sel, value) => ({ selectorText: sel, style: { gridTemplateColumns: value } })
+    const media = (cond, rules) => ({ conditionText: cond, cssRules: rules })
+    const mkEl = (matches) => ({
+        matches: (sel) => matches.includes(sel),
+        getBoundingClientRect: () => ({ width: CONTAINER_W, height: 800, left: 798, top: 0 }),
+        className: 'grid grid-cols-1',
+        style: {},
+    })
+    const el = mkEl(['.grid-cols-1', '.lg\\:grid-cols-4', '.g\\:3xl\\:grid-cols-7'])
+    const doc = {
+        styleSheets: [mkSheet([
+            rule('.grid-cols-1', 'repeat(1, minmax(0, 1fr))'),
+            rule('.not-mine', 'repeat(9, minmax(0, 1fr))'),
+            media('(min-width: 1024px)', [rule('.lg\\:grid-cols-4', 'repeat(4, minmax(0, 1fr))')]),
+            media('(min-width: 1600px)', [rule('.g\\:3xl\\:grid-cols-7', 'repeat(7, minmax(0, 1fr))')]),
+        ])],
+    }
+    const got = collectColumnRules(el, doc)
+    check('CA CSS から、この要素に効く指定だけを集める（他人の規則は拾わない）',
+        got.length === 3 && !got.some((e) => e.cols === 9), JSON.stringify(got))
+    check('CA 🔴 @media の折り返し幅を規則に紐づけて読む',
+        pickColumns(got, 1920) === 7 && pickColumns(got, 1218) === 4,
+        `1920→${pickColumns(got, 1920)}列 / 1218→${pickColumns(got, 1218)}列`)
+
+    // 🔴 別オリジンのスタイルシートは例外を投げる。**黙って飛ばして、触らない側に倒れること。**
+    const hostile = { styleSheets: [{ get cssRules() { throw new Error('SecurityError') } }, ...doc.styleSheets] }
+    check('CA 🔴 別オリジンの CSS で落ちない（読める分だけ使う）',
+        collectColumnRules(el, hostile).length === 3)
+    // 🔴 `adoptedStyleSheets` は `styleSheets` に入らない。見ないと丸ごと落とす。
+    const adopted = {
+        styleSheets: [],
+        adoptedStyleSheets: [mkSheet([rule('.grid-cols-1', 'repeat(1, minmax(0, 1fr))')])],
+    }
+    check('CA 🔴 adoptedStyleSheets も見る（styleSheets には入らない）',
+        collectColumnRules(el, adopted).length === 1,
+        `${collectColumnRules(el, adopted).length}件`)
+
+    check('CA 読めるものが1つも無ければ空（＝何もしない側へ）',
+        collectColumnRules(el, { styleSheets: [{ get cssRules() { throw new Error('x') } }] }).length === 0)
+
+    // --- ⑤ 当てる・戻す（DOM あり） ---
+    clearAllGridFixes()
+    const attrs = new Map()
+    const live = {
+        tagName: 'SECTION', className: 'grid grid-cols-1 lg:grid-cols-4',
+        // 🔴 本物の Chrome は使用値（px の並び）を返す。実機ログの値をそのまま使う。
+        _cols: '140.281px 140.281px 140.281px 140.297px 140.281px 140.281px 140.297px',
+        style: {
+            gridTemplateColumns: '',
+            setProperty(p, v) { if (p === 'grid-template-columns') this.gridTemplateColumns = v },
+            removeProperty(p) { if (p === 'grid-template-columns') this.gridTemplateColumns = '' },
+        },
+        matches: (sel) => ['.grid-cols-1', '.lg\\:grid-cols-4', '.g\\:3xl\\:grid-cols-7'].includes(sel),
+        closest: () => null,
+        getBoundingClientRect: () => ({ width: CONTAINER_W, height: 800, left: 798, top: 0 }),
+        getAttribute: (n) => (attrs.has(n) ? attrs.get(n) : null),
+        setAttribute: (n, v) => attrs.set(n, String(v)),
+        removeAttribute: (n) => attrs.delete(n),
+        hasAttribute: (n) => attrs.has(n),
+    }
+    const liveDoc = {
+        ...doc,
+        documentElement: {},
+        querySelectorAll: () => [live],
+    }
+    const liveWin = {
+        innerWidth: VW,
+        getComputedStyle: (n) => {
+            if (n !== live) return { fontSize: '16px' }
+            // こちらが当てていればその列数ぶんの px 並びを、無ければ Kick 本来の並びを返す。
+            const mine = /^repeat\((\d+),/.exec(live.style.gridTemplateColumns || '')
+            const cols = mine
+                ? Array.from({ length: Number(mine[1]) }, () => '257.5px').join(' ')
+                : live._cols
+            return { display: 'grid', gridTemplateColumns: cols }
+        },
+    }
+    const run = (reserved) => applyGridColumnFix(reserved, { doc: liveDoc, win: liveWin })
+
+    run(RESERVED)
+    check('CA 🔴 実測の場面で 7列 → 4列 に当たる',
+        live.style.gridTemplateColumns === 'repeat(4, minmax(0, 1fr))',
+        `grid-template-columns=${live.style.gridTemplateColumns}`)
+    check('CA 印を残す（自分が当てたものだけ後で戻せるように）',
+        live.getAttribute(GRID_ATTR) === '4')
+
+    run(RESERVED); run(RESERVED)
+    check('CA 🔴 何周期回しても 4列のまま（自分の値を読み返して縮み続けない）',
+        live.style.gridTemplateColumns === 'repeat(4, minmax(0, 1fr))',
+        `grid-template-columns=${live.style.gridTemplateColumns}`)
+
+    // 🔴 Kick 自身が inline で持っていたら奪わないこと。
+    //    こちらは測り直す前に必ず一度外すので、印を見ないと**他人の指定を消してしまう。**
+    clearAllGridFixes()
+    const theirs = { ...live }
+    theirs.style = {
+        gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+        setProperty(p, v) { if (p === 'grid-template-columns') this.gridTemplateColumns = v },
+        removeProperty(p) { if (p === 'grid-template-columns') this.gridTemplateColumns = '' },
+    }
+    const theirAttrs = new Map()
+    theirs.getAttribute = (n) => (theirAttrs.has(n) ? theirAttrs.get(n) : null)
+    theirs.setAttribute = (n, v) => theirAttrs.set(n, String(v))
+    theirs.removeAttribute = (n) => theirAttrs.delete(n)
+    theirs.hasAttribute = (n) => theirAttrs.has(n)
+    const theirDoc = { ...liveDoc, querySelectorAll: () => [theirs] }
+    // 🔴 **当てない判断をした時**で試すこと。当てる道だとどちらにせよ上書きするので、
+    //    「奪ったかどうか」が見えない（最初そう書いて、変異を1つ取り逃した）。
+    //    ここでは実際の列数を 5 にして答え合わせをわざと外し、触らない判断をさせる。
+    const theirWin = {
+        innerWidth: VW,
+        getComputedStyle: (n) => (n === theirs
+            ? { display: 'grid', gridTemplateColumns: '200px 200px 200px 200px 200px' } // 5列＝予測の7列と食い違う
+            : { fontSize: '16px' }),
+    }
+    // ⚠️ **CSS の答え合わせと実測の推定を両方断らせる必要がある。**
+    //    サイドバーを 40px にすると痩せ方がわずか（96%）なので、実測側は「変えない」と判断する。
+    applyGridColumnFix(40, { doc: theirDoc, win: theirWin })
+    check('CA 🔴 触らない判断をした時、Kick 自身が inline で置いた指定を奪わない',
+        theirs.style.gridTemplateColumns === 'repeat(3, minmax(0, 1fr))' && !theirAttrs.has(GRID_ATTR),
+        `grid-template-columns=${theirs.style.gridTemplateColumns} / 印=${theirAttrs.get(GRID_ATTR)}`)
+    check('CA 触らない判断をした相手は抱え込まない', gridFixCount() === 0, `管理数=${gridFixCount()}`)
+    clearAllGridFixes()
+
+    // 🔴 Kick が状態を切り替えた（class が変わった）ら、**自分の値を外してから**測り直すこと。
+    //    外さないと「自分が当てた4列」を Kick 本来の値だと思い込み、答え合わせに落ちて手放す。
+    run(RESERVED)
+    live.className = live.className + ' data-changed'
+    run(RESERVED)
+    check('CA 🔴 class が変わっても、自分の値と答え合わせしない（測り直す）',
+        gridFixCount() === 1 && live.style.gridTemplateColumns === 'repeat(4, minmax(0, 1fr))',
+        `管理数=${gridFixCount()} / ${live.style.gridTemplateColumns}`)
+    live.className = 'grid grid-cols-1 lg:grid-cols-4'
+
+    run(0) // 連携を切った
+    check('CA 連携を切ったら戻す',
+        live.style.gridTemplateColumns === '' && !live.hasAttribute(GRID_ATTR) && gridFixCount() === 0)
+
+    // サイドバーを細くすると列数も戻る
+    run(RESERVED)
+    const at702 = live.style.gridTemplateColumns
+    run(120) // 使える幅 1800 → 7列のまま＝当てる必要なし
+    check('CA サイドバーが細ければ元の列数に戻る（余計なことをしない）',
+        at702 === 'repeat(4, minmax(0, 1fr))' && live.style.gridTemplateColumns === '',
+        `702→${at702} / 120→${live.style.gridTemplateColumns || '(なし)'}`)
+    clearAllGridFixes()
+
+    // --- ⑤-2 CSS が読めない時の逃げ道（実機で styleSheets を読めなかった。項目BZ-2） ---
+    const est = (containerWidth, gap, reserved, observed) =>
+        planFromMeasurement({ containerWidth, gap, reserved }, observed)
+    check('CA-2 🔴 実測の場面: 器1078・7列・サイドバー702 → 4列（CSS 版と同じ答え）',
+        est(CONTAINER_W, GAP, RESERVED, OBSERVED) === 4, `${est(CONTAINER_W, GAP, RESERVED, OBSERVED)}列`)
+    check('CA-2 🔴 わずかな痩せでは列を落とさない（サイドバー5px で 7列のまま）',
+        est(CONTAINER_W, GAP, 5, OBSERVED) === null, `${est(CONTAINER_W, GAP, 5, OBSERVED)}`)
+    // 🔴 **上限で挟んでいない。**「サイドバーぶんがある限り列は増えない」は算術で決まる
+    //    （`器+gap = 列数 ×(1枚+gap)` がちょうど成り立つため）。挟むと死んだコードになるので、
+    //    ここでは**総当たりで性質そのものを確かめる。**
+    let grew = 0
+    for (const w of [400, 700, 1078, 1600, 2400]) {
+        for (const g of [0, 8, 16, 32]) {
+            for (const rv of [1, 24, 120, 360, 702, 1200]) {
+                for (const n of [2, 3, 4, 5, 6, 7, 8, 12]) {
+                    const t = est(w, g, rv, n)
+                    if (t !== null && t > n) grew++
+                }
+            }
+        }
+    }
+    check('CA-2 🔴 どんな組み合わせでも列は増えない（960通り）', grew === 0, `増えた=${grew}件`)
+    check('CA-2 器が本来のカード1枚より狭くても 1列は残す',
+        est(200, 0, 100000, 4) === 1, `${est(200, 0, 100000, 4)}`)
+    check('CA-2 サイドバーぶんが 0 なら何もしない', est(CONTAINER_W, GAP, 0, OBSERVED) === null)
+    check('CA-2 器の幅が取れなければ何もしない', est(0, GAP, RESERVED, OBSERVED) === null)
+
+    // 🔴 CSS が1つも読めない時に、逃げ道が使われること
+    const fallback = planGridColumns({
+        entries: [], observed: OBSERVED, viewportWidth: VW, effectiveWidth: EFFECTIVE,
+        measured: { containerWidth: CONTAINER_W, gap: GAP, reserved: RESERVED },
+    })
+    check('CA-2 🔴 CSS を読めなくても実測から直す（別オリジン配信でも動く）',
+        fallback.target === 4, JSON.stringify(fallback))
+
+    // 🔴 CSS を読み違えた時も逃げ道へ回る
+    const misread = planGridColumns({
+        entries: REAL, observed: 5, viewportWidth: VW, effectiveWidth: EFFECTIVE,
+        measured: { containerWidth: CONTAINER_W, gap: GAP, reserved: RESERVED },
+    })
+    check('CA-2 読み違えた時も実測から直す', misread.target !== null, JSON.stringify(misread))
+
+    // 🔴 **「変える必要が無い」だけは逃げ道へ回さない。**
+    //    あれは正しく読めた上での結論。推定で上書きすると、触らなくてよい相手を動かす。
+    const noNeed = planGridColumns({
+        entries: REAL, observed: 7, viewportWidth: VW, effectiveWidth: VW,
+        measured: { containerWidth: CONTAINER_W, gap: GAP, reserved: RESERVED },
+    })
+    check('CA-2 🔴 CSS が「変える必要が無い」と言ったら、実測で上書きしない',
+        noNeed.target === null, JSON.stringify(noNeed))
+
+    // --- ⑥ 呼び出し位置（構造） ---
+    check('CA 🔴 毎周期は走らせない（変わった時だけ）',
+        /gridKey !== lastGridKey/.test(kpc) && /applyGridColumnFix\(/.test(kpc))
+    // 🔴 **幅だけでは足りない**（利用者が実機で発見。BZ-3）。SPA で別ページから来ると
+    //    器が作り直されて別物になるのに、幅は変わらないので走らずカードが小さいままだった。
+    check('CA-3 🔴 ページが変わっても走る（pathname を見張っている）',
+        /lastGridKey[\s\S]{0,200}location\.pathname/.test(kpc) || /location\.pathname[\s\S]{0,200}lastGridKey/.test(kpc))
+    check('CA-3 🔴 器そのものが入れ替わっても走る（React の作り直し）',
+        /gridEl !== lastGridEl/.test(kpc) && /querySelector\(/.test(kpc))
+    check('CA-3 見張りは軽い方法で（querySelectorAll で全部数えない）',
+        !/lastGridEl[\s\S]{0,120}querySelectorAll/.test(kpc))
+    check('CA 連携を切る時に戻している',
+        /isActive = false[\s\S]{0,600}clearAllGridFixes\(\)/.test(kpc))
+    check('CA 🔴 SPA で作り替えられたら測り直す（覚え書きを捨てる）',
+        /insertSidebar\(\)[\s\S]{0,600}lastGridKey = ''/.test(kpc))
+}
+
+async function fixedOverlayNudgeGroup() {
+    console.log('=== BY 帯に潜り込む固定要素を実測して押す（小窓・モーダル） ===')
+    const { nudgeFixedOverlays, clearAllNudges, nudgedCount, collectFixedNearStrip } =
+        await import('../src/services/fixedOverlayNudge.js')
+    const { readFileSync } = await import('fs')
+    const kpc = stripComments(readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8'))
+
+    // 🔴 **期待値は実装の定数から作らない。**確保幅も押した後の位置もここに直接書く。
+    //    実装の TOLERANCE_PX / PARKED_LEFT_PX / 採取点を import して組み立てると、
+    //    実装が変わった時に検証も一緒に動いて、何も落ちなくなる。
+    const RESERVED = 360
+    const VH = 1080
+
+    // 生えている margin-left を rect に反映する偽要素。
+    // 🔴 **押した結果を測り直す形になっていること。**固定値を返す作りでは収束も往復も見えない。
+    const mkEl = (o = {}) => {
+        const attrs = new Map()
+        const style = {
+            marginLeft: '', transform: o.inlineTransform || '', left: o.inlineLeft || '',
+            setProperty(p, v) { if (p === 'margin-left') this.marginLeft = v },
+            removeProperty(p) { if (p === 'margin-left') this.marginLeft = '' },
+        }
+        return {
+            nodeType: 1, tagName: o.tag || 'DIV', id: o.id || '', className: o.className || '',
+            style, isConnected: o.isConnected !== false, parentElement: null,
+            _pos: o.pos || 'fixed', _left: o.left ?? 0, _top: o.top ?? 0, _w: o.w ?? 400, _h: o.h ?? 300,
+            _inSidebar: !!o.inSidebar,
+            getAttribute: (n) => (attrs.has(n) ? attrs.get(n) : null),
+            setAttribute: (n, v) => attrs.set(n, String(v)),
+            removeAttribute: (n) => attrs.delete(n),
+            hasAttribute: (n) => attrs.has(n),
+            closest(sel) { return (this._inSidebar && sel === '#niconamasidebar-kick-root') ? {} : null },
+            getBoundingClientRect() {
+                const ml = Number.parseFloat(this.style.marginLeft) || 0
+                return {
+                    left: this._left + ml, right: this._left + ml + this._w,
+                    top: this._top, bottom: this._top + this._h,
+                    width: this._w, height: this._h,
+                }
+            },
+            ml() { return Number.parseFloat(this.style.marginLeft) || 0 },
+        }
+    }
+    const env = (els, { fullscreen = null, hidden = false, bodyChildren = [] } = {}) => ({
+        doc: {
+            fullscreenElement: fullscreen, hidden,
+            // 🔴 既定は**空**。portal 経由の収集で素通りさせると、格子の検証が全部空振りになる。
+            body: { children: bodyChildren },
+            // 🔴 **本物と同じく「その点を覆っている要素だけ」を返すこと。**
+            //    全部返す作りにすると、採取点の置き方（画面の端に寄ったものへ届くか・
+            //    押し出した後も見え続けるか）を一切検証できなくなる。
+            elementsFromPoint: (x, y) => els.filter((el) => {
+                const r = el.getBoundingClientRect()
+                return x >= r.left && x < r.right && y >= r.top && y < r.bottom
+            }),
+        },
+        win: { innerHeight: VH, getComputedStyle: (el) => ({ position: el._pos }) },
+    })
+    const run = (els, reserved = RESERVED, opts = {}) =>
+        nudgeFixedOverlays(reserved, { ...env(els, opts), ...opts })
+
+    // --- ① 画面の下の角に出る小窓（今回の発端。番組視聴中にフォローページを開くと出る） ---
+    // 🔴 位置は実物どおり「下から 16px・高さ 180px」＝ y は 884〜1064。
+    //    採取点が粗い（0/25/50/75/100%）と**どの点も掠らない。**
+    clearAllNudges()
+    const mini = mkEl({ left: 16, top: VH - 180 - 16, w: 320, h: 180 })
+    run([mini])
+    check('BY 🔴 画面の下の角の小窓に採取点が届く（粗い格子だと漏れる）',
+        mini.ml() > 0, `margin-left=${mini.ml()}`)
+    check('BY 🔴 帯に潜り込んだ小窓を押し出す（左端 16 → 360）',
+        mini.ml() === 344 && mini.getBoundingClientRect().left === 360,
+        `margin-left=${mini.ml()} 左端=${mini.getBoundingClientRect().left}`)
+
+    // --- ② 収束する。押した後も採取点から見え続ける（reserved より右にも点を置いているか） ---
+    run([mini]); run([mini]); run([mini])
+    check('BY 🔴 何周期回しても二重に押さない（344 のまま）',
+        mini.ml() === 344, `margin-left=${mini.ml()}`)
+    // 🔴 **管理数で見ても意味が無い**（覚えている集合が必ず 1 を返すので、採取点を消しても通る）。
+    //    押し終えた位置に居る要素が採取点に掛かるかを、収集そのものに聞く。
+    const pushed = mkEl({ left: RESERVED, top: 300, w: 400, h: 300 })
+    check('BY 🔴 押し出した先（左端＝帯の右端）にも採取点がある（無いと 500ms ごとに往復する）',
+        collectFixedNearStrip(RESERVED, env([pushed]).doc, { innerHeight: VH }).has(pushed))
+
+    // --- ③ それでも見失った場合に押し戻さない（覚えている相手は毎回測り直す） ---
+    run([])
+    check('BY 🔴 採取点から消えても戻さない（500ms ごとの往復を防ぐ）',
+        mini.ml() === 344 && nudgedCount() === 1, `margin-left=${mini.ml()} 管理数=${nudgedCount()}`)
+
+    // --- ④ React が style だけ剥がしたら当て直す。**二重には押さない** ---
+    mini.style.marginLeft = ''
+    run([mini])
+    check('BY 🔴 style を剥がされたら当て直す（688 にならず 344）',
+        mini.ml() === 344, `margin-left=${mini.ml()}`)
+
+    // 🔴 **剥がし方は「空にする」だけではない。** React が margin-left を 0px で上書きすると、
+    //    style は数値のまま属性と食い違う。ここを 0 とみなさないと natural を負に見積もって
+    //    「画面外に退避している」と判定し、**押し直さないまま隠れ続ける。**
+    mini.style.marginLeft = '0px'
+    run([mini])
+    check('BY 🔴 style を 0px で上書きされても当て直す（空文字だけが剥がし方ではない）',
+        mini.ml() === 344, `margin-left=${mini.ml()}`)
+    // --- ⑤ 触ってはいけない相手。**全部、採取点に掛かる位置に置く**（掛からないと素通りで空振り） ---
+    clearAllNudges()
+    const outside = mkEl({ left: 364, w: 300, h: 300 })          // 既に帯の外
+    const popper = mkEl({ left: 0, w: 400, h: 300, inlineTransform: 'translate(100px, 40px)' })
+    const jsLeft = mkEl({ left: 0, w: 400, h: 300, inlineLeft: '20px' })
+    const parked = mkEl({ left: -300, w: 400, h: 300 })          // 画面外で待機
+    const tiny = mkEl({ left: 0, w: 20, h: 300 })                // 細すぎる
+    const notFixed = mkEl({ left: 0, w: 400, h: 300, pos: 'absolute' })
+    const inSb = mkEl({ left: 0, w: 400, h: 300, inSidebar: true })
+    const sbRoot = mkEl({ left: 0, w: 400, h: 300, id: 'niconamasidebar-kick-root' })
+    const all5 = [outside, popper, jsLeft, parked, tiny, notFixed, inSb, sbRoot]
+    // 空振り防止: そもそも採取点に掛かっているか（掛かっていなければ検証になっていない）
+    const e5 = env(all5).doc
+    const reached = new Set()
+    for (const x of [4, 60, 116, 172, 228, 284, 340, 364]) {
+        for (const y of [10, 130, 324, 540, 756, 950, 1070]) {
+            for (const el of e5.elementsFromPoint(x, y)) reached.add(el)
+        }
+    }
+    check('BY （空振り防止）触らない相手はすべて採取点に掛かっている',
+        all5.every((el) => reached.has(el)), `届いた数=${reached.size}/${all5.length}`)
+
+    run(all5)
+    check('BY 帯の外に居るものは触らない', outside.ml() === 0)
+    // 🔴 **インラインで座標を持っていても、食い込んでいるなら押す**（BY-2）。
+    //    小窓は掴んで動かせる。掴んだ瞬間に Kick がインライン座標を書くので、
+    //    ここで手放すと**サイドバーの裏に置かれて二度と出てこない**（裏では掴めない）。
+    check('BY-2 🔴 インライン transform を持っていても、裏に居るなら押し出す',
+        popper.ml() === 360, `margin-left=${popper.ml()}`)
+    check('BY-2 🔴 インライン left を持っていても、裏に居るなら押し出す',
+        jsLeft.ml() === 360, `margin-left=${jsLeft.ml()}`)
+    check('BY 🔴 画面外に退避しているもの（left:-300）を引きずり出さない', parked.ml() === 0)
+    check('BY 細すぎるもの（計測用の不可視要素）は触らない', tiny.ml() === 0)
+    check('BY fixed でないものは触らない', notFixed.ml() === 0)
+    check('BY サイドバーの中身は触らない', inSb.ml() === 0)
+    check('BY サイドバーのルート自身は触らない', sbRoot.ml() === 0)
+    // ⚠️ インライン座標の2つ（popper / jsLeft）は**押す側**に回った（BY-2）。0 ではなく 2 が正しい。
+    //    ここを 0 のままにすると、BY-2 を入れた瞬間に落ちて「退行した」と読み違える。
+    check('BY 押す相手はインライン座標の2件だけ（他は抱え込まない）', nudgedCount() === 2,
+        `管理数=${nudgedCount()}`)
+
+    // --- ⑤-2 portal で body 直下／その子に差し込まれたもの（当たり判定に掛からなくても拾う） ---
+    clearAllNudges()
+    const portal = mkEl({ left: 0, top: 200, w: 400, h: 300 })
+    const deep = mkEl({ left: 0, top: 600, w: 400, h: 300 })
+    const holder = mkEl({ left: 0, top: 600, w: 400, h: 300, pos: 'static' })
+    holder.children = [deep]
+    run([], RESERVED, { bodyChildren: [portal, holder] }) // 当たり判定では一切見つからない
+    check('BY 🔴 portal で body 直下に出たものは、採取点に当たらなくても拾う',
+        portal.ml() === 360, `margin-left=${portal.ml()}`)
+    check('BY portal の1階層下も拾う', deep.ml() === 360, `margin-left=${deep.ml()}`)
+
+    // --- ⑤-3 掴んで動かしている最中は触らない（BY-2。利用者が実機で発見） ---
+    clearAllNudges()
+    // 🔴 **採取点に掛かる位置に置くこと。**far right（600 など）だと一度も観測されず、
+    //    「触らない」ではなく「見ていない」で通る。前回位置を覚えている前提が崩れる。
+    const dragged = mkEl({ left: 364, top: 200, w: 320, h: 180 })
+    run([dragged])                                    // 帯の外に居る。押す必要なし
+    check('BY-2 動かす前: 帯の外に居るので触らない', dragged.ml() === 0)
+    check('BY-2 （空振り防止）動かす前にちゃんと観測している',
+        collectFixedNearStrip(RESERVED, env([dragged]).doc, { innerHeight: VH }).has(dragged))
+
+    // 掴んでサイドバーの裏へ運ぶ。**運んでいる最中に押すとカーソルから 360px 飛ぶ。**
+    dragged._left = 300; run([dragged], RESERVED, { pointerActive: true })
+    check('BY-2 🔴 掴んでいる間は押さない（小窓がカーソルから飛ぶ）', dragged.ml() === 0,
+        `margin-left=${dragged.ml()}`)
+    dragged._left = 40;  run([dragged], RESERVED, { pointerActive: true })
+    check('BY-2 🔴 裏まで運ばれても、掴んでいる間は押さない', dragged.ml() === 0)
+
+    // 離した。🔴 **離した瞬間の位置は、最後に記録した周期の位置とは違う**
+    //    （周期は 500ms おき・離すのはその間）。ここを同じ位置で試すと
+    //    「移動中」判定を素通りしてしまい、**穴が見えない。**
+    dragged._left = 24
+    run([dragged], RESERVED, { ignoreMoving: true }) // pointerup 相当
+    check('BY-2 🔴 離したその場で裏から出てくる（次の周期を待たない）',
+        dragged.getBoundingClientRect().left === 360,
+        `margin-left=${dragged.ml()} 左端=${dragged.getBoundingClientRect().left}`)
+
+    // ⚠️ 逆に、離していない（＝ふつうの周期）なら移動中として素通りすること。
+    clearAllNudges()
+    const still = mkEl({ left: 364, top: 200, w: 320, h: 180 })
+    run([still]); still._left = 24; run([still])
+    check('BY-2 ふつうの周期では、移動直後は押さない（ignoreMoving は離した時だけ）',
+        still.ml() === 0, `margin-left=${still.ml()}`)
+
+    // --- ⑤-4 動いている最中は触らない（他所が位置を計算し直しているものと押し合わない） ---
+    clearAllNudges()
+    const slide = mkEl({ left: 40, top: 200, w: 320, h: 180 })
+    run([slide])                                      // 初見は「止まっている」扱い＝すぐ押す
+    check('BY-2 初めて見た相手はすぐ押す（1周期＝最悪500ms 待たせない）', slide.ml() === 320,
+        `margin-left=${slide.ml()}`)
+
+    // 🔴 **裏を返すと「初めて帯に入ってきた相手が移動中か」は判別できない。**
+    //    採取は帯の近くしか見ていないので、遠くから運ばれてきた相手には前回位置が無い。
+    //    掴んで運ぶ場合は `pointerActive` が守る。**移動中ガードだけに頼らないこと。**
+    clearAllNudges()
+    const arriving = mkEl({ left: 24, top: 500, w: 320, h: 180 })
+    run([arriving], RESERVED, { pointerActive: true })
+    check('BY-2 🔴 遠くから掴んで運ばれてきた初見の相手も、掴んでいる間は押さない',
+        arriving.ml() === 0, `margin-left=${arriving.ml()}`)
+    clearAllNudges(); slide.style.marginLeft = ''
+    run([slide]); slide._left = 100; run([slide])     // 2周期目で位置が変わった＝移動中
+    check('BY-2 🔴 動いている最中は押し直さない（向こうと押し合わない）',
+        slide.ml() === 320, `margin-left=${slide.ml()}`)
+    run([slide])                                      // 止まった
+    check('BY-2 止まったら押し直す', slide.ml() === 260, `margin-left=${slide.ml()}`)
+
+    // --- ⑥ 帯の幅が変わったら追従する（開閉・ドラッグ） ---
+    clearAllNudges()
+    const modal = mkEl({ left: 0, w: 800, h: 500 })
+    run([modal], 360)
+    const at360 = modal.ml()
+    run([modal], 500)
+    check('BY 帯が広がったら押す量も増える（360→500）',
+        at360 === 360 && modal.ml() === 500, `${at360} → ${modal.ml()}`)
+    run([modal], 24) // 閉じた状態（ハンドルのぶんだけ）
+    check('BY 閉じたら押す量も減る（ハンドルのぶんまで）', modal.ml() === 24, `margin-left=${modal.ml()}`)
+
+    // --- ⑦ 全画面・連携OFF では全部戻す。裏タブでは戻さない ---
+    clearAllNudges()
+    const fs1 = mkEl({ left: 0, w: 800, h: 500 })
+    run([fs1])
+    const beforeFs = fs1.ml()
+    run([fs1], RESERVED, { fullscreen: fs1 })
+    check('BY 🔴 全画面表示に入ったら押した指定を全部戻す',
+        beforeFs === 360 && fs1.ml() === 0 && nudgedCount() === 0, `${beforeFs} → ${fs1.ml()}`)
+
+    clearAllNudges()
+    const off = mkEl({ left: 0, w: 800, h: 500 })
+    run([off])
+    run([off], 0)
+    check('BY 連携を切った（確保幅0）ら押した指定を戻す', off.ml() === 0 && nudgedCount() === 0)
+
+    clearAllNudges()
+    const bg = mkEl({ left: 0, w: 800, h: 500 })
+    run([bg])
+    run([bg], RESERVED, { hidden: true })
+    check('BY 🔴 裏タブでは測らないが、押した指定は外さない（表に戻った瞬間に潜り込まない）',
+        bg.ml() === 360, `margin-left=${bg.ml()}`)
+
+    // --- ⑧ 自分で付けていない margin-left は奪わない ---
+    clearAllNudges()
+    // 🔴 **採取点に掛かる位置に置くこと。**left:400 だと 1本も当たらず、
+    //    「触っていない」のではなく「見てすらいない」状態で通ってしまう（空振り）。
+    // ⚠️ 自前の margin-left 40px ぶん右へ出る。**それを足した位置**が採取点に掛かるように置く。
+    const theirs = mkEl({ left: 324, w: 300, h: 300 })
+    theirs.style.marginLeft = '40px'
+    const seen = collectFixedNearStrip(RESERVED, env([theirs]).doc, { innerHeight: VH }).has(theirs)
+    run([theirs])
+    check('BY （空振り防止）その相手を実際に見ている', seen)
+    check('BY 🔴 Kick が自分で当てた margin-left は奪わない', theirs.style.marginLeft === '40px',
+        `margin-left=${theirs.style.marginLeft}`)
+
+    // --- ⑨ 消えた要素を握り続けない ---
+    clearAllNudges()
+    const gone = mkEl({ left: 0, w: 800, h: 500 })
+    run([gone])
+    gone.isConnected = false
+    run([])
+    check('BY DOM から消えた要素は管理から外す', nudgedCount() === 0, `管理数=${nudgedCount()}`)
+    clearAllNudges()
+
+    // --- ⑩ 呼び出し位置（構造） ---
+    check('BY 定期の突き合わせから押している',
+        /reconcileTimer\s*=\s*setInterval[\s\S]*?nudgeFixedOverlays\(/.test(kpc))
+    check('BY 開閉でも押し直している（次の周期を待たない）',
+        /function setOpen\([\s\S]*?nudgeFixedOverlays\(/.test(kpc))
+    check('BY 🔴 連携を切る時に戻している（body の寄せを外すだけでは戻らない）',
+        /isActive = false[\s\S]{0,400}clearAllNudges\(\)/.test(kpc))
+    check('BY-2 ポインタの上下を見張っている',
+        /addEventListener\('pointerdown'/.test(kpc) && /addEventListener\('pointerup'/.test(kpc))
+    check('BY-2 🔴 離した時にその場で押し直す（次の周期を待たない）',
+        /pointerActive = false[\s\S]{0,200}nudgeFixedOverlays\(/.test(kpc))
+    // 🔴 渡していないと「移動中」で素通りし、**離しても次の周期まで出てこない。**
+    check('BY-2 🔴 離した時の呼び出しには ignoreMoving を渡す',
+        /pointerActive = false[\s\S]{0,200}ignoreMoving:\s*true/.test(kpc))
+    check('BY-2 🔴 ウィンドウ外で離した取りこぼしを拾う（pointercancel / blur）',
+        /pointercancel/.test(kpc) && /addEventListener\('blur'/.test(kpc))
+    // ⚠️ `[^)]*` では `reservedWidth()` の ")" を跨げず、渡していても落ちる（実際に踏んだ）。
+    check('BY-2 押す時に pointerActive を渡している',
+        /nudgeFixedOverlays\([\s\S]{0,120}pointerActive/.test(kpc))
+    // 🔴 ドラッグ中に毎フレーム走らせない。applyHostStyles は pointermove から呼ばれる。
+    const ahs = kpc.match(/function applyHostStyles\(\)[\s\S]*?\n\}/)
+    check('BY 🔴 applyHostStyles の中では押さない（ドラッグ中に毎フレーム走る）',
+        !!ahs && !/nudgeFixedOverlays/.test(ahs[0]))
+}
+
+async function kickAutoNext() {
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const kpc = stripComments(rd('kickPage.js'))
+    const ks = stripComments(rd('services/kickStatus.js'))
+    console.log('=== BU kick.com の自動移動 ===')
+
+    const { fetchKickChannelState, observeKickProgramEnd, KICK_LIVE, KICK_OFFLINE, KICK_UNKNOWN } =
+        await import('../src/services/kickStatus.js')
+
+    // --- 応答の読み方（実測した形をそのまま並べる。2026-08-07） ---
+    const origFetch = globalThis.fetch
+    const withBody = (body, ok = true, status = 200) => {
+        globalThis.fetch = async () => ({ ok, status, json: async () => body })
+    }
+    try {
+        withBody({ livestream: { id: 1, is_live: true, viewer_count: 3 } })
+        check('BU livestream がオブジェクト → 配信中', await fetchKickChannelState('x') === KICK_LIVE)
+        withBody({ livestream: null })
+        check('BU livestream が null → 配信なし', await fetchKickChannelState('x') === KICK_OFFLINE)
+        withBody({ livestream: { id: 1, is_live: false } })
+        check('BU is_live が false なら配信なし', await fetchKickChannelState('x') === KICK_OFFLINE)
+
+        // 🔴 ここが要。**分からない時に「配信なし」へ倒さないこと。**
+        //    倒すと、回線が不安定なだけで勝手にページを移る。
+        withBody({ id: 1, slug: 'x' }) // livestream キーそのものが無い＝仕様が変わった
+        check('BU livestream キーが無い → 分からない（配信なしにしない）',
+            await fetchKickChannelState('x') === KICK_UNKNOWN)
+        withBody({}, false, 403)
+        check('BU HTTP エラー → 分からない', await fetchKickChannelState('x') === KICK_UNKNOWN)
+        globalThis.fetch = async () => { throw new Error('network') }
+        check('BU 通信エラー → 分からない', await fetchKickChannelState('x') === KICK_UNKNOWN)
+        globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json') } })
+        check('BU JSON が壊れていても分からない扱い', await fetchKickChannelState('x') === KICK_UNKNOWN)
+        check('BU slug が空なら聞きに行かない', await fetchKickChannelState('') === KICK_UNKNOWN)
+
+        // --- 動いてよい場面・いけない場面 ---
+        const runObserver = async (states, opts) => {
+            let i = 0
+            globalThis.fetch = async () => {
+                const s = states[Math.min(i++, states.length - 1)]
+                return { ok: true, status: 200, json: async () => ({ livestream: s === 'live' ? { is_live: true } : null }) }
+            }
+            let fired = 0
+            const stop = observeKickProgramEnd(() => 'ch', () => { fired++ }, { intervalMs: 5000, ...opts })
+            // 即時の1回ぶんだけ進める（setInterval は待たない）
+            await new Promise((r) => setTimeout(r, 30))
+            stop()
+            return fired
+        }
+        check('BU 自分で開いたチャンネルが配信していないだけでは動かない',
+            await runObserver(['offline'], {}) === 0,
+            '動くと、配信前のチャンネルを開いた瞬間に連れて行かれる')
+        check('BU 自動移動で飛んできた先が配信していなければ動く',
+            await runObserver(['offline'], { arrivedByAutoNext: true }) === 1)
+        check('BU 分からない時は動かない',
+            await (async () => {
+                globalThis.fetch = async () => ({ ok: false, status: 500 })
+                let fired = 0
+                const stop = observeKickProgramEnd(() => 'ch', () => { fired++ }, { intervalMs: 5000, arrivedByAutoNext: true })
+                await new Promise((r) => setTimeout(r, 30))
+                stop()
+                return fired
+            })() === 0)
+        check('BU チャンネルページでなければ聞きに行かない',
+            await (async () => {
+                let calls = 0
+                globalThis.fetch = async () => { calls++; return { ok: true, status: 200, json: async () => ({ livestream: null }) } }
+                const stop = observeKickProgramEnd(() => '', () => {}, { intervalMs: 5000, arrivedByAutoNext: true })
+                await new Promise((r) => setTimeout(r, 30))
+                stop()
+                return calls
+            })() === 0)
+        // --- レイド（配信者が終了時にリスナーをまとめて別チャンネルへ送る機能）との干渉 ---
+        // 🔴 向こうもモーダルとカウントダウンを出す。こちらが先に決着すると
+        //    **配信者が決めた移動先を奪う。**
+        const runTwice = async (states, opts) => {
+            let i = 0
+            globalThis.fetch = async () => {
+                const s = states[Math.min(i++, states.length - 1)]
+                return { ok: true, status: 200, json: async () => ({ livestream: s === 'live' ? { is_live: true } : null }) }
+            }
+            let fired = 0
+            const stop = observeKickProgramEnd(() => 'ch', () => { fired++ }, { intervalMs: 5000, ...opts })
+            await new Promise((r) => setTimeout(r, 30))   // 1回目（配信中）
+            await new Promise((r) => setTimeout(r, 5030)) // 2回目（配信なし）
+            stop()
+            return fired
+        }
+        check('BU 目の前で終わった直後は動かない（レイドに先を譲る）',
+            await runTwice(['live', 'offline'], { graceMs: 60000 }) === 0,
+            'こちらが先に決着すると、配信者が決めたレイド先を奪う')
+        check('BU 猶予を過ぎれば動く',
+            await runTwice(['live', 'offline'], { graceMs: 0 }) === 1)
+        // 飛んできた先が最初から配信なしの時はレイドが飛んでくる余地が無いので待たない
+        check('BU 飛んできた先が配信なしなら猶予を待たない',
+            await runObserver(['offline'], { arrivedByAutoNext: true, graceMs: 60000 }) === 1,
+            '待つと、終わったチャンネルを延々と見せることになる')
+    } finally {
+        globalThis.fetch = origFetch
+    }
+
+
+    // --- 作りの縛り ---
+    check('BU Kick の DOM を見ていない',
+        !/querySelector|getElementsByClassName|MutationObserver/.test(ks),
+        'kick.com の DOM に依存すると、向こうの実装変更で無言で壊れる')
+    check('BU 不在（フォロー中一覧から消えた）で終了を導いていない',
+        !/lastKickPrograms/.test(ks) && !/livestreams/.test(ks),
+        'ニコ生側が事故を起こしてやめた形（doc/09 項目BF-2）')
+    // ⚠️ 語の有無では駄目。代入だけ残して**門番の if を消しても通ってしまう**（実際にそうなった）。
+    check('BU 取得を重ねない', /if \(stopped \|\| inFlight\) return/.test(ks),
+        '応答は実測 1117ms まで伸びる。門番が無いと取得が積み上がる')
+    check('BU ページ側のイベントを購読していない',
+        !/addEventListener/.test(ks), 'visibilitychange 等を足さない方針（D6）')
+
+    // --- kickPage 側の配線 ---
+    check('BU kick.com が自動移動の監視を持つ', /startKickAutoNext\(\)/.test(kpc))
+    check('BU 設定が ON の時だけ監視する', /options\.autoNextProgram !== 'on'\) return/.test(kpc))
+    check('BU 設定の切り替えを受ける', /changes\.autoNextProgram/.test(kpc))
+    check('BU 連携を切ったら監視も止める',
+        /function teardown\(\)[\s\S]{0,200}?stopKickAutoNext\(\)/.test(kpc))
+    // 🔴 印を読み切ってから監視を始めること。監視は開いた直後に1回聞くので、
+    //    先に始めると「飛んできた先か」が未確定のまま最初の判定が走る。
+    check('BU 飛んできた印を読み切ってから監視を始める',
+        /await consumeAutoNextHopMark\([\s\S]{0,80}?startKickAutoNext\(\)/.test(kpc),
+        '順序が逆だと、飛んできた先が配信していなくても1周期ぶん動かない')
+    check('BU モーダルと移動先選びはニコ生と共有',
+        /new AutoNextManager\(/.test(kpc) && /startWatcher\(/.test(kpc),
+        '自前で作ると仕様が食い違う')
+    // 予約パスの一覧を2つ持たない（watchTargetIdOf が唯一の定義）
+    check('BU チャンネル判定は共有実装を使う',
+        /watchTargetIdOf\(location\.href\)/.test(kpc) && !/'browse'/.test(kpc),
+        '予約パスの一覧が2つあると片方だけ古くなる')
+
+    // --- オリジンをまたぐ印 ---
+    const st = stripComments(rd('services/status.js'))
+    // ⚠️ 定数名で見ること。キーの文字列は宣言側にしか出ないので、`autoNextHop` を
+    //    set の近くで探すと**書いてあっても見つからない**（実際に一度そうなった）。
+    check('BU 飛んだ印は拡張のストレージにも置く',
+        /function markAutoNextHop\([\s\S]{0,400}?chrome\.storage\.local\.set\(\{[\s\S]{0,80}?AUTO_NEXT_HOP_STORE_KEY/.test(st),
+        'sessionStorage はオリジンごとなので、ニコ生 ⇄ kick.com では読めない')
+    check('BU 印は飛び先の識別子で照合する',
+        /mark\.to === currentId/.test(st),
+        '照合しないと、残った印が後から自分で開いたページに効いてしまう')
+    check('BU 印は1回で使い切る', /chrome\.storage\.local\.remove\(/.test(st))
+
+    // --- 固定オーバーレイ（モーダル）がサイドバーの下へ潜り込まないか ---
+    // 🔴 `position: fixed` はビューポート基準。幅の読み替えだけでは位置が直らない。
+    //    実測（2026-08-07）: 暗幕は `fixed inset-0`、本体は `fixed … lg:left-[50%] translate-x-[-50%]`。
+    const kickCss = cssRules(rd('styles/kickPage.css'))
+    const backdrop = kickCss.find((r) => /\[class~="inset-0"\]/.test(r.sel))
+    check('BU 画面いっぱいの固定オーバーレイを可視領域へ寄せる',
+        !!backdrop && /left:\s*var\(--nns-kick-reserved\)\s*!important/.test(backdrop.body),
+        'サイドバーの下へ潜り込む')
+    const centered = kickCss.find((r) => /\[class\*="left-\[50%\]"\]/.test(r.sel))
+    check('BU 中央寄せのダイアログは可視領域の中央へ',
+        !!centered && /left:\s*calc\(50% \+ var\(--nns-kick-reserved\) \/ 2\)\s*!important/.test(centered.body),
+        '可視領域は [reserved, 100vw] なので中心は 50% + reserved/2。左端が reserved/2 だけ隠れる')
+    for (const r of [backdrop, centered]) {
+        // ⚠️ **絞り込み（`:not(...)`）が増えるのは構わない。** 守りたいのは
+        //    「`nns-kick-active` が前提であること」だけ。先頭の字面で縛ると、
+        //    条件を足した時に意図と関係なく落ちる（実際に踏んだ）。
+        check(`BU 連携が有効な間だけ当てる: ${r ? r.sel.slice(0, 40) : 'なし'}`,
+            !!r && /^html\.nns-kick-active(:not\([^)]*\))?[\s.[]/.test(r.sel),
+            '連携を切った後も Kick のモーダルを動かし続けてはいけない')
+    }
+
+    // --- レイドで移された時に引きはがさないか（AutoNextManager 側の関門） ---
+    // 🔴 kick.com は SPA。レイドはページを破棄せず URL だけ変えるので、カウントダウンの
+    //    タイマーが**生き残る**。関門が無いと、レイド先に着いた数秒後にこちらが引きはがす。
+    const anm = stripComments(rd('managers/AutoNextManager.js'))
+    check('BU 移動前に「まだ同じ配信を見ているか」を確かめる',
+        /const startedAtId = watchTargetIdOf\(location\.href\)/.test(anm)
+        && /const movedAway = \(\)/.test(anm))
+    for (const [where, re] of [
+        ['毎秒の見張り', /setInterval\(\(\) => \{[\s\S]{0,300}?if \(movedAway\(\)\) return abandon\(/],
+        ['満了時', /!this\.appState\.autoNext\.canceled && !movedAway\(\)/],
+        ['サムネクリック', /const goNow = \(\) => \{[\s\S]{0,300}?if \(movedAway\(\)\) return abandon\(/],
+    ]) {
+        check(`BU 関門がある: ${where}`, re.test(anm),
+            'レイドで移された直後に、こちらが別の配信へ引きはがす')
+    }
+    // 取りやめは「利用者の取り消し」と別扱い。次の終了ではまた動けること。
+    check('BU 取りやめても次の終了では動ける（取り消しとは別扱い）',
+        /const abandon = \([\s\S]{0,300}?autoNext\.scheduled = false/.test(anm),
+        'scheduled を立てたままにすると、そのページでは二度と動かない')
+}
+
 async function syncRender() {
     const { readFileSync } = await import('fs')
     const um = readFileSync(new URL('../src/managers/UpdateManager.js', import.meta.url), 'utf8')
@@ -2143,8 +4078,14 @@ async function syncRender() {
     // 根拠は2つ。どちらかが崩れたら、DOM から毎周期作り直す方式は成り立たなくなる。
     //   (1) DOM を読んでから差し替えるまでが**同期**（間に await が無い）
     //       → 読んだ内容が古くなりようがないので、作り直しがゼロコストで常に正しい
-    //   (2) カードの増減が**1箇所**しか無い
+    //   (2) カードを増減させる経路が**あらかじめ決めた場所にしか無い**
     //       → 「どこかで勝手に増減している」経路が存在しない
+    //
+    // 🔴 **(2) を「1箇所だけ」で数えるのはやめた（2026-08-04）。** Kick 連携で
+    //    ページが2本（ニコ生 / kick.com）になり、それぞれに差し替え地点ができた。
+    //    数を数えるだけだと、増えたら緩めるしかなくなって検査が形骸化する。
+    //    **許可した場所の一覧と完全一致するか**を見る形にした。
+    //    新しい増減経路が増えれば「予期しない場所」として落ちるので、目的は保たれている。
     const rs = um.indexOf('const existingMap = new Map();')
     const re2 = um.indexOf('this.appState.update.isInserting = false;', rs)
     const region = rs >= 0 && re2 > rs ? um.slice(rs, re2) : ''
@@ -2162,8 +4103,29 @@ async function syncRender() {
             mutations.push(`${f.split(/[\\/]/).pop()} ${m[0]}`)
         }
     }
-    check('AO カードの増減点は container.replaceChildren の1箇所だけ', mutations.length === 1,
-        mutations.length ? mutations.join(' , ') : '(0件＝差し替え自体が消えている。それも異常)')
+    // 許可した増減経路。**ここに無い場所で DOM を増減させたら落ちる。**
+    // 増やす時は「なぜそこで増減してよいのか」を書いてから足すこと。
+    const ALLOWED_MUTATIONS = [
+        // ニコ生ページのリスト差し替え（唯一の描画地点）
+        'UpdateManager.js .replaceChildren(',
+        // kick.com ページのリスト差し替え（同上。ページが分かれているぶん2箇所目）
+        'kickPage.js .replaceChildren(',
+        // kick.com ページのサイドバー枠の組み立て・撤去。カードの増減ではない
+        'kickPage.js .innerHTML =',
+        'kickPage.js .innerHTML =',
+        'kickPage.js .remove()',
+        // 権限を外した直後に Kick のカードだけ撤去する。
+        // 次の更新周期でも消えるが、それだと最大120秒残って「無効にしたのに消えない」に見える
+        'optionsHandler.js .remove()',
+    ].sort()
+    const found = mutations.slice().sort()
+    const missing = ALLOWED_MUTATIONS.filter((m) => !found.includes(m))
+    const unexpected = found.filter((m) => !ALLOWED_MUTATIONS.includes(m))
+    check('AO カードの増減は許可した場所だけで起きている',
+        unexpected.length === 0 && missing.length === 0,
+        unexpected.length ? `予期しない増減: ${unexpected.join(' , ')}`
+            : missing.length ? `許可した経路が消えている: ${missing.join(' , ')}（差し替え自体が無くなっていないか）`
+                : `${found.length}件すべて既知`)
 
     // --- AM: FLIP が空振りしない配線になっているか（静的側の網） ---
     const iFlip = um.indexOf('flipReorder(container')
@@ -2621,6 +4583,22 @@ if (real) {
     await crossTab()
     console.log('')
     await inPlaceUpdate()
+    console.log('')
+    await cardIdentity()
+    console.log('')
+    await bothPagesSameSpec()
+    await kickSidebarMovesAsOnePiece()
+    await settingsSegmentOrder()
+    await autoUpdateOff()
+    await serviceTabs()
+    await cardSize()
+    await autoNextTarget()
+    await kickAutoNext()
+    await fixedOverlayNudgeGroup()
+    await gridColumnFixGroup()
+    await widthRewriteSelectorGroup()
+    await sidebarPlacementGroup()
+    await kickPlaceholderIconGroup()
     console.log('')
     await syncRender()
     console.log('')

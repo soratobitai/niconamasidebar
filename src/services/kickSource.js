@@ -12,7 +12,7 @@
  */
 
 import { handleError } from '../utils/error.js'
-import { kickConcurrentTauMs } from '../config/constants.js'
+import { kickConcurrentTauMs , kickIconRetryMs } from '../config/constants.js'
 
 /** Kick の番組カードにだけ付く DOM id の接頭辞。 */
 export const KICK_ID_PREFIX = 'k'
@@ -62,7 +62,12 @@ export function mapKickLivestreamToInfo(s) {
             //    将来 livestreams 側が返すようになれば、その値がそのまま使われる。
             icon: user.profile_pic || '',
         },
-        thumbnailUrl: (s.thumbnail && (s.thumbnail.src || '')) || '',
+        // 🔴 **`?versionId=` を外す。**
+        //    付いたままだと「その版」を指すので、同じURLを何度取り直しても同じ絵になり、
+        //    新しい絵はリストを取り直さないと手に入らない（＝鮮度がリスト間隔に縛られる）。
+        //    素のURLは最新版を返す（2026-08-04 実測: 1280x720 が取得できた）。
+        //    これでニコ生と同じ「同じURLをキャッシュバスター付きで叩く」方式に乗せられる。
+        thumbnailUrl: stripQuery((s.thumbnail && s.thumbnail.src) || ''),
         // srcset を保持しておく。解像度を選べるのは Kick 側の利点で、後で使う。
         thumbnailSrcset: (s.thumbnail && s.thumbnail.srcset) || '',
         isMemberOnly: false,
@@ -82,6 +87,13 @@ export function mapKickLivestreamToInfo(s) {
  * @param {string} raw
  * @returns {string|null}
  */
+/** クエリを落とす。`?versionId=` を外して「最新版」を指すURLにするために使う。 */
+function stripQuery(url) {
+    if (typeof url !== 'string') return ''
+    const q = url.indexOf('?')
+    return q === -1 ? url : url.slice(0, q)
+}
+
 export function parseKickTimeToIso(raw) {
     if (!raw || typeof raw !== 'string') return null
     const ms = Date.parse(raw.replace(' ', 'T') + 'Z')
@@ -143,7 +155,17 @@ export async function fetchKickPrograms() {
 // ニコ生のページからでも kick.com のページからでも同じように叩ける。
 
 const KICK_ICON_CACHE_KEY = 'kickIconCache'
-const iconCache = new Map() // slug -> url（'' は「取れなかった」の記録。何度も叩かない）
+/**
+ * slug -> url。**取れたものだけ**を入れる。
+ *
+ * 🔴 **失敗を「空文字」としてここに入れないこと**（2026-08-08・doc/09 項目CD）。
+ *    以前はそうしており、`iconCache.has(slug)` が真になるので**二度と取りに行かなかった。**
+ *    通信が一瞬途切れただけで、その配信者のカードは**永久にローディング画像**になる。
+ *    失敗は下の `iconRetryAfter` に期限つきで覚え、時間が経ったらまた試す。
+ */
+const iconCache = new Map()
+/** slug -> この時刻までは再取得しない（メモリのみ。ページを開き直せば仕切り直し）。 */
+const iconRetryAfter = new Map()
 let iconCacheLoaded = false
 
 // 1周期に投げる補完リクエストの上限。新しくフォローした配信者が一斉に放送を始めても、
@@ -157,7 +179,8 @@ async function loadIconCache() {
         const stored = await chrome.storage.local.get(KICK_ICON_CACHE_KEY)
         const map = stored && stored[KICK_ICON_CACHE_KEY]
         if (map && typeof map === 'object') {
-            for (const [slug, url] of Object.entries(map)) iconCache.set(slug, url)
+            // ⚠️ 空文字は**以前の版が保存した「失敗の記録」**。読み込まずに捨てて、取り直させる。
+            for (const [slug, url] of Object.entries(map)) if (url) iconCache.set(slug, url)
         }
     } catch (e) { /* 読めなくても実害は無い。毎回取り直すだけ */ }
 }
@@ -176,15 +199,18 @@ function saveIconCache() {
 async function fillMissingIcons(programs) {
     await loadIconCache()
 
+    const now = Date.now()
     const need = []
     for (const p of programs) {
         const slug = p.contentOwner && p.contentOwner.id
         if (!slug) continue
         if (p.contentOwner.icon) continue
         if (iconCache.has(slug)) {
-            p.contentOwner.icon = iconCache.get(slug) || ''
+            p.contentOwner.icon = iconCache.get(slug)
             continue
         }
+        // 直近で失敗した相手は少し待つ。**ただし諦めない**（待ちが明ければまた試す）。
+        if ((iconRetryAfter.get(slug) || 0) > now) continue
         if (!need.includes(slug)) need.push(slug)
     }
     if (!need.length) return
@@ -198,10 +224,13 @@ async function fillMissingIcons(programs) {
             })
             if (!res.ok) throw new Error('HTTP ' + res.status)
             const ch = await res.json()
-            iconCache.set(slug, (ch && ch.user && ch.user.profile_pic) || '')
+            const url = (ch && ch.user && ch.user.profile_pic) || ''
+            // 🔴 空で返ってきた時も**覚えない。** アイコン未設定の配信者もいるが、
+            //    その判別は付かないうえ、覚えると「後で設定した」に一生追従できない。
+            if (url) iconCache.set(slug, url)
+            else iconRetryAfter.set(slug, now + kickIconRetryMs)
         } catch (e) {
-            // 取れなかったことも覚える。毎周期リトライして無駄に叩かないため。
-            iconCache.set(slug, '')
+            iconRetryAfter.set(slug, now + kickIconRetryMs)
         }
     }))
     saveIconCache()
@@ -209,9 +238,60 @@ async function fillMissingIcons(programs) {
     for (const p of programs) {
         const slug = p.contentOwner && p.contentOwner.id
         if (slug && !p.contentOwner.icon && iconCache.has(slug)) {
-            p.contentOwner.icon = iconCache.get(slug) || ''
+            p.contentOwner.icon = iconCache.get(slug)
         }
     }
+}
+
+// ---- 動くサムネ用の画像中継 ----
+//
+// 🔴 **CORS はブラウザがページに課す制限で、拡張の Service Worker からの取得には適用されない。**
+//    動くサムネは crossOrigin で読んだ画像を canvas に描く方式なので、
+//    ACAO を返さないホストの画像は SW に取ってもらって data URL で受け取る。
+//
+// どのオリジンから何が通るか（2026-08-04 実測）:
+//   `images.kick.com`         … **どこからも通らない**（ニコ生ページでも kick.com でも中継が要る）
+//   `*.dlive.nicovideo.jp`    … ニコ生ページからは通る。kick.com からは通らない
+
+const KICK_IMAGE_HOST = /^https:\/\/images\.kick\.com\//i
+const NICO_THUMB_HOST = /^https:\/\/[a-z0-9-]+\.dlive\.nicovideo\.jp\//i
+
+// 同じURLへの取得が重ならないようにする。サムネ更新は全カードを同時に走らせる。
+const imageInFlight = new Map()
+
+/**
+ * 画像を SW 経由で取り、data URL を返す。**取れなければ null**（呼び出し側が素のURLへ倒す）。
+ * @param {string} url
+ * @returns {Promise<string|null>}
+ */
+export async function fetchImageViaWorker(url) {
+    if (!url) return null
+    if (imageInFlight.has(url)) return imageInFlight.get(url)
+
+    const p = (async () => {
+        try {
+            const res = await chrome.runtime.sendMessage({ type: 'img:fetch', url })
+            return res && res.ok && res.dataUrl ? res.dataUrl : null
+        } catch (e) {
+            return null // 拡張が無効化されている等
+        } finally {
+            imageInFlight.delete(url)
+        }
+    })()
+    imageInFlight.set(url, p)
+    return p
+}
+
+/** ニコ生の視聴ページ用。**Kick の画像だけ**中継する（ニコ生自身の画像は直接読める）。 */
+export const nicoPageImageProxy = {
+    shouldUse: (url) => KICK_IMAGE_HOST.test(url),
+    fetch: fetchImageViaWorker,
+}
+
+/** kick.com 用。**両方とも**中継が要る。 */
+export const kickPageImageProxy = {
+    shouldUse: (url) => KICK_IMAGE_HOST.test(url) || NICO_THUMB_HOST.test(url),
+    fetch: fetchImageViaWorker,
 }
 
 // id -> { value, at }。放送が終わった番組は pruneSmoothing で落とす。
@@ -256,30 +336,3 @@ function pruneSmoothing(aliveIds) {
     }
 }
 
-/**
- * 実ページの Console から取得と写像を確かめるための入口。
- * `services/followPageSource.js` の `window.__testFollowScrape()` と同じ趣旨。
- *
- * 未検証のフィールド（`channel.user` の中身）がどう埋まったかも出す。
- */
-if (typeof window !== 'undefined') {
-    window.__testKickFetch = async () => {
-        const res = await fetchKickPrograms()
-        if (!res.ok) {
-            console.log('[kick] 取得できません:', res.reason, res.status || '')
-            return res
-        }
-        console.log('[kick] 取得:', res.programs.length + '件', res.partial ? '(途中まで)' : '')
-        console.table(res.programs.map((p) => ({
-            id: p.id,
-            title: (p.title || '').slice(0, 24),
-            配信者: p.contentOwner.name,
-            アイコン取得: p.contentOwner.icon ? 'あり' : 'なし',
-            同接: p.concurrentViewers,
-            開始: p.onAirTime.beginAt,
-            サムネ: p.thumbnailUrl ? 'あり' : 'なし',
-            URL: p.watchUrl,
-        })))
-        return res
-    }
-}

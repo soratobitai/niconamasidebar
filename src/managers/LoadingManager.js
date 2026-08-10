@@ -1,3 +1,5 @@
+import { setReloadButtonLoading } from '../render/sidebar.js';
+
 /**
  * ローディング状態管理
  * 更新セッションの開始・終了、ローディング表示の制御を担当
@@ -124,26 +126,9 @@ export class LoadingManager {
      * ローディング状態を更新（更新ボタンにローディング表示を適用）
      */
     updateLoadingState() {
-        const reloadBtn = document.getElementById('reload_programs');
-        if (!reloadBtn) {
-            return;
-        }
-        
-        const isLoading = this.appState.isLoading();
-        
-        if (isLoading) {
-            // ローディング中：更新ボタンを無効化し、ローディング表示を追加
-            if (!reloadBtn.classList.contains('loading')) {
-                reloadBtn.classList.add('loading');
-                reloadBtn.style.pointerEvents = 'none'; // クリック無効化
-            }
-        } else {
-            // 全ての処理が完了：ローディング表示を解除し、更新ボタンを有効化
-            if (reloadBtn.classList.contains('loading')) {
-                reloadBtn.classList.remove('loading');
-                reloadBtn.style.pointerEvents = ''; // クリック有効化
-            }
-        }
+        // 見た目の付け外しは kick.com ページと共有する（setReloadButtonLoading が唯一の実装）。
+        // ここに直接書き戻すと、両ページで挙動がずれる。
+        setReloadButtonLoading(this.appState.isLoading());
     }
 
     /**

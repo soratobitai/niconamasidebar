@@ -109,8 +109,13 @@ async function syncKickContentScript() {
  * ⚠️ `tabs` 権限は要らない。`chrome.tabs.query({})` は権限が無くても id は返し、
  *    こちらのコンテンツスクリプトが入っていないタブは応答しないだけ（lastError を捨てる）。
  */
-async function broadcastKickState() {
-    const granted = await hasKickPermission()
+async function broadcastKickState(forced) {
+    // 🔴 **無効化するときは「権限を外す前に」呼ぶこと（`forced === false`）。**
+    //    `permissions.onRemoved` の時点では**既にホスト権限を失っている**ため、
+    //    `chrome.tabs.sendMessage` が届かず、開いているタブに撤去を伝えられない。
+    //    外部（chrome://extensions）から外された場合は届かないが、その場合も
+    //    次の更新周期で Kick のカードが消える（取得が no-permission を返すため）。
+    const granted = typeof forced === 'boolean' ? forced : await hasKickPermission()
     let tabs = []
     try {
         tabs = await chrome.tabs.query({})
@@ -128,12 +133,39 @@ async function broadcastKickState() {
     }
 }
 
+/**
+ * 既に開いている kick.com のタブへ、その場でサイドバーを注入する。
+ *
+ * 🔴 **`registerContentScripts` は「これから読み込まれるページ」にしか効かない。**
+ *    有効にした時点で開いている kick.com のタブは、リロードするまで何も起きない。
+ *    「有効にしたのにサイドバーが出ない」に見えるので、ここで流し込む。
+ */
+async function injectIntoOpenKickTabs() {
+    if (!chrome.scripting || !chrome.scripting.executeScript) return
+    let tabs = []
+    try {
+        tabs = await chrome.tabs.query({ url: 'https://kick.com/*' })
+    } catch (e) {
+        return
+    }
+    for (const tab of tabs) {
+        if (!tab || tab.id == null) continue
+        try {
+            await chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: [KICK_SCRIPT.css[0]] })
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: [KICK_SCRIPT.js[0]] })
+        } catch (e) {
+            // 既に入っている・権限が間に合っていない等。リロードすれば入るので黙って諦める。
+        }
+    }
+}
+
 // 権限の増減に追従する。ユーザーは chrome://extensions からも権限を外せるので、
 // オプションページ側の処理だけに任せない。
 if (chrome.permissions && chrome.permissions.onAdded) {
     chrome.permissions.onAdded.addListener(() => {
         syncKickContentScript()
         broadcastKickState()
+        injectIntoOpenKickTabs()
     })
     chrome.permissions.onRemoved.addListener(() => {
         syncKickContentScript()
@@ -342,8 +374,182 @@ async function fetchImageAsDataUrl(url) {
     return { ok: true, dataUrl: 'data:' + type + ';base64,' + btoa(bin) }
 }
 
+// ============================================================
+// 動くサムネのフレーム保管庫（IndexedDB）
+//
+// 🔴 **ここに置く理由は「両サイトで共有するため」。**
+//    IndexedDB は**オリジンごとに完全に分離**されるので、コンテンツスクリプト側に置くと
+//    live.nicovideo.jp と kick.com で別々の保管庫になり、サイトを移るたびにコマを貯め直しになる。
+//    SW は拡張のオリジンなので、どのサイトから来ても同じ保管庫を見られる。
+//
+// ⚠️ **Blob は chrome.runtime のメッセージを通れない**（JSON 直列化のため）。
+//    呼び出し側が base64 にして渡してくる。ここではその文字列をそのまま保存する。
+//    デコードし直して Uint8Array で持つとディスクは減るが、読み書きのたびに
+//    変換が入るだけで、転送量は変わらない。
+// ============================================================
+
+const FRAME_DB_NAME = 'niconamasidebar'
+const FRAME_STORE = 'animFrames'
+const FRAME_DB_VERSION = 1
+
+let frameDbPromise = null
+
+function openFrameDB() {
+    if (frameDbPromise) return frameDbPromise
+    frameDbPromise = new Promise((resolve, reject) => {
+        let req
+        try {
+            req = indexedDB.open(FRAME_DB_NAME, FRAME_DB_VERSION)
+        } catch (e) {
+            reject(e)
+            return
+        }
+        req.onupgradeneeded = () => {
+            const db = req.result
+            if (!db.objectStoreNames.contains(FRAME_STORE)) {
+                db.createObjectStore(FRAME_STORE, { keyPath: 'id' })
+            }
+        }
+        req.onsuccess = () => {
+            const db = req.result
+            db.onversionchange = () => { try { db.close() } catch (e) { /* noop */ } frameDbPromise = null }
+            db.onclose = () => { frameDbPromise = null }
+            resolve(db)
+        }
+        req.onerror = () => reject(req.error)
+        // onblocked を拾わないと、どちらのハンドラも呼ばれず Promise が永久に未解決になる。
+        req.onblocked = () => reject(new Error('IndexedDB open blocked'))
+    })
+    frameDbPromise.catch(() => { frameDbPromise = null })
+    return frameDbPromise
+}
+
+/**
+ * 番組1件のフレームを保存する。**差分で受け取る。**
+ *
+ * 🔴 **毎回すべてのコマを送らせないこと。** コマは1枚あたり base64 で50KB前後あり、
+ *    バッファは数枚持つ。全部送ると1回の保存で数百KBになり、
+ *    kick.com のように全カードをまとめて更新するページでは1周期で1MBを超える。
+ *
+ * `order`（コマの並びを sig で表したもの）と、**送り主が「そちらは持っていない」と判断した分だけ**の
+ * `payload` を受け取る。こちらに残っているコマと突き合わせて組み立て直す。
+ *
+ * 揃わなかった場合は `stored` を実際の枚数で返す。送り主はそれを見て次回に全部送り直す
+ * （こちらが cleanup で消していた場合の自己修復）。
+ *
+ * @param {string} id
+ * @param {{order: string[], payload: Record<string,{b64:string,type:string}>, lastSig: string|null, updatedAt: number}} delta
+ */
+async function framesSave(id, delta) {
+    if (!id || !delta || !Array.isArray(delta.order)) return { ok: false, reason: 'bad-args' }
+    try {
+        const db = await openFrameDB()
+
+        const existing = await new Promise((resolve) => {
+            const tx = db.transaction(FRAME_STORE, 'readonly')
+            const req = tx.objectStore(FRAME_STORE).get(id)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => resolve(null)
+            tx.onabort = () => resolve(null)
+            tx.onerror = () => resolve(null)
+        })
+
+        const have = new Map()
+        for (const f of (existing && existing.frames) || []) {
+            if (f && f.sig) have.set(f.sig, f)
+        }
+
+        const payload = delta.payload || {}
+        const frames = []
+        for (const sig of delta.order) {
+            const add = payload[sig]
+            if (add && add.b64) frames.push({ b64: add.b64, type: add.type || 'image/jpeg', sig })
+            else if (have.has(sig)) frames.push(have.get(sig))
+            // どちらにも無い＝こちらが消していて送り主も送ってこなかった。落として次回に任せる。
+        }
+
+        const record = { id, frames, lastSig: delta.lastSig || null, updatedAt: delta.updatedAt || Date.now() }
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(FRAME_STORE, 'readwrite')
+            tx.objectStore(FRAME_STORE).put(record)
+            tx.oncomplete = () => resolve()
+            tx.onerror = () => reject(tx.error)
+            tx.onabort = () => reject(tx.error)
+        })
+        return { ok: true, stored: frames.length, wanted: delta.order.length }
+    } catch (e) {
+        // 容量超過・使用不可など。永続化はあきらめ、メモリ上のコマだけで動き続ける。
+        return { ok: false, reason: 'idb' }
+    }
+}
+
+async function framesLoad(id) {
+    try {
+        const db = await openFrameDB()
+        const rec = await new Promise((resolve, reject) => {
+            const tx = db.transaction(FRAME_STORE, 'readonly')
+            const req = tx.objectStore(FRAME_STORE).get(id)
+            req.onsuccess = () => resolve(req.result || null)
+            req.onerror = () => reject(req.error)
+            // トランザクション中断時は req のハンドラがどちらも呼ばれない。
+            // 拾わないと呼び出し元が返らなくなる（doc/09 項目BA と同じ形）。
+            tx.onabort = () => reject(tx.error || new Error('tx aborted'))
+            tx.onerror = () => reject(tx.error || new Error('tx error'))
+        })
+        return { ok: true, record: rec }
+    } catch (e) {
+        return { ok: true, record: null }
+    }
+}
+
+async function framesCleanup(ttlMs, maxEntries) {
+    try {
+        const db = await openFrameDB()
+        await new Promise((resolve) => {
+            const tx = db.transaction(FRAME_STORE, 'readwrite')
+            const store = tx.objectStore(FRAME_STORE)
+            const cutoff = Date.now() - ttlMs
+            const survivors = []
+            store.openCursor().onsuccess = (e) => {
+                const cursor = e.target.result
+                if (cursor) {
+                    const v = cursor.value
+                    if (!v || typeof v.updatedAt !== 'number' || v.updatedAt < cutoff) {
+                        cursor.delete()
+                    } else {
+                        survivors.push({ id: v.id, updatedAt: v.updatedAt })
+                    }
+                    cursor.continue()
+                } else if (survivors.length > maxEntries) {
+                    survivors.sort((a, b) => a.updatedAt - b.updatedAt)
+                    const overflow = survivors.length - maxEntries
+                    for (let i = 0; i < overflow; i++) store.delete(survivors[i].id)
+                }
+            }
+            tx.oncomplete = () => resolve()
+            tx.onerror = () => resolve()
+            tx.onabort = () => resolve()
+        })
+    } catch (e) { /* skip */ }
+    return { ok: true }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg.type !== 'string') return undefined
+
+    if (msg.type === 'frames:save') {
+        framesSave(msg.id, msg.record).then(sendResponse, () => sendResponse({ ok: false }))
+        return true
+    }
+    if (msg.type === 'frames:load') {
+        framesLoad(msg.id).then(sendResponse, () => sendResponse({ ok: true, record: null }))
+        return true
+    }
+    if (msg.type === 'frames:cleanup') {
+        framesCleanup(Number(msg.ttlMs) || 0, Number(msg.maxEntries) || 0)
+            .then(sendResponse, () => sendResponse({ ok: true }))
+        return true
+    }
 
     if (msg.type === 'img:fetch') {
         fetchImageAsDataUrl(msg.url).then(sendResponse, (e) => {
@@ -364,6 +570,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
         })
         return true // 非同期応答
+    }
+
+    if (msg.type === 'kick:broadcastState') {
+        // オプションページが「権限を外す直前」に呼ぶ。まだホスト権限があるうちに伝える。
+        broadcastKickState(msg.granted === true).then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }))
+        return true
     }
 
     if (msg.type === 'kick:status') {

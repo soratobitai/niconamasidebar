@@ -84,7 +84,16 @@ export function createElement(tag = 'div') {
         alt: '',
         children: [],
         parentElement: null,
-        style: {},
+        // 🔴 素の {} にしないこと。本物の要素の style は `setProperty` を持つ。
+        //    実装が CSS 変数（`--nns-card-scale` など）を書いた瞬間に落ち、
+        //    **実装の正否と無関係な NG が大量に出る**（2026-08-07 に13件出た）。
+        //    dataset を持たせているのと同じ理由。
+        style: {
+            _props: {},
+            setProperty(k, v) { this._props[k] = String(v) },
+            removeProperty(k) { delete this._props[k] },
+            getPropertyValue(k) { return this._props[k] ?? '' },
+        },
         attrs,
 
         // makeProgramElement は src/href をプロパティで書き、
@@ -148,8 +157,11 @@ export function createElement(tag = 'div') {
             const i = a.indexOf(fn)
             if (i >= 0) a.splice(i, 1)
         },
+        // 🔴 **リスナは要素を `this` にして呼ぶこと。** 本物の DOM はそう呼ぶ。
+        //    `handleThumbnailError` は `this.src` / `this.dataset` で自分を触るので、
+        //    素の `fn(ev)` だと `this` が undefined になり、**実装ではなく偽DOMのせいで落ちる**。
         fire(type, ev) {
-            for (const fn of (el._listeners[type] || []).slice()) fn(ev || { type, target: el })
+            for (const fn of (el._listeners[type] || []).slice()) fn.call(el, ev || { type, target: el })
         },
 
         querySelector(sel) { return select([el], sel, false) },

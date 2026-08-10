@@ -1,11 +1,12 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, loadingSessionTimeoutMs } from './config/constants.js'
+import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs } from './config/constants.js'
 import { debounce } from './utils/dom.js'
-import { getOptions as getOptionsFromStorage } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs } from './render/sidebar.js'
+import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
+import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart } from './render/sidebar.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
-import { adjustWatchPageChild, setProgramContainerWidth } from './ui/layout.js'
+import { applySidebarPlacement } from './ui/placement.js'
+import { adjustWatchPageChild, setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
 import { LoadingManager } from './managers/LoadingManager.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
@@ -14,14 +15,8 @@ import { sortPrograms as sortProgramsUtil } from './utils/sorting.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 // フォロー中ページ・スクレイプ方式（番組詳細の一括取得）。
-// 副作用インポート: window.__testFollowScrape() を登録し、実ページのConsoleから動作確認できるようにする。
 import './services/followPageSource.js'
-// Kick 取得元。副作用インポート: window.__testKickFetch() を登録する。
-// ⚠️ この window 登録は**コンテンツスクリプトの分離ワールド**に入る。既定のコンソールからは
-//    呼べず、DevTools で実行コンテキストを拡張側へ切り替える必要がある（__testFollowScrape も同様）。
-import './services/kickSource.js'
-// 【診断コード】原因が分かったら import ごと消す
-import { diagEvent, diagFail } from './utils/diag.js'
+import { nicoPageImageProxy } from './services/kickSource.js'
 import { onExtensionInvalidated } from './utils/extensionAlive.js'
 
 // アプリケーション状態を管理するインスタンス
@@ -39,7 +34,10 @@ let defaultOptions = {
     // Kick 連携。**有効かどうかはここに持たない**（chrome.permissions が唯一の真実）。
     // 保存するのは表示方法と、推定同接の W だけ。どちらも拡張のオプションページで変更する。
     kickDisplayMode: 'mixed',  // 'mixed' | 'tabs'
+    kickActiveTab: 'nicolive', // タブ分離時にどのタブを選んでいたか（'mixed' | 'nicolive' | 'kick'）
     dwellMinutes: 10,          // W（平均滞在時間・分）
+    cardSize: 'medium',        // 番組カードの大きさ（'small' | 'medium' | 'large'）
+    sidebarPlacement: 'push',  // サイドバーの置き方（'push' = ページを寄せる / 'overlay' = 上に重ねる）
 };
 let options = {};
 let elems = {};
@@ -129,7 +127,7 @@ const setup = async () => {
     // 検知は1回で打ち止めなので、登録前に tick が先に気付くと後始末が永久に走らなくなる。
     // これが無いと、取り残された content script がニコ生への取得を延々と続ける
     // （実測 2026-08-02: 無効化後60秒で サムネ+9回、別の回で follow+1 / notifybox+1）。
-    onExtensionInvalidated(() => cleanup('invalidated'));
+    onExtensionInvalidated(() => cleanup());
 
     // サイドバー更新の常設ループを開始する。ページ滞在中ずっと1本だけ回り、
     // 停止は cleanup（beforeunload/pagehide の 'unload'、または上の 'invalidated'）だけ。
@@ -282,7 +280,8 @@ const setup = async () => {
     sidebarControl.enableSidebarLine();
 
     // 初期開閉状態の適用（直接open/close）
-    const shouldOpenAtStart = (options.autoOpen == '1') || (options.autoOpen == '3' && !!options.isOpenSidebar);
+    // 解釈は kick.com ページと共有する（shouldOpenSidebarAtStart が唯一の定義）
+    const shouldOpenAtStart = shouldOpenSidebarAtStart(options);
     if (shouldOpenAtStart) {
         // サイドバーUIは即座に開く（ユーザーにすぐ見せる）
         state.isOpenSidebar.value = true;
@@ -330,6 +329,11 @@ const setup = async () => {
     // ①ONのプリロード成功画像を②へ渡す経路をここで配線。②OFF時は isEnabled()=false で①は通常動作のまま。
     setAnimThumbnailFeed({ isEnabled: isAnimatedThumbnailEnabled, ingest: ingestAnimatedThumbnailFrame });
 
+    // Kick のサムネだけ SW 経由で読む。`images.kick.com` は**どのオリジンにも** CORS を返さないので、
+    // ニコ生の視聴ページでも中継しないとコマ化できない。
+    // ⚠️ ニコ生自身の画像はこのページから直接読めるので中継に回さない（`shouldUse` が弾く）。
+    setThumbnailImageProxy(nicoPageImageProxy);
+
     // 動くサムネ（β版・設定でON/OFF、既定OFF。ホバー中のみ動作）
     setAnimatedThumbnailEnabled(options.animatedThumbnail === 'on');
 
@@ -340,8 +344,8 @@ const setup = async () => {
     }
 
     // ページ離脱時のクリーンアップ（イベント引数を reason に流し込まないよう包む）
-    window.addEventListener('beforeunload', () => cleanup('unload'));
-    window.addEventListener('pagehide', () => cleanup('unload'));
+    window.addEventListener('beforeunload', () => cleanup());
+    window.addEventListener('pagehide', () => cleanup());
     // ※ 無効化時の後始末（onExtensionInvalidated）は**ループを起こす前**に登録済み（上を参照）。
     //   ここに書き足さないこと。二重登録すると cleanup が2回走る。
 
@@ -353,29 +357,7 @@ const setup = async () => {
 // クリーンアップ関数
 // @param {'unload'|'invalidated'} [reason] 既定は 'unload'（ページ離脱）。
 //        'invalidated' = 拡張が再読み込み/更新/無効化され、取り残された content script を畳む場合。
-const cleanup = (reason) => {
-    // 🔴 **無効化での後始末では、関門4の診断を鳴らしてはいけない。**
-    // 下の診断は「後始末が走ったのにページが生き残っている＝異常」を見るものだが、
-    // 無効化ではページが生き残るのが**正常**なので、必ず誤検知する。
-    // ここを素通しにすると、利用者が今ためている自動移動の診断記録が嘘で埋まる。
-    if (reason !== 'invalidated') {
-        // 【診断コード】関門4。ここが走った後もページが生き残ると、監視が止まったまま
-        // `scheduled` も立ったままになり、**自動移動が二度と動かない**（モーダルも出ない）。
-        //
-        // 「生き残ったかどうか」はここでは分からないので、少し先に見に行く。
-        // 本当にページを離れたならこのタイマーは発火しない＝正常時は何も出ない。
-        diagEvent('ページ離脱の後始末が走った（監視を止める・カウントダウンを消す）');
-        setTimeout(() => {
-            if (options.autoNextProgram !== 'on') return;
-            const watching = !!(appState.autoNext && appState.autoNext.liveStatusStopper);
-            if (watching) return; // 監視が張り直されている＝問題なし
-            diagFail(
-                '後始末が走ったのにページが生き残っている。監視が止まったままなので、'
-                + `このページでは自動移動が二度と動かない（scheduled=${appState.autoNext.scheduled}）`
-            );
-        }, 3000);
-    }
-
+const cleanup = () => {
     // 動くサムネの停止とblob解放
     teardownAnimatedThumbnails();
 
@@ -480,12 +462,13 @@ chrome.storage.onChanged.addListener(function (changes) {
     // Kick 連携の設定は**拡張のオプションページ（別コンテキスト）**で変更される。
     // この onChanged がそれを受け取る唯一の経路なので、ここで反映しないと
     // ページを再読込するまで効かない。
-    if (changes.kickDisplayMode) {
-        options.kickDisplayMode = changes.kickDisplayMode.newValue;
+    if (changes.kickDisplayMode || changes.kickActiveTab) {
+        if (changes.kickDisplayMode) options.kickDisplayMode = changes.kickDisplayMode.newValue;
+        if (changes.kickActiveTab) options.kickActiveTab = changes.kickActiveTab.newValue;
         const container = document.getElementById('liveProgramContainer');
         // 表示の出し分けだけなので再取得は不要。CSS の属性を付け替えれば済む。
         if (container) {
-            const count = syncServiceTabs(container, options.kickDisplayMode);
+            const count = syncServiceTabs(container, options.kickDisplayMode, options.kickActiveTab);
             if (updateManager) updateManager.updateProgramCount(count);
         }
     }
@@ -493,11 +476,24 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.dwellMinutes = changes.dwellMinutes.newValue;
         setDwellMinutes(options.dwellMinutes);
         // ⚠️ **`sortPrograms` だけでは直らない。** 順位が読む `active-point` 属性は
-        //    `applyRankAttributes` が描画時に書いた値なので、W を変えても属性は古いまま。
-        //    そのまま並べ替えても古い値で並ぶだけで、直ったように見えて直っていない。
-        //    属性ごと書き直す必要があるので、リスト更新を1回走らせる。
-        //    設定を触った時にしか起きないので、取得が増えることは問題にならない。
-        updateSidebar();
+        //    描画時に書かれた値なので、W を変えても属性は古いまま。属性ごと書き直す。
+        //    以前はここでリスト更新を走らせていたが、スライダーになった今は取得が重すぎる。
+        rerankInPlace();
+    }
+    if (changes.sidebarPlacement) {
+        options.sidebarPlacement = changes.sidebarPlacement.newValue;
+        applySidebarPlacement(options.sidebarPlacement);
+        // 🔴 印を付け替えただけでは #root の幅が古いまま。寄せ幅を計算し直させる。
+        if (sidebarControl) sidebarControl.setRootWidth();
+    }
+    if (changes.cardSize) {
+        options.cardSize = changes.cardSize.newValue;
+        setCardSize(options.cardSize);
+        // 列数と中身の倍率を当て直す。**取得はしない**（見た目だけの設定なので）。
+        // ⚠️ 幅は `appState.sidebar.width` から取ること。setup() 内のローカル `state` は
+        //    このリスナー（モジュール直下）からは見えず、参照すると実行時に落ちる。
+        //    UpdateManager が列数を決める時と同じ「意図した幅」でもある。
+        setProgramContainerWidth(elems, appState.sidebar.width);
     }
     if (changes.updateProgramsInterval) {
         options.updateProgramsInterval = changes.updateProgramsInterval.newValue;
@@ -605,7 +601,7 @@ async function updateSidebar() {
     if (!updateManager) return;
     const sessionId = await updateManager.updateSidebar();
     if (sessionId && loadingManager) {
-        await loadingManager.finishSessionWithMinDuration(1000, sessionId);
+        await loadingManager.finishSessionWithMinDuration(minLoadingDurationMs, sessionId);
     }
 }
 
@@ -613,12 +609,41 @@ async function updateSidebar() {
  * オプション内容を反映
  * handlers/optionsHandler.js に完全委譲
  */
+/**
+ * 取得せずに順位だけ計算し直して並べ替える。
+ *
+ * 「人気順の基準」を動かした時に使う。`active-point` は描画時に書かれた値なので、
+ * 並べ替えるだけでは古い値で並ぶ＝直ったように見えて直っていない。
+ * ⚠️ Kick は保存領域に入れていないので、UpdateManager が持っている直近の取得結果を足す。
+ */
+const rerankInPlace = () => {
+    const container = document.getElementById('liveProgramContainer');
+    if (!container) return;
+    const stored = getProgramInfos() || [];
+    const kick = updateManager ? updateManager.getKickPrograms() : [];
+    reapplyRankAttributes(container, kick.length ? stored.concat(kick) : stored);
+    sortPrograms(container);
+};
+
+
 const reflectOptions = () => {
-    setupOptionsHandler(options, sortPrograms);
+    // 第3引数: Kick 連携が有効になった直後にリストを取り直す（次の定期更新を待たない）。
+    // 第4引数: 「人気順の基準」が動いた時。**取得はせず**その場で順位を計算し直す。
+    setupOptionsHandler(options, sortPrograms, () => { updateSidebar(); }, (minutes) => {
+        setDwellMinutes(minutes);
+        rerankInPlace();
+    });
     // 推定同接の W（平均滞在時間）。Kick のオプションページで変更される。
     setDwellMinutes(options.dwellMinutes);
+    // 🔴 最初の描画より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
+    setCardSize(options.cardSize);
+    // サイドバーの置き方（寄せる／重ねる）。**印を付けるだけ。**寄せ幅の計算は setRootWidth。
+    applySidebarPlacement(options.sidebarPlacement);
     // タブのクリック配線（1回だけ効く。2回目以降は内部で弾く）
     setupServiceTabHandlers((count) => {
         if (updateManager) updateManager.updateProgramCount(count);
+    }, (tab) => {
+        options.kickActiveTab = tab;
+        try { chrome.storage.local.set({ kickActiveTab: tab }); } catch (e) { /* 無効化済み */ }
     });
 };

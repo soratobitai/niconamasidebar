@@ -1,4 +1,4 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes } from '../config/constants.js'
+import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes, autoUpdateOffValue, fallbackUpdateIntervalSec } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { totalEngagement, commentWeight, commentRatio, estimateConcurrentViewers } from '../utils/momentum.js'
 
@@ -60,12 +60,80 @@ export function resolveLiveThumbnailBaseUrl(info) {
  * @param {object} data programInfo
  * @returns {object|null} 導出済みフィールド。data が不正なら null
  */
+/**
+ * 番組データ → カードの DOM id。**これが唯一の定義。**
+ *
+ * id は取得元によって 'lv123' / '123' の両方がありうるので、数値部へ正規化する
+ * （カードの DOM id は数値・視聴URLは lv 付き、という規約）。Kick は 'k123' 形式で
+ * lv が付かないため素通りする。
+ *
+ * 🔴 **既存カードを引き当てる側も必ずこれを通すこと。** 生の `data.id` で
+ *    `getElementById` / Map を引くと、ニコ生の番組だけ毎回「見つからない」＝
+ *    **毎周期カードを作り直す**ことになる。要素が作り直されると画像も読み直され、
+ *    リスト全体が一瞬チラつく（2026-08-04・kick.com ページで実際に発生。
+ *    35枚中23枚が毎周期「新規」になっていた）。例外もログも出ない壊れ方なので、
+ *    手書きで `.replace(/^lv/, '')` を書き足さないこと。→ 検査項目 BM
+ */
+export function cardIdOf(data) {
+    return String((data && data.id) || '').replace(/^lv/, '')
+}
+
+/**
+ * 更新ボタンのローディング表示。**両ページ共通の唯一の実装。**
+ *
+ * ニコ生ページは LoadingManager（セッション所有権つき）から、kick.com ページは
+ * `refreshPrograms` から呼ぶ。見た目とクリック無効化がずれないよう、DOM を触るのはここだけ。
+ */
+export function setReloadButtonLoading(isLoading) {
+    const btn = document.getElementById('reload_programs')
+    if (!btn) return
+    if (isLoading) {
+        if (btn.classList.contains('loading')) return
+        btn.classList.add('loading')
+        btn.style.pointerEvents = 'none'
+    } else {
+        if (!btn.classList.contains('loading')) return
+        btn.classList.remove('loading')
+        btn.style.pointerEvents = ''
+    }
+}
+
+/**
+ * 起動時にサイドバーを開くか。「自動で開く」設定の解釈は**ここが唯一の定義**。
+ *   '1' = 常に開く / '2' = 常に閉じる / '3' = 前回の状態を記憶
+ */
+export function shouldOpenSidebarAtStart(opts) {
+    if (!opts) return false
+    return (opts.autoOpen == '1') || (opts.autoOpen == '3' && !!opts.isOpenSidebar)
+}
+
+/**
+ * 自動更新の間隔（ミリ秒）。**OFF の時は `null` を返す。**「自動更新」設定の解釈はここが唯一の定義。
+ *
+ * 🔴 **呼び出し側で `Number(options.updateProgramsInterval)` してはいけない。**
+ *    保存値は 'off' を取りうるので `Number('off')` は **NaN**。NaN を `setTimeout` /
+ *    `setInterval` に渡すと **0ms 扱い**になり、止めたつもりが最速で API を叩き続ける。
+ *    `|| 120` で受けると今度は **OFF が 120秒として動く**（止まらない）。
+ *    どちらも無言で壊れるので、判定はこの1箇所に集める。
+ *
+ * ⚠️ **返すのは「ミリ秒」か `null` だけ。** 0 や Infinity を返さないこと。
+ *    0 は最速ループ、Infinity は `setTimeout` に渡すと 0 に丸められる（どちらも同じ事故になる）。
+ *
+ * @returns {number|null} 間隔(ms)。OFF なら null（＝タイマーを張らない）
+ */
+export function autoUpdateIntervalMs(opts) {
+    const raw = opts && opts.updateProgramsInterval
+    if (String(raw) === autoUpdateOffValue) return null
+    const sec = Number(raw)
+    // 壊れた保存値・未設定はここで既定へ寄せる。**NaN を外へ出さない。**
+    if (!Number.isFinite(sec) || sec <= 0) return fallbackUpdateIntervalSec * 1000
+    return sec * 1000
+}
+
 export function deriveCardFields(data) {
     if (!data || !data.id) return null
 
-    // id は取得元によって 'lv123' / '123' の両方がありうるので、数値部に正規化して扱う
-    // （カードのDOM id は数値・視聴URLは lv 付き、という規約はここが唯一の生成点）。
-    const id = String(data.id).replace(/^lv/, '')
+    const id = cardIdOf(data)
     const owner = data.contentOwner || {}
     const title = data.title || 'タイトル不明'
     // 「コミュニティ名」ではなく**配信者名**（user はユーザー名 / channel はチャンネル名）。
@@ -103,6 +171,22 @@ export function deriveCardFields(data) {
 }
 
 /**
+ * 繋ぎ画像（配信者アイコン）を img に覚えさせる。**書く場所はこの関数だけ。**
+ *
+ * 🔴 **`data-src` と兼用にしないこと**（doc/09 項目CD-2）。あちらは「戻り先の静止サムネ」で、
+ *    Kick とニコ生の user 番組では**ライブサムネと同じURL**になる。兼用にすると、
+ *    そのURLが読めない時に繋ぎ先が自分自身を指し、`handleThumbnailError` が
+ *    最後の砦（ローディング画像）へ直行する。別の場所に持てば失敗しても必ずアイコンへ落ちる。
+ *
+ * 生成時（`makeProgramElement`）と後埋め（`applyProgramInfoToCard`）の両方から呼ぶ。
+ * アイコンが未着の間は**書かない**（空文字を入れると「アイコン無し」と区別が付かない）。
+ */
+function setFallbackThumbSrc(img, iconUrl) {
+    if (!img || !iconUrl) return
+    if (img.getAttribute('data-fallback-src') !== iconUrl) img.setAttribute('data-fallback-src', iconUrl)
+}
+
+/**
  * 既存カードに programInfo を反映する（**カードは作り直さない**）。
  *
  * 旧実装は updateSidebar が active-point / data-api-index / タイトル / リンク先の4つしか
@@ -133,9 +217,48 @@ export function applyProgramInfoToCard(card, data) {
     }
 
     // 静止サムネの戻り先。**空→実URL に変わった時に更新されないと復帰経路が塞がったままになる。**
+    //
+    // 🔴 **繋ぎ画像（配信者アイコン）もここで面倒を見ること**（2026-08-08・doc/09 項目CD）。
+    //    以前は `f.thumbnail_url`（＝生の `thumbnailUrl`）だけを見ていた。
+    //    **放送直後の Kick はサムネも配信者アイコンも空**で来ることがあり、その時に作られた
+    //    カードは `data-src` が loading.gif で固定される。次の周期でアイコンが埋まっても
+    //    `f.thumbnail_url` は空のままなので**ここが素通りし、ローディング画像が残り続けた。**
+    //    「サムネが無い間はアイコンを出す」という決まりが `makeProgramElement` にしか
+    //    書かれておらず、**同じ計算が2箇所にあって片方だけ欠けている**形だった。
     const img = card.querySelector('.program_thumbnail_img')
-    if (img && f.thumbnail_url && img.getAttribute('data-src') !== f.thumbnail_url) {
-        img.setAttribute('data-src', f.thumbnail_url)
+    if (img) {
+        // 後から届いたアイコンを繋ぎ画像として覚えさせる（生成時に空だった番組の分）。
+        setFallbackThumbSrc(img, f.icon_url)
+
+        const wantDataSrc = f.thumbnail_url || f.icon_url
+        if (wantDataSrc && img.getAttribute('data-src') !== wantDataSrc) {
+            img.setAttribute('data-src', wantDataSrc)
+        }
+
+        // ⚠️ 今ローディング画像を出しているなら、その場で繋ぎ画像へ替える。
+        //    `syncStaticThumb` は**ライブサムネを持たない番組にしか回らない**ので、
+        //    Kick（providerType:'user'＝ライブサムネあり扱い）はここで替えないと次の取得まで残る。
+        //
+        // 🔴 **`data-src` が変わった時だけ、にしないこと**（doc/09 項目CD-2）。
+        //    以前はこの入れ替えが `data-src` 更新の if の中にあった。**Kick のサムネURLは
+        //    放送開始直後から最後まで同じ**なので `data-src` は初回から変わらず、
+        //    一度ローディング画像に落ちたカードは**次の周期でも素通りして戻らなかった。**
+        //
+        // 🔴 **替える先は `wantDataSrc` ではなくアイコン。** ローディングが出ている＝
+        //    そのサムネURLは読めなかったということなので、同じURLをここで入れ直すと
+        //    また失敗する（読み直しはバックオフを持っているサムネ更新ループの仕事）。
+        //
+        // ⚠️ **アイコンが無い番組をここで拾わなくてよい。**（2026-08-10・空振り検査で確認）
+        //    「アイコンを持たない配信者の、後からサムネURLが届いたカード」は、
+        //    **すぐ下の直接表示（`thumbLive === '0'`）が同じ呼び出しの中で拾う**。
+        //    ここで `wantDataSrc` も見るようにすると**同じ仕事の書き手が2人**になり、
+        //    しかもこちらはバックオフを見ないので、失敗中のURLを叩き直す側に回る。
+        const loadingUrl = safeRuntimeUrl('images/loading.gif')
+        if (loadingUrl && f.icon_url && img.getAttribute('src') === loadingUrl) {
+            img.src = f.icon_url
+            img.dataset.thumbLive = '0' // ライブサムネではない（動くサムネが最新コマとして混ぜない）
+            delete img.dataset.thumbSeq
+        }
     }
 
     // 🔴 **表示経路を2本にすること。**
@@ -157,23 +280,11 @@ export function applyProgramInfoToCard(card, data) {
     //     ②が '1' を立てるまでの間、**カードの数だけ無駄な再取得**が走る。
     //   - `?cache=` は付けない。同一URLなら再代入されないので無駄な再取得も起きない。
     //     「同じURLで中身が変わる」ライブサムネの更新は従来どおりループの仕事。
-    // 🔴 **Kick のサムネを差し替える唯一の経路がここ。**
-    //
-    // Kick はニコ生の localStorage キャッシュに入れていないので、storage 駆動の
-    // サムネ更新ループ（`updateThumbnailsFromStorage`）が拾えない。あちらは
-    // `infoMap.get(\`lv${card.id}\`)` で引くため、Kick の id では必ず undefined になる。
-    //
-    // 代わりに、毎周期のリスト更新で来る新しい URL をそのまま反映する。Kick のサムネURLは
-    // 画像が更新されるたび `?versionId=` が変わるので、**URL が変わった＝絵が変わった**。
-    // 同じ URL なら差し替えない＝無駄なクロスフェードが起きない（ニコ生側では
-    // 「同じURLで中身が変わる」ため、この判定は使えなかった）。
-    //
-    // ⚠️ 下のニコ生用の分岐（thumbLive / バックオフ / storage 前提）へ落とさないこと。
-    //    Kick は `isLiveSrc` が真になるので `thumbLive` が未設定で、あの条件には入らない。
-    if (img && data.service === 'kick') {
-        const next = f.thumbnail_url
-        if (next && img.src !== next) crossfadeThumbnail(img, next)
-    } else if (img && img.dataset.thumbLive === '0') {
+    // ⚠️ **Kick 専用の差し替え経路はここに置かない（2026-08-04 に一度置いて外した）。**
+    //    Kick も `updateThumbnailsFromStorage` の対象になったので、サムネの差し替えは
+    //    あちらの仕事。ここで別途 `img.src` を書くと**書き手が2人**になり、
+    //    ループが出した動くサムネのコマをリスト更新のたびに上書きしてしまう。
+    if (img && img.dataset.thumbLive === '0') {
         const best = resolveLiveThumbnailBaseUrl(data) || f.thumbnail_url
         // 🔴 **バックオフ中は触らないこと。** 直接表示はループのバックオフ状態を持っていないので、
         // ここを見ないと**読み込みに失敗し続けるURLをリスト更新のたびに叩き直す**ことになる
@@ -308,6 +419,9 @@ export function makeProgramElement(data, loadingImageURL) {
     thumbnailImg.className = 'program_thumbnail_img'
     thumbnailImg.src = live_thumbnail_url
     thumbnailImg.setAttribute('data-src', thumbnail_url)
+    // 繋ぎ画像は `data-src` と**別に**持たせる。Kick はライブサムネと静止サムネが同じURLなので、
+    // 兼用だと読めなかった時に繋ぎ先が自分自身になる（doc/09 項目CD-2）。
+    setFallbackThumbSrc(thumbnailImg, icon_url)
     // 繋ぎのアイコン/ローディング画像を「ライブサムネ」と誤認させない印。動くサムネの末尾スロットが
     // 最新コマのフリでこれを混ぜないようにする（サムネ更新が成功したら applySuccess が '1' に戻す）。
     if (!isLiveSrc) thumbnailImg.dataset.thumbLive = '0'
@@ -374,9 +488,19 @@ export function setDwellMinutes(value) {
  *
  * @param {HTMLElement} container `#liveProgramContainer`
  * @param {string} mode `options.kickDisplayMode`（'mixed' | 'tabs'）
+ * @param {string} [activeTab] `options.kickActiveTab`（'nicolive' | 'kick'）。
+ *   **保存された選択を復元するために渡す。**渡さないと、描画のたびに DOM の現状を見るので、
+ *   カードが作り直された時にニコ生側へ戻ってしまう。
  * @returns {number} 表示対象のカード数（件数表示に使う）
  */
-export function syncServiceTabs(container, mode) {
+/**
+ * タブ分離モードで選べるタブ。**HTML の data-service-tab とここが唯一の対応表。**
+ * 'mixed' は「統合」＝両サービスを混ぜて全件出す（設定の「統合表示」と同じ見え方）。
+ * ⚠️ 並びは表示順と揃えてある（一番左が統合）。
+ */
+const SERVICE_TABS = ['mixed', 'nicolive', 'kick']
+
+export function syncServiceTabs(container, mode, activeTab) {
     const tabs = document.getElementById('serviceTabs')
     if (!container) return 0
 
@@ -392,27 +516,142 @@ export function syncServiceTabs(container, mode) {
         return total
     }
 
-    const activeBtn = tabs && tabs.querySelector('.service_tab.is-active')
-    const active = (activeBtn && activeBtn.dataset.serviceTab) || 'nicolive'
+    // 保存された選択があればそれを正とし、無ければ今のボタンの状態を使う。
+    // ⚠️ 知らない値は採用しない。保存値が壊れていた時に、どのタブとも一致しない
+    //    `data-service-tab` が付いて**カードが1枚も見えなくなる**のを防ぐ。
+    let active = SERVICE_TABS.includes(activeTab) ? activeTab : null
+    if (!active) {
+        const activeBtn = tabs && tabs.querySelector('.service_tab.is-active')
+        const fromDom = activeBtn && activeBtn.dataset.serviceTab
+        active = SERVICE_TABS.includes(fromDom) ? fromDom : 'nicolive'
+    }
+    if (tabs) {
+        for (const b of tabs.querySelectorAll('.service_tab')) {
+            b.classList.toggle('is-active', b.dataset.serviceTab === active)
+        }
+    }
     container.setAttribute('data-service-tab', active)
     return countVisibleByTab(container, active)
 }
 
+/**
+ * そのカードが今のタブで見えているか。
+ *
+ * 🔴 **出し分けの実体は CSS（main.css の `[data-service-tab]`）。ここはその写し。**
+ *    件数表示と自動移動の移動先選びが「見えているもの」を扱うために、同じ規則を JS でも要る。
+ *    **2つが食い違うと、見えていないカードへ自動移動する**という形で出る。
+ *    JS 側の定義はこの関数**1つだけ**にし、CSS と一致しているかは検査（項目BR）で見る。
+ *
+ * @param {HTMLElement} container `#liveProgramContainer`
+ * @param {HTMLElement} card `.program_container`
+ */
+export function isCardVisibleInTab(container, card) {
+    const active = container && container.getAttribute ? container.getAttribute('data-service-tab') : null
+    // タブ分離モードでない、または「統合」タブ＝全部見えている。
+    if (!active || active === 'mixed') return true
+    const svc = (card && card.getAttribute && card.getAttribute('data-service')) || 'nicolive'
+    return active === 'kick' ? svc === 'kick' : svc !== 'kick'
+}
+
 /** タブで表示されるカード数。件数表示が「見えていない番組」を数えないようにする。 */
 function countVisibleByTab(container, active) {
+    // 「統合」は全件見えている。絞り込みの式に混ぜると `svc !== 'kick'` 側に落ちて
+    // **Kick のぶんだけ件数が足りなくなる**（見えているのに数えない）。
+    if (active === 'mixed') return container.children.length
     let n = 0
     for (const el of container.children) {
-        const svc = el.getAttribute('data-service') || 'nicolive'
-        if (active === 'kick' ? svc === 'kick' : svc !== 'kick') n++
+        // ⚠️ 判定はここに書かず `isCardVisibleInTab` を通すこと。自動移動と規則を1つにしておく。
+        if (isCardVisibleInTab({ getAttribute: () => active }, el)) n++
     }
     return n
 }
 
 /**
+ * URL が指している「今見ている放送」の識別子。サービスをまたいで比較できる形にする。
+ *
+ *   ニコ生の視聴ページ … `nico:lv123`
+ *   Kick のチャンネル   … `kick:slug`
+ *   それ以外（一覧・VOD・判定不能） … `''`
+ *
+ * 🔴 **`''` は「別の放送」ではなく「分からない」。** 比較する側は、
+ *    どちらかが `''` なら**移動しない**こと。分からない時に動くと、
+ *    一覧ページや VOD を見ているだけで勝手に飛ばされる。
+ *
+ * ⚠️ Kick は `kick.com/<slug>` がチャンネルページだが、同じ形の予約パスが多数ある。
+ *    ここに無いものが増えても「チャンネル扱い」になるだけで、実害は
+ *    「移動先の候補に入る」程度（カードのリンクは自前で作っているので混ざらない）。
+ */
+const KICK_RESERVED_PATHS = new Set([
+    'browse', 'following', 'categories', 'category', 'search', 'subscriptions',
+    'messages', 'dashboard', 'video', 'videos', 'clips', 'about', 'help',
+    'settings', 'transparency', 'community-guidelines', 'privacy-policy', 'terms-of-service',
+])
+
+export function watchTargetIdOf(url) {
+    if (!url) return ''
+    let u
+    try { u = new URL(String(url), 'https://live.nicovideo.jp/') } catch (_e) { return '' }
+
+    if (/(^|\.)nicovideo\.jp$/.test(u.hostname)) {
+        const m = u.pathname.match(/\/watch\/(lv\d+)/)
+        return m ? 'nico:' + m[1] : ''
+    }
+    if (/(^|\.)kick\.com$/.test(u.hostname)) {
+        const m = u.pathname.match(/^\/([A-Za-z0-9_-]+)\/?$/)
+        if (!m) return '' // /video/... や /slug/clips などはチャンネルページではない
+        const slug = m[1]
+        if (KICK_RESERVED_PATHS.has(slug.toLowerCase())) return ''
+        return 'kick:' + slug.toLowerCase()
+    }
+    return ''
+}
+
+/**
+ * 自動移動の移動先を選ぶ。**サービスをまたいでよい**（利用者の指定・2026-08-07）。
+ *
+ * 規則は3つだけ。
+ *   1. **今のタブで見えているカード**から選ぶ（隠れているカードへは飛ばない）
+ *   2. DOM 順の先頭から
+ *   3. 今いる放送と同じものは飛ばす
+ *
+ * 🔴 **今いる放送が分からない時は選ばない。** 以前は `/watch/(lv\d+)` に一致した時だけ
+ *    移動する形で、結果として Kick のカードが**黙って候補から外れていた**。
+ *    サービスをまたぐようにした今は、`watchTargetIdOf` が `''` を返す＝分からない、として
+ *    はっきり止める（一覧ページや VOD で勝手に飛ばされないため）。
+ *
+ * @param {HTMLElement} container `#liveProgramContainer`
+ * @param {string} currentUrl だいたい `location.href`
+ * @returns {{link: HTMLElement, id: string, candidates: string[], currentId: string}}
+ */
+export function pickAutoNextTarget(container, currentUrl) {
+    const currentId = watchTargetIdOf(currentUrl)
+    const candidates = []
+    let link = null
+    let id = ''
+    if (!container || !container.children) return { link, id, candidates, currentId }
+
+    for (const card of container.children) {
+        if (!isCardVisibleInTab(container, card)) continue
+        const a = card.querySelector ? card.querySelector('.program_thumbnail a') : null
+        if (!a) continue
+        const nextId = watchTargetIdOf(a.href)
+        if (!nextId) continue
+        candidates.push(nextId)
+        if (!link && currentId && nextId !== currentId) {
+            link = a
+            id = nextId
+        }
+    }
+    return { link, id, candidates, currentId }
+}
+
+/**
  * タブのクリックを配線する。サイドバー挿入後に一度だけ呼ぶ。
  * @param {(count:number)=>void} onCountChange 表示件数が変わった時に呼ぶ
+ * @param {(tab:string)=>void} [onTabChange] 選択が変わった時に呼ぶ。**保存に使う。**
+ *   持たないと、カードが作り直されるたびにニコ生側へ戻る。
  */
-export function setupServiceTabHandlers(onCountChange) {
+export function setupServiceTabHandlers(onCountChange, onTabChange) {
     const tabs = document.getElementById('serviceTabs')
     if (!tabs || tabs.dataset.wired === '1') return
     tabs.dataset.wired = '1'
@@ -429,7 +668,32 @@ export function setupServiceTabHandlers(onCountChange) {
         const active = btn.dataset.serviceTab || 'nicolive'
         container.setAttribute('data-service-tab', active)
         if (typeof onCountChange === 'function') onCountChange(countVisibleByTab(container, active))
+        // 選択を覚える。持たないと、カードが作り直されるたびにニコ生側へ戻る。
+        if (typeof onTabChange === 'function') onTabChange(active)
     })
+}
+
+/**
+ * 表示中の全カードの順位属性を計算し直す。**取得はしない。**
+ *
+ * 「人気順の基準」(W) を動かした時に使う。`active-point` は描画時に書かれた値なので、
+ * W を変えただけでは古いまま＝並べ替えても何も変わらない。かといってリストを取り直すと
+ * **スライダーを動かすたびに数秒の取得が飛ぶ**ことになる。
+ * 保存済みの番組データから計算し直せば、取得なしでその場で反映できる。
+ *
+ * @param {HTMLElement} container `#liveProgramContainer`
+ * @param {Array<object>} infos 番組データ（ニコ生＋Kick。id は 'lv123' / 'k123' のどちらでも可）
+ */
+export function reapplyRankAttributes(container, infos) {
+    if (!container || !Array.isArray(infos) || !infos.length) return
+    const map = new Map()
+    for (const i of infos) if (i && i.id) map.set(String(i.id), i)
+    for (const el of container.children) {
+        if (!el || !el.id) continue
+        // ニコ生はカードのDOM id が数値・info の id が 'lv' 付き。Kick は両者同一。
+        const info = map.get(el.id) || map.get('lv' + el.id)
+        if (info) applyRankAttributes(el, info)
+    }
 }
 
 /**
@@ -497,13 +761,33 @@ function handleThumbnailError() {
     // 最新のフリで映さないよう thumbLive=0 を立てる（applySuccess で '1' に戻る）。
     this.dataset.thumbLive = '0'
     delete this.dataset.thumbSeq // 表示中の絵はもうコマではない（末尾スロットの誤スキップを防ぐ）
-    const dataSrc = this.getAttribute('data-src')
-    if (dataSrc && this.src !== dataSrc) {
-        this.src = dataSrc
-    } else {
-        const loading = safeRuntimeUrl('images/loading.gif')
-        if (loading) this.src = loading // 取れない＝拡張が無効化済み。今出ている絵をそのまま残す
+
+    // 🔴 **繋ぎ画像（配信者アイコン）はここでも見ること**（2026-08-10・doc/09 項目CD-2）。
+    //    以前は `data-src` だけを見て、駄目なら最後の砦へ直行していた。
+    //    **Kick は放送開始直後でもサムネURLを返す**（まだ画像が無いので読み込みは失敗する）。
+    //    その時 `data-src` は**同じURL**なので（`deriveCardFields` がライブと静止の両方に
+    //    `thumbnailUrl` を入れる）`this.src !== dataSrc` が偽になり、
+    //    **配信者アイコンを飛び越してローディング画像になっていた。**
+    //    「サムネが出せない間はアイコン」という決まりは、生成時・後埋めだけでなく
+    //    **失敗した時のここにも要る**（3箇所目）。
+    //
+    // ⚠️ **必ず下りだけに進むこと。** 上へ戻せるようにすると、アイコンも読めない時に
+    //    サムネURL↔アイコンで error が往復して**無限に鳴り続ける**（loading.gif は
+    //    ローカルで必ず読めるので、旧実装は2段しか無くたまたま止まっていた）。
+    const chain = [
+        this.getAttribute('data-src'),
+        this.getAttribute('data-fallback-src'),
+        safeRuntimeUrl('images/loading.gif'), // 取れない＝拡張が無効化済み（空文字で下の if が弾く）
+    ]
+    // 今どこまで落ちているか。-1 ＝ どれでもない（＝ライブサムネを表示中）＝先頭から試す。
+    const cur = chain.indexOf(this.src)
+    for (let i = cur + 1; i < chain.length; i++) {
+        if (chain[i] && chain[i] !== this.src) {
+            this.src = chain[i]
+            return
+        }
     }
+    // 出せる絵が尽きた。今出ている絵をそのまま残す（消すより残すほうが見た目の被害が小さい）
 }
 
 // ---- 動くサムネ(②)への給餌フック ----
@@ -527,10 +811,16 @@ export function setAnimThumbnailFeed(feed) { animThumbFeed = feed }
  * 🔴 **null のときは1行も挙動が変わらないこと。** ニコ生ページ側はこのフックを設定しないので、
  *    従来どおり crossOrigin で直接読む。ここを共通化しようとしないこと。
  *
- * @param {null | ((url: string) => Promise<string|null>)} fn URL を data URL に解決する関数
+ * 🔴 **URL ごとに使うかどうかを決めること（`shouldUse`）。** 全部を中継に回すと、
+ *    ニコ生のページでニコ生自身の画像まで SW 往復＋base64 化することになり、
+ *    通信も遅延も無駄に増える。中継が要るのは「そのオリジンから CORS が通らない画像」だけ。
+ *
+ * @param {null | {shouldUse: (url: string) => boolean, fetch: (url: string) => Promise<string|null>}} proxy
  */
 let imageProxy = null
-export function setThumbnailImageProxy(fn) { imageProxy = typeof fn === 'function' ? fn : null }
+export function setThumbnailImageProxy(proxy) {
+    imageProxy = (proxy && typeof proxy.fetch === 'function' && typeof proxy.shouldUse === 'function') ? proxy : null
+}
 
 /**
  * 給餌が時間内に返らなかったら1回だけ警告する（鳴る罠）。
@@ -804,7 +1094,11 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // ローリング更新: 対象外の番組はスキップ（全体を1周期で番組ごとにずらして更新する）
             if (onlyIds && !onlyIds.has(card.id)) continue;
 
-            const info = infoMap.get(`lv${card.id}`)
+            // 🔴 **2通りで引く。** ニコ生は「カードのDOM id＝数値」「infoのid＝`lv`付き」という
+            //    規約なので `lv${card.id}` で引く。Kick は接頭辞 `k` 付きで両者が同一なので、
+            //    そのまま引く。片方だけだと **Kick が永久にこのループの対象外**になり、
+            //    動くサムネのコマが1枚も貯まらない（そこで詰まっていた）。
+            const info = infoMap.get(card.id) || infoMap.get(`lv${card.id}`)
 
             const { nextUrl, key } = computeNext(info)
             if (!nextUrl) {
@@ -828,6 +1122,8 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
 
             // 事前プリロードして成功したときのみ差し替え（失敗時はバックオフ）
             pendingImages++
+            // Kick も `?versionId=` を外した素のURL（＝常に最新版）を使うので、
+            // ニコ生と同じく「同じURLで中身が変わる」形になる。どちらもキャッシュバスターが要る。
             const urlForAttempt = key.startsWith('u|') ? appendCacheParam(nextUrl, now) : nextUrl
             // 成功時の共通処理（表示差替え＋成功記録）。
             // ローディング完了は処理の開始完了で判定し、画像読み込みはバックグラウンドで継続（checkComplete()は呼ばない）。
@@ -853,7 +1149,8 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             // CORSで読めない環境でも表示は守るため、失敗時は平文で読み直して表示だけ確保する。
             const feeding = !!(animThumbFeed && animThumbFeed.isEnabled())
             // プロキシ経由で読む時は data URL になるので crossOrigin は付けない（付けると逆に失敗する）。
-            const viaProxy = feeding && !!imageProxy
+            // ⚠️ **判定は URL ごと。**中継が要るのは「このオリジンから CORS が通らない画像」だけ。
+            const viaProxy = feeding && !!imageProxy && imageProxy.shouldUse(urlForAttempt)
             const pre = new Image()
             if (feeding && !viaProxy) pre.crossOrigin = 'anonymous'
             pre.onload = () => {
@@ -897,7 +1194,7 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             }
             if (viaProxy) {
                 // 失敗しても表示は守る: 素のURLで読み直す（その場合コマ化はできないが絵は出る）。
-                imageProxy(urlForAttempt).then(
+                imageProxy.fetch(urlForAttempt).then(
                     (dataUrl) => { pre.src = dataUrl || urlForAttempt },
                     () => { pre.src = urlForAttempt },
                 )
@@ -948,12 +1245,31 @@ export function flipReorder(container, reorderFn, duration = 300) {
         firstRects.set(el, el.getBoundingClientRect())
     })
 
+    // 🔴 **スクロール位置を保存してから並べ替える。**
+    //
+    //    `replaceChildren` は中身を一度すべて外す。その瞬間リストの高さが 0 になるので、
+    //    スクロール要素（`#sidebar` は `overflow: auto`）の `scrollTop` が 0 へ切り詰められる。
+    //    戻す前に Last を測ると、**全カードがスクロール量ぶん動いた**ことになり、
+    //    順位が1つも変わっていなくても全部がスライドする。
+    //    利用者からは「定期更新でリストがチラつく」「動いていない番組までフラップする」に見える
+    //    （2026-08-04 に報告。Kick でリストが長くなり実際にスクロールするようになって表面化した）。
+    //
+    //    ⚠️ 復元は **Last を測る前に、同期で**行うこと。後回しにすると測定値が汚れる。
+    const scrollers = []
+    for (let n = container.parentNode; n; n = n.parentNode) {
+        if (typeof n.scrollTop === 'number' && n.scrollTop > 0) scrollers.push([n, n.scrollTop])
+    }
+
     // Last: 並べ替えを実行（同期）
     reorderFn()
 
+    for (const [n, top] of scrollers) {
+        if (n.scrollTop !== top) n.scrollTop = top
+    }
+
     // Invert: 旧位置へ戻す（トランジション無しで瞬間移動）
     const moved = []
-    Array.from(container.children).forEach((el) => {
+    Array.from(container.children).forEach((el, idx) => {
         const first = firstRects.get(el)
         if (!first) return
         const last = el.getBoundingClientRect()
@@ -964,6 +1280,7 @@ export function flipReorder(container, reorderFn, duration = 300) {
         el.style.transform = `translate(${dx}px, ${dy}px)`
         moved.push(el)
     })
+
 
     if (moved.length === 0) return
 
@@ -1013,7 +1330,11 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div id="optionContainer"></div>
                                     <!-- タブ分離モードでのみ表示。混在モードと Kick 無効時は hidden。
                                          切り替えは再描画ではなく CSS の出し分けで行う（描画経路に触らないため）。 -->
+                                    <!-- ⚠️ 「統合」は一番左。data-service-tab の値は SERVICE_TABS と揃えること
+                                         （知らない値が来ると既定のニコ生へ落ちる）。
+                                         「統合」を選んだ時の見え方は設定の「統合表示」と同じ＝全件出す。 -->
                                     <div id="serviceTabs" class="service_tabs" hidden>
+                                        <button type="button" class="service_tab" data-service-tab="mixed">統合</button>
                                         <button type="button" class="service_tab is-active" data-service-tab="nicolive">ニコ生</button>
                                         <button type="button" class="service_tab" data-service-tab="kick">Kick</button>
                                     </div>
@@ -1022,7 +1343,10 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                             </div>
                         </div>`
 
-    const sidebarLine = `<div id="sidebar_line"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`
+    // 🔴 ラインにも `sidebar_transition` を付けること（2026-08-08・項目CE-2）。
+    //    「重ねる」ではラインは `left` で動く。中身だけアニメすると開閉のたびにズレる。
+    //    ⚠️ 中身と**同じクラス**を使う。別の指定を書くと、片方の時間を変えた時に食い違う。
+    const sidebarLine = `<div id="sidebar_line" class="sidebar_transition"><div id="sidebar_button"><div id="sidebar_arrow"></div></div></div>`
 
     const optionHtml = `<div class="container">
                             <div class="settings_header">
@@ -1037,10 +1361,61 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="programsSort2" name="programsSort" value="active"><label for="programsSort2">人気順</label>
                                     </div>
                                 </div>
+                                <!-- ⚠️ この HTML はテンプレートリテラルの中。バックティックを書かないこと（文字列がそこで終わる）。
+                                     人気順にしか効かない設定なので、表示順序の直後に置き、
+                                     **人気順を選んでいる時だけ**出す（新着順では active-point を見ないため）。
+                                     ⚠️ **Kick 連携の有無に関わらず効く。**中身は推定同接の W（平均滞在時間）で、
+                                        Kick を使っていなくてもニコ生内部の順位を動かす（doc/09 項目BL-5）。
+                                        以前は Kick セクション内に「ニコ生とのバランス」として置いていたが、
+                                        連携しない利用者が触れないのに効いている状態だったので独立させた。 -->
+                                <div class="opt-section opt-active-only" hidden>
+                                    <div class="opt-label opt-title-with-help">
+                                        人気順の基準
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">人気順は<b>同時視聴者数</b>で並べます。ニコ生は同時視聴者数を公表していないので推定しています。<br><br>右にするほど<b>長く続いている番組</b>が上に来て、左にするほど<b>始まったばかりの番組</b>が上に来やすくなります。<br><br>Kick と統合表示している場合は、右にするほどニコ生の番組が上に来ます。</span></span>
+                                    </div>
+                                    <!-- 数値は出さない。中身は「平均滞在時間（分）」というモデルの仮定値で、
+                                         具体的な数字を見せても利用者が判断できる情報にならない。
+                                         スライダーが持つのは目盛りの**添字**で、実際の分は
+                                         constants.js の dwellMinutesScale から引く。 -->
+                                    <div class="opt-range">
+                                        <div class="opt-range-labels">
+                                            <span class="opt-range-end">新着寄り</span>
+                                            <span class="opt-range-end">継続寄り</span>
+                                        </div>
+                                        <input type="range" id="dwellMinutes" name="dwellMinutes" min="0" max="7" step="1" value="3" aria-label="人気順の基準">
+                                    </div>
+                                </div>
+                                <!-- カードの大きさ。**自動更新の上**（利用者指定・2026-08-07）。
+                                     ⚠️ value は constants.js の cardSizes のキーと同じにすること。
+                                        知らない値は既定（medium）に落ちるので、間違えても壊れはしないが効かない。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <!-- サイドバーの置き方（2026-08-08・利用者要望・doc/09 項目CE）。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        サイドバーの置き方
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>寄せる</b>: ページの中身を右へ寄せて、сサイドバーのぶんの場所を空けます（今までの動き）。ページの全体が見えます。<br><br><b>重ねる</b>: 場所を空けず、ページの上にサイドバーを乗せます。ページの表示は元のままですが、<b>左側が隠れます</b>。<br>ページ側のレイアウトを一切触らないので、寄せると崩れるサイトではこちらが安全です。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">寄せる</label>
+                                        <input type="radio" id="sidebarPlacementOverlay" name="sidebarPlacement" value="overlay"><label for="sidebarPlacementOverlay">重ねる</label>
+                                    </div>
+                                </div>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        カードの大きさ
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組カードの大きさを変えます。サイドバーの幅に対して<b>何列で並べるか</b>が変わり、アイコンと文字の大きさも一緒に変わります。<br><br>カード幅は「サイドバー幅 ÷ 列数」なので、<b>サイドバーが狭いと段階が粗くなります</b>。細かく調節したい時はサイドバーの幅（境界線をドラッグ）と組み合わせてください。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
+                                        <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
+                                        <input type="radio" id="cardSizeLarge" name="cardSize" value="large"><label for="cardSizeLarge">大</label>
+                                    </div>
+                                </div>
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         自動更新
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。<br><br><b>OFF</b> にすると自動更新しません。新しい番組が出てこず、<b>終了した番組もリストに残ります</b>。更新ボタンで手動更新してください。<br>自動移動とサムネイルは OFF でも動きます。</span></span>
                                     </div>
                                     <!-- id は値ベース（旧: updateProgramsInterval1〜3 の連番）。選択肢を増やした時に
                                          連番だと意味がずれ、検証スクリプトの「60秒に設定できた」が黙って別の値を
@@ -1049,7 +1424,12 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="updateProgramsInterval30" name="updateProgramsInterval" value="30"><label for="updateProgramsInterval30">30秒</label>
                                         <input type="radio" id="updateProgramsInterval60" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval60">60秒</label>
                                         <input type="radio" id="updateProgramsInterval120" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval120">120秒</label>
-                                        <input type="radio" id="updateProgramsInterval180" name="updateProgramsInterval" value="180"><label for="updateProgramsInterval180">180秒</label>
+                                        <!-- 🔴 **選択肢を消したら storage.js の migrateOptions へ寄せ先を足すこと。**
+                                             保存値に対応するラジオが無いと、その利用者は設定を一切保存できなくなる
+                                             （updateCheckedState がどれも選ばず、saveOptions が早期 return する）。
+                                             180秒 は 2026-08-07 に廃止し、120秒 へ寄せている。
+                                             ⚠️ 値は文字列 'off'。数値にすると Number() で他の値と区別できなくなる。 -->
+                                        <input type="radio" id="updateProgramsIntervalOff" name="updateProgramsInterval" value="off"><label for="updateProgramsIntervalOff">OFF</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">
@@ -1057,9 +1437,16 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         オートオープン
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">ページを開いた時にサイドバーを自動で開くか。「記憶」は前回の開閉状態を復元します。</span></span>
                                     </div>
+                                    <!-- ⚠️ **並びは OFF → ON。**他のトグル（自動移動・動くサムネ）と揃える。
+                                         🔴 **id と value の対応を動かさないこと。** autoOpen1='1'=ON /
+                                            autoOpen2='2'=OFF のまま、入れ替えるのは**表示順だけ**。
+                                            値を振り直すと、既存利用者の保存値の意味が反転する。
+                                         ⚠️ input:checked + label で色を付けているので、input と label は
+                                            必ず隣り合わせのまま動かす。
+                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
                                     <div class="opt-segment">
-                                        <input type="radio" id="autoOpen1" name="autoOpen" value="1"><label for="autoOpen1">ON</label>
                                         <input type="radio" id="autoOpen2" name="autoOpen" value="2"><label for="autoOpen2">OFF</label>
+                                        <input type="radio" id="autoOpen1" name="autoOpen" value="1"><label for="autoOpen1">ON</label>
                                         <input type="radio" id="autoOpen3" name="autoOpen" value="3"><label for="autoOpen3">記憶</label>
                                     </div>
                                 </div>
@@ -1076,7 +1463,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         動くサムネ<span class="opt-beta-badge">β版</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネを切り替えてアニメ表示します。（ベータ版：不具合や重い場合はOFFに）<br><br>⚠️ <b>ニコ生の番組のみ。</b>Kick のサムネは配信元が CORS を許可していないため、コマを取り出せません。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネをアニメーション表示します。<br><br>コマが貯まるまで数分かかることがあります。</span></span>
                                     </div>
                                     <div class="opt-segment">
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
@@ -1095,7 +1482,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                      ここでは ON/OFF できない。拡張のオプションページを開く導線だけを置く。 -->
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
-                                        Kick 連携
+                                        Kick 連携<span class="opt-beta-badge">β版</span>
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">Kick でフォロー中の配信をサイドバーに表示します。kick.com へのアクセス許可が必要なため、拡張機能の設定ページで有効にします。</span></span>
                                     </div>
                                     <div class="opt-external">
@@ -1107,22 +1494,12 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                      ここ（サイドバー内）で完結できる。表示/非表示は optionsHandler が
                                      kick:status の応答で切り替える。 -->
                                 <div class="opt-section opt-kick-only" hidden>
-                                    <div class="opt-label">Kickの表示</div>
+                                    <div class="opt-label">番組表示方法</div>
                                     <div class="opt-segment">
-                                        <input type="radio" id="kickDisplayModeMixed" name="kickDisplayMode" value="mixed"><label for="kickDisplayModeMixed">混ぜる</label>
+                                        <!-- 保存する値は 'mixed' のまま。表示ラベルだけを「統合表示」にしている。
+                                             値を変えると既存ユーザーの設定が既定へ落ちる。 -->
+                                        <input type="radio" id="kickDisplayModeMixed" name="kickDisplayMode" value="mixed"><label for="kickDisplayModeMixed">統合表示</label>
                                         <input type="radio" id="kickDisplayModeTabs" name="kickDisplayMode" value="tabs"><label for="kickDisplayModeTabs">タブで分ける</label>
-                                    </div>
-                                </div>
-                                <div class="opt-section opt-kick-only" hidden>
-                                    <div class="opt-label opt-title-with-help">
-                                        ニコ生とのバランス
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">人気順は同時視聴者数で並べます。ニコ生は同時視聴者数を公表していないので、来場者が増えるペースから推定しています。ニコ生が下に沈むと感じたら右へ、上に来すぎるなら左へ。<br>右にするほど、始まったばかりの番組より長く続いている番組が上に来ます。</span></span>
-                                    </div>
-                                    <div class="opt-segment opt-segment-4">
-                                        <input type="radio" id="dwellMinutes5" name="dwellMinutes" value="5"><label for="dwellMinutes5">Kick寄り</label>
-                                        <input type="radio" id="dwellMinutes10" name="dwellMinutes" value="10"><label for="dwellMinutes10">標準</label>
-                                        <input type="radio" id="dwellMinutes20" name="dwellMinutes" value="20"><label for="dwellMinutes20">ニコ生寄り</label>
-                                        <input type="radio" id="dwellMinutes40" name="dwellMinutes" value="40"><label for="dwellMinutes40">かなり</label>
                                     </div>
                                 </div>
                             </form>

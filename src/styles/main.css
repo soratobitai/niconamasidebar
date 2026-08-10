@@ -8,7 +8,12 @@
 body,
 #niconamasidebar-kick-root {
     --sb-bg: #111;
-    --sb-line: #111;
+    /* 境目ラインと開閉ボタンの色。**背景と同じ色にしないこと。**
+       2026-08-07 まで `--sb-bg` と同じ `#111` で、ダークでは境目もボタンも見えなかった。
+       ライト側は白背景に対して 1段だけ落とした色（#fff → #d5d9df ≒ 40/255）を当てている。
+       ダークもその**同じ幅の段差**にしてある（#111 → #3a3a3a ≒ 40/255）。
+       ⚠️ 濃くしすぎると枠線に見え、薄くしすぎるとボタンが背景に溶ける。 */
+    --sb-line: #3a3a3a;
     --sb-fg: #ccc;
     --sb-header-fg: #fff;
     --sb-arrow: #ccc;
@@ -113,12 +118,21 @@ body.nicosidebar-light,
     box-sizing: border-box;
 }
 #liveProgramContainer {
+    /* カードの中身（アイコン・文字）の倍率。設定「カードの大きさ」で JS が入れ替える。
+       🔴 **既定は 1。** JS が入れなくても従来と同じ見た目になるようにしておく。
+       ⚠️ 置くのはカードの親。カード側は継承で受ける（カード1枚ずつには入れない）。 */
+    --nns-card-scale: 1;
     display: flex;
     flex-wrap: wrap;
+    /* 見出し／タブとカードの間。**padding で持つ**（.sidebar_body の説明を参照）。 */
+    padding-top: 12px;
 }
 
 .sidebar_header {
-    margin-bottom: 20px;
+    /* 🔴 **見出しの下の余白をここで持たないこと。** 下の `.sidebar_body { padding-top }` が持つ。
+       margin で持つと `.sidebar_body` の中の子要素の margin と**相殺**し、
+       「8＋12＝20」のつもりが 12 になる。padding は相殺されないので計算どおりになる。 */
+    margin-bottom: 0;
     font-size: 0.8rem;
     font-weight: bold;
     display: flex;
@@ -179,8 +193,23 @@ body.nicosidebar-light,
     box-sizing: border-box;
 }
 
+/* 🔴 **見出しから最初のカードまでの 20px は「2つの padding の足し算」で作る。**
+     .sidebar_body の 8px ＋ #liveProgramContainer の 12px ＝ 20px（タブ無しの時。従来と同じ）
+   タブが出ている時は、その 8px の位置にタブが入り、タブの下は 2px＋12px＝14px になる。
+   ＝**タブが 12px 上がり、タブとリストの間が 8px 広がる**（2026-08-07 の要望）。
+
+   ⚠️ **margin で組み直さないこと。** 兄弟どうしの margin は足し算ではなく相殺（大きいほうだけ）
+      になるうえ、`.sidebar_body` に padding が無いと中の子の margin が親をすり抜けて
+      見出しの margin と相殺する。padding なら相殺されないので、上の足し算がそのまま効く。
+   ⚠️ タブが hidden の時は display:none なので、余白ごと消えて 8＋12 に戻る。 */
 .sidebar_body {
     position: relative;
+    padding-top: 8px;
+}
+
+/* 設定パネルはタブの都合で動かさない。従来どおり見出しから 20px 空ける。 */
+.sidebar_body.show-settings {
+    padding-top: 20px;
 }
 
 #program_count {
@@ -250,17 +279,18 @@ body.nicosidebar-light,
     align-items: center;
 }
 .program_container .provider a {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: calc(40px * var(--nns-card-scale));
+    min-width: calc(40px * var(--nns-card-scale));
+    height: calc(40px * var(--nns-card-scale));
+    min-height: calc(40px * var(--nns-card-scale));
     overflow: hidden;
 }
+/* ⚠️ a と img は必ず同じ式にすること。片方だけ拡縮すると枠から画像がはみ出す。 */
 .program_container .provider img {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: calc(40px * var(--nns-card-scale));
+    min-width: calc(40px * var(--nns-card-scale));
+    height: calc(40px * var(--nns-card-scale));
+    min-height: calc(40px * var(--nns-card-scale));
     object-fit: cover;
     border-radius: 50%;
     overflow: hidden;
@@ -284,11 +314,16 @@ body.nicosidebar-light,
     background: #53fc18; /* Kick のブランドカラー */
 }
 
-#liveProgramContainer[data-service-tab] .service_badge {
+/* 🔴 **「統合」タブではバッジを出すこと。** 片方だけのタブは**タブ自体がラベル**なので
+   バッジは要らないが、統合は両方が混ざるので**どちらのカードか分からなくなる**。
+   ここを `[data-service-tab]` の一括指定にすると統合でも消える（2026-08-07 に足した時の注意点）。 */
+#liveProgramContainer[data-service-tab="nicolive"] .service_badge,
+#liveProgramContainer[data-service-tab="kick"] .service_badge {
     display: none;
 }
 
-/* タブ分離モードの出し分け。再描画せず表示だけ切り替える。 */
+/* タブ分離モードの出し分け。再描画せず表示だけ切り替える。
+   ⚠️ 「統合」("mixed") はここに書かない。**何も隠さない＝全件出る**のが正しい。 */
 #liveProgramContainer[data-service-tab="nicolive"] .program_container[data-service="kick"],
 #liveProgramContainer[data-service-tab="kick"] .program_container:not([data-service="kick"]) {
     display: none;
@@ -297,7 +332,8 @@ body.nicosidebar-light,
 .service_tabs {
     display: flex;
     gap: 0;
-    margin: 0 8px 6px;
+    /* 下の余白はここ。**上の余白は .sidebar_body の padding-top が持つ**（下の🔴を参照）。 */
+    margin: 0 8px 2px;
     border: 1px solid var(--sb-popup-border);
     border-radius: 6px;
     overflow: hidden;
@@ -336,7 +372,7 @@ body.nicosidebar-light,
 .program_container .provider .provider_name {
     padding-left: 7px;
     width: 100%;
-    font-size: 0.8rem;
+    font-size: calc(0.8rem * var(--nns-card-scale));
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -408,7 +444,7 @@ body.nicosidebar-light,
 
 .program_container .program_title {
     width: 100%;
-    font-size: 0.8rem;
+    font-size: calc(0.8rem * var(--nns-card-scale));
     font-weight: bold;
     overflow: hidden;
     display: -webkit-box;
@@ -420,7 +456,8 @@ body.nicosidebar-light,
 }
 
 #api_error {
-    margin: 20px 0;
+    /* 上は 12px。.sidebar_body の padding-top 8px と足して従来と同じ 20px にする。 */
+    margin: 12px 0 20px;
     text-align: center;
     display: none;
 }
@@ -569,6 +606,34 @@ body.nicosidebar-light,
     vertical-align: middle;
 }
 
+/* 数値を出さないスライダー。両端のラベルだけで意味を伝える。 */
+#optionContainer .opt-range {
+    display: block;
+}
+
+/* ラベルはスライダーと同じ行に置かない。横に並べるとスライダーが短くなるうえ、
+   サイドバーを狭めた時に文字が潰れる。一段上に振り分けて、幅はスライダーに全部渡す。 */
+#optionContainer .opt-range-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 5px;
+}
+
+#optionContainer .opt-range-end {
+    font-size: 0.92em;
+    opacity: .75;
+    white-space: nowrap;
+}
+
+#optionContainer .opt-range input[type="range"] {
+    display: block;
+    width: 100%;
+    margin: 0;
+    box-sizing: border-box;
+    accent-color: var(--sb-accent);
+    cursor: pointer;
+}
+
 /* 外部（拡張のオプションページ）へ飛ばす行。今は Kick 連携だけが使う。
    .opt-segment と違い値を持たないので、optionForm の change では拾われない。 */
 #optionContainer .opt-external {
@@ -577,24 +642,27 @@ body.nicosidebar-light,
     gap: 10px;
 }
 
+/* 色は選択中のセグメント（.opt-segment の :checked）と揃える。
+   設定画面の中で青はこの1色だけにしておく。 */
 #optionContainer .opt-external-button {
     font: inherit;
     font-size: 0.9em;
     padding: 5px 12px;
-    border: 1px solid var(--sb-popup-border);
+    border: 1px solid var(--sb-accent);
     border-radius: 6px;
-    background: var(--sb-segment-bg);
-    color: var(--sb-fg);
+    background: var(--sb-accent);
+    color: #fff;
     cursor: pointer;
 }
 
 #optionContainer .opt-external-button:hover {
-    border-color: var(--sb-accent);
+    filter: brightness(1.12);
 }
 
 #optionContainer .opt-external-status {
-    font-size: 0.85em;
-    opacity: .6;
+    font-size: 1.15em;
+    font-weight: bold;
+    opacity: .9;
 }
 
 #optionContainer .opt-external-status.is-on {
@@ -763,4 +831,37 @@ body.nicosidebar-light,
 }
 #auto_next_modal button:hover {
     background: #555;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   【サイドバーの置き方: 重ねる】（2026-08-08・doc/09 項目CE）
+
+   既定は「寄せる」（`#root` の幅を縮めて場所を空ける）。ここは重ねる時だけの差分。
+
+   🔴 **中身とラインの両方を流れから外すこと。** 片方だけ外すと、body の flex に
+      残ったほうが場所を取り続けて「重なっているのに寄っている」状態になる。
+
+   🔴 **ラインの左位置は `--nns-sb-w`（中身の実測幅）で決める。**
+      幅は JS がインラインで入れているので CSS からは見えない。
+      `sidebarControl.setRootWidth()` が毎回この変数を更新している。
+      ⚠️ **`#sidebar` の width を CSS 側で計算し直さないこと。** 2箇所で同じ計算をすると
+         条件が増えた時に必ず食い違う（doc/09 で何度も出ている型）。
+
+   ⚠️ `position: sticky` から `fixed` へ変える。sticky のままだと親の流れに縛られる。
+   ⚠️ z-index はニコ生のプレイヤー・ヘッダーより上。ただし最大値は避ける（他拡張との喧嘩を減らす）。 */
+/* ⚠️ **`body >` を外さないこと。** kick.com のサイドバーは `<html>` 直下に居るので、
+   限定しないとあちらにも当たる。今は id 2つ分の詳細度で kick 側が勝っているだけで、
+   **偶然に頼った状態**になる。 */
+html.nns-overlay body > #sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 2147483000;
+}
+
+html.nns-overlay body > #sidebar_line {
+    position: fixed;
+    top: 0;
+    left: var(--nns-sb-w, 0px);
+    z-index: 2147483001; /* 中身より上。閉じている時に掴めなくならないように */
 }

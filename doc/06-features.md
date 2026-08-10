@@ -16,7 +16,7 @@
 | 機能 | input name | value（ラベル） | 保存キー | 既定 | UI生成 | 反映 |
 |------|-----------|----------------|---------|------|--------|------|
 | 表示順序 | `programsSort` | `newest`(新着順)/`active`(人気順) | `programsSort` | `'newest'` | sidebar.js | onChanged＋即DOMソート |
-| 自動更新間隔 | `updateProgramsInterval` | `30`/`60`/`120`/`180`秒 | `updateProgramsInterval` | `'120'` | sidebar.js | onChanged→開いていれば `resetSidebarSchedule` |
+| 自動更新間隔 | `updateProgramsInterval` | `30`/`60`/`120`秒 / `off` | `updateProgramsInterval` | `'120'` | sidebar.js | onChanged→開いていれば `resetSidebarSchedule` |
 | オートオープン | `autoOpen` | `1`(ON)/`2`(OFF)/`3`(状態記憶) | `autoOpen` | `'3'` | sidebar.js | 初期判定（次回ロードで有効） |
 | 自動移動 | `autoNextProgram` | `on`/`off` | `autoNextProgram` | `'off'` | sidebar.js | onChanged→watcher start/stop |
 | 動くサムネ（β版） | `animatedThumbnail` | `on`/`off` | `animatedThumbnail` | `'off'` | sidebar.js | onChanged→`setAnimatedThumbnailEnabled` |
@@ -25,8 +25,10 @@
 | ライト/ダーク | （設定画面**末尾**のセグメント） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `input[name="sidebarTheme"]`） | onChanged→`applyTheme` |
 | サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。常設ループが更新完了後に置き直す基準間隔） | — | — |
 | **Kick 連携 ON/OFF** | （フォーム外・**拡張のオプションページ**） | — | **保存しない**（`chrome.permissions.contains()` が唯一の真実） | 無効 | options.html | `permissions.onAdded/onRemoved` → SW が各タブへ `kick:stateChanged` |
-| **Kickの表示** | `kickDisplayMode` | `mixed`(混ぜる)/`tabs`(タブで分ける) | `kickDisplayMode` | `'mixed'` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`syncServiceTabs`（再描画せず CSS で出し分け） |
-| **ニコ生とのバランス（W）** | `dwellMinutes` | `5`/`10`/`20`/`40`（分） | `dwellMinutes` | `10` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`setDwellMinutes` ＋ リスト更新を1回 |
+| **番組表示方法** | `kickDisplayMode` | `mixed`(統合表示)/`tabs`(タブで分ける) | `kickDisplayMode` | `'mixed'` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`syncServiceTabs`（再描画せず CSS で出し分け） |
+| 選択中のタブ | `kickActiveTab` | `mixed`(統合)/`nicolive`/`kick` | `kickActiveTab` | `'nicolive'` | サイドバー上部のタブ（`tabs` の時だけ表示） | クリックで保存。一覧は `SERVICE_TABS`（sidebar.js）が唯一の定義 |
+| **カードの大きさ** | `cardSize` | `small`/`medium`/`large` | `cardSize` | `'medium'` | sidebar.js（自動更新の上） | onChanged→`setCardSize`＋`setProgramContainerWidth`（取得はしない） |
+| **人気順の基準（W）** | `dwellMinutes` | `5`/`10`/`20`/`40`（分・推定同接の平均滞在時間） | `dwellMinutes` | `10` | sidebar.js（**表示順序の直後・常時表示**） | onChanged→`setDwellMinutes` ＋ リスト更新を1回 |
 
 🔴 **「Kick を有効にするか」だけは設定値として保存していない。**
 ユーザーは `chrome://extensions` からこの画面を通さずに権限を取り消せるため、
@@ -34,10 +36,19 @@
 
 🔴 **ON/OFF だけが拡張のオプションページにある。**`chrome.permissions.request()` は
 コンテンツスクリプトから呼べず、サイドバー内の設定 UI はニコ生ページの DOM だから。
-権限を伴わない「表示方法」と「バランス」はサイドバー内にある（利用者要望・2026-08-04）。
+権限を伴わない「番組表示方法」と「バランス」はサイドバー内にある（利用者要望・2026-08-04）。
 
-⚠️ **W（バランス）の効き方**は doc/09 項目 BL-5 を読むこと。
-「ニコ生と Kick の釣り合いだけ」ではなく、**ニコ生内部の「新しい番組 vs 続いている番組」も動かす。**
+🔴 **「人気順の基準」は Kick 連携の設定ではない。**中身は推定同接の W（平均滞在時間）で、
+**Kick を使っていなくてもニコ生の順位を動かす**（doc/09 項目 BL-5）。
+一時期 Kick セクション内に「ニコ生とのバランス」として置いていたが、
+**連携しない利用者が触れないのに効いている**状態だったので独立させた（2026-08-04・利用者判断）。
+
+効き方は2つある。混同しないこと。
+- **右にするほど「長く続いている番組」が上に来る**（経過が W 未満の番組は係数が経過分になるため）
+- Kick と統合表示している場合、**右にするほどニコ生の番組が上に来る**
+
+⚠️ 保存値は `mixed` のまま。**表示ラベルだけ**を「統合表示」にしてある（2026-08-04）。
+値を変えると既存ユーザーの設定が既定へ落ちる。
 
 ---
 
@@ -77,7 +88,10 @@
   詳細を先に storage へ upsert（`fetchFollowedProgramsViaPage` → `upsertProgramInfos`）してから、
   リストと突き合わせてカードを組み、`programsSort` でソート → カウント更新。詳細がカード生成時点で揃っているので**初回描画から人気度が確定**する。失敗時 `#api_error`。
 - **詳細取得はフロントAPIに一本化**: 従来の「1番組=詳細API×N」＋レート制限キューは廃止（`queue.js` / `ProgramInfoQueue` 削除）。フロントAPIを通常1リクエスト（100件超はページングで数リクエスト）叩いて全放送中フォロー番組の詳細を取得する。→ [04-data-flow](./04-data-flow.md) / [05-external-api](./05-external-api.md)
-- 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢30/60/120/180）。変更時、開いていれば `resetSidebarSchedule`。
+- 対応設定: **`updateProgramsInterval`**（既定 `'120'`、選択肢 30/60/120秒 と `'off'`）。変更時、開いていれば `resetSidebarSchedule`。
+  - `'off'` は**タイマーを張らない**。判定は `autoUpdateIntervalMs()`（sidebar.js）が唯一の定義で、OFF なら `null` を返す。弾くのは `_scheduleSidebarTick` の1箇所。
+  - **サムネ更新と自動移動は `'off'` でも動く**（別ループ）。止まるのは番組リストの取得と終了確認。
+  - 旧 `'180'` は廃止。`storage.js` の `migrateOptions` が `'120'` へ寄せる。
 - **拡張が無効化されたら自分で止まる**（2026-08-02・doc/09 項目BK）: 拡張を再読み込み/更新/無効化しても content script は動き続ける。`_sidebarTick` / `_thumbTick` の先頭で `checkExtensionAlive()`（`chrome.runtime.id`）を見て、消えていたら**張り直さずに打ち切り**、`cleanup('invalidated')` を1回だけ走らせる。これが無いと取り残されたタブがニコ生への取得を続ける（実測: 無効化後60秒で サムネ+9回・follow+1・notifybox+1）。🔴 `_sidebarTick` は **`try` に入る前に return**（try 内だと `finally` が次を張って生き残る）。
 
 ## 6. ソート（表示順序）
@@ -154,6 +168,7 @@
 - 実装: CSSカスタムプロパティ（`--sb-*`）を `body`（ダーク既定）と **`body.nicosidebar-light`**（ライト）で切替。`main.js` の `applyTheme(theme)` が body クラスをトグル、`storage.js` の `setSidebarTheme` で `chrome.storage.local` に保存、`onChanged` で他タブにも反映。
 - ✅ ライト時、本サイト背景が白でも境目が分かるよう、**サイドバー左端のライン/開閉ボタン(`#sidebar_line`/`#sidebar_button`)に色**（`--sb-line`=ダーク`#111`/ライト`#d5d9df`（薄め））。
 - 対応設定: **`sidebarTheme`**（既定 **`'light'`**）。設定パネル内のトグルで保存。
+- ✅ **サイドバーの置き方（2026-08-08）**: 設定「サイドバーの置き方」で **寄せる**（既定・今までどおりページを右へ寄せる）と **重ねる**（場所を空けずページの上に乗せる）を切り替え。両ページ対応。判定と印は `ui/placement.js` に1つ（`<html>` の `nns-overlay`）。kick は寄せ幅を 0 にするだけで、読み替え・固定要素の押し出し・列数の決め直しがすべて降りる。詳細は doc/09 項目CE。
 - テーマ対象: サイドバー本体（背景/文字/ヘッダー/アイコン/サムネ枠/スピナー/左端ライン）＋設定パネル（セグメント含む）。自動移動モーダルは元から明色。
 
 ## 13. デバッグ機能

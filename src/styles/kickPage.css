@@ -3,58 +3,111 @@
 
 :root {
     --nns-kick-width: 360px;
+    /* ページ本体の左に確保している幅。**開閉のたびに変わる。**
+       🔴 **ここで計算しないこと。** `kickPage.js` の `reservedWidth()` が出した数値を
+          そのまま受け取るだけの器。開いている時は「サイドバー幅＋余白」、
+          閉じている時は「余白だけ」（ハンドルが残るため 0 にはならない）。
+          CSS 側で同じ計算をやり直すと、条件が増えた時に必ず食い違う。
+       ⚠️ この 0px は JS が値を入れるまでの既定。ここを直しても効かない。 */
+    --nns-kick-reserved: 0px;
 }
 
-/* サイドバーは**左**（ニコ生側と同じ）。 */
-#niconamasidebar-kick-root #sidebar {
+/* サイドバーは**左**（ニコ生側と同じ）。
+   🔴 **開閉で動かすのは、この root 1枚だけ。**
+      中身（`#sidebar`）と境目ライン（`#sidebar_line`）を別々にアニメーションさせないこと。
+
+      2026-08-07 まで `#sidebar` は `transform`、`#sidebar_line` は `left` で動かしていた。
+      `transform` はコンポジタで進み、`left` はレイアウトを伴うのでメインスレッドでしか進まない。
+      開閉の 180ms のあいだにメインスレッドが詰まると、**中身だけ先に滑ってラインが取り残される**
+      （利用者の実機で発生。「サイドバーの中身と境目ラインが分離する」）。
+      詰まる要因はこの開閉自身が作っている（`body` の margin/width アニメで全ページ再レイアウト＋
+      直後に走る `refreshPrograms` のカード組み立て）ので、稀にしか見えないが構造的に必ず起こりうる。
+
+      root を1枚動かし、中身とラインをその箱に貼り付ければ、**ズレる自由度そのものが無くなる。**
+      幅を変えた時（他ページからの同期）にも同じ形で分離していたが、これも同時に消える
+      （幅は root の箱が変わるだけで、中身もラインも即座に追従する）。 */
+#niconamasidebar-kick-root {
     position: fixed;
     top: 0;
     left: 0;
-    height: 100vh;
     width: var(--nns-kick-width);
+    height: 100vh;
     z-index: 2147483000; /* Kick のモーダルより上。最大値は避ける（他拡張との喧嘩を減らす） */
     transform: translateX(-100%);
     transition: transform .18s ease;
+    /* 🔴 閉じている時、ラインは root の箱の**外**（右隣＝画面 x=0）に居る。切ってはいけない。 */
+    overflow: visible;
 }
 
-#niconamasidebar-kick-root.is-open #sidebar {
+#niconamasidebar-kick-root.is-open {
     transform: translateX(0);
 }
 
-/* 開閉ハンドル。閉じている時は画面左端、開いている時はサイドバーの右端に貼り付く。
-   **閉じていても必ず見える**ようにしておく（これが唯一の開く手段）。 */
-#niconamasidebar-kick-root #sidebar_line {
-    position: fixed;
+/* 中身は root いっぱい。 */
+#niconamasidebar-kick-root #sidebar {
+    position: absolute;
     top: 0;
     left: 0;
-    height: 100vh;
-    z-index: 2147483001;
-    transition: left .18s ease;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
 }
 
-#niconamasidebar-kick-root.is-open #sidebar_line {
-    left: var(--nns-kick-width);
+/* 開閉ハンドルは root の右隣に貼り付く。
+     閉じている時: root は [-W, 0] に居るので、ラインは [0, 5]＝**画面左端に見える**
+     開いている時: root は [0, W] なので、ラインは [W, W+5]
+   閉じていても必ず見えること。これが唯一の開く手段。 */
+#niconamasidebar-kick-root #sidebar_line {
+    position: absolute;
+    top: 0;
+    left: 100%;
+    height: 100%;
+    /* ドラッグをページのスクロール／ズームに持っていかれないように（pointer capture 前提） */
+    touch-action: none;
 }
 
-/* 🔴 **ページ本体を寄せる方法に transform を使う理由。**
-   `margin-left` や `padding-left` では、Kick 側の `position: fixed` 要素
-   （ヘッダー・プレイヤー・チャット）が viewport 基準のままなので動かず、
-   サイドバーの下に潜り込む。
-   **`transform` を掛けた要素は、その子孫の `position: fixed` の包含ブロックになる。**
-   body に掛ければ、Kick の固定配置要素もまとめて一緒に寄る。
+/* 🔴 **中身とラインに transition を付けないこと。** 動かすのは root だけ。
+   `#sidebar` には main.css の `.sidebar_transition`（= all 0.5s）が付いているので、
+   打ち消さないと幅の変更が 0.5s かけて追従し、root と食い違う。 */
+#niconamasidebar-kick-root #sidebar,
+#niconamasidebar-kick-root #sidebar_line {
+    transition: none;
+}
 
-   ⚠️ この副作用として **サイドバー自身も body の中にあると一緒に動いてしまう**。
-      そのため差し込み先は `<body>` ではなく `<html>` 直下にしてある（kickPage.js の insertSidebar）。
+/* 【ページ本体の寄せ方】
+   `margin-left` + `width: calc(100vw - 幅)` を body にインラインで当てる（kickPage.js の applyShift）。
+
+   🔴 **transform で寄せる方式は捨てた（2026-08-04）。** 「transform を掛けた要素は子孫の
+      `position: fixed` の包含ブロックになる」ことを当てにしていたが、実機の計測で
+      **body に transform が効いているのに子孫が x=0 に居る**という結果になり、当てが外れた。
+      そもそも Kick のレイアウト要素は fixed ではなく static / relative だった
+      （fixed は不可視の計測用 iframe だけ）ので、transform を使う必要自体が無かった。
+
+   ⚠️ サイドバーの差し込み先が `<body>` ではなく `<html>` 直下なのは、この名残ではなく現役の理由がある。
+      body に寄せの指定を当てるので、中に居ると**サイドバー自身も一緒に寄ってしまう。**
 
    🔴 **寄せる指定をここ（スタイルシート）に書かないこと。**
       Kick 側は body に**インラインの style** を書く（スクロールロック等）。インラインは
       スタイルシートより強いので、CSS クラスで当てていると黙って打ち消される。
       2026-08-04 の実機で「開いた直後は寄るが、すぐ元の幅に戻って潜り込む」形で出た。
       実際の指定は kickPage.js の `applyShift()` がインラインで当て、
-      書き換えられたら `watchHostStyles()` が当て直す。 */
+      書き換えられたら `startReconciler()` の定期の突き合わせが当て直す。 */
 
-html.nns-kick-open {
+html.nns-kick-active {
     overflow-x: hidden;
+}
+
+/* 境界線を掴んでいる間はアニメを止める。付けたままだと幅がひと呼吸遅れて追従し、
+   掴んでいる感触が無くなる（ニコ生側は sidebar_transition の付け外しで同じことをしている）。
+   ⚠️ 動くのは root と body だけ。中身とラインは上で transition:none にしてある。 */
+html.nns-kick-dragging #niconamasidebar-kick-root,
+html.nns-kick-dragging body {
+    transition: none !important;
+}
+
+/* ドラッグ中にページ側のテキストが選択されるのを防ぐ */
+html.nns-kick-dragging {
+    user-select: none;
 }
 
 /* 開閉に合わせてページ側もなめらかに寄る。サイドバーのスライド（.18s）と同じ長さにして、
@@ -69,7 +122,7 @@ body {
    Kick のレイアウトは `w-xvw`（＝100vw）などビューポート基準の幅で組まれている。
    body に `margin-left` と `width` を当てて寄せても、中の要素は 100vw を主張し続けるため、
    はみ出すか左端に居座り、サイドバーの下に潜り込む。
-   開いている間だけ「残り幅」に読み替える。
+   連携が有効な間は常に「残り幅」に読み替える（閉じていてもハンドルのぶんを空けているため）。
 
    実機の計測（2026-08-04・/muramako）で実際に出ていた要素:
      DIV flex flex-1 w-xvw ...            x=0 w=1920  ← ビューポート幅のまま
@@ -77,27 +130,101 @@ body {
 
    ⚠️ Kick 固有のクラス名ではなく、`w-xvw` `w-screen` といった**汎用のユーティリティ名**だけを
       対象にしている。Kick の実装が変わっても比較的壊れにくいのはそのため。
-   ⚠️ `!important` が要る。Tailwind のユーティリティも同じ詳細度で当たってくるため。 */
-html.nns-kick-open [class*="w-xvw"],
-html.nns-kick-open [class*="w-screen"],
-html.nns-kick-open [class*="min-w-xvw"],
-html.nns-kick-open [class*="min-w-screen"],
-html.nns-kick-open [class*="max-w-xvw"],
-html.nns-kick-open [class*="max-w-screen"] {
-    width: calc(100vw - var(--nns-kick-width)) !important;
-    max-width: calc(100vw - var(--nns-kick-width)) !important;
+   ⚠️ `!important` が要る。Tailwind のユーティリティも同じ詳細度で当たってくるため。
+
+   🔴 **引くのは `--nns-kick-reserved` ただ1つ。ここで計算し直さないこと。**
+      これは `applyShift()` が body に当てた数値そのもの。以前は
+      `calc(100vw - var(--nns-kick-width) - var(--nns-kick-gap))` と**同じ計算をここでも**
+      していたが、閉じている時は幅を足さない（余白だけ）という条件が増えた時点で、
+      2箇所を手で揃える約束は保てない。
+
+   🔴 **`nns-kick-open` ではなく `nns-kick-active` で当てること。**
+      閉じていても開閉ハンドルのぶんはページを寄せている。開いている時だけ読み替えると、
+      **閉じた瞬間に中身が 100vw に戻ってハンドルの下へ潜り込む。** */
+/* 🔴 **部分一致（`*=`）で書かないこと。関係ないクラスまで巻き込む**（2026-08-08・項目CB）。
+      `[class*="w-screen"]` は **`max-w-screen-lg` にも当たる。** あれは「最大1024px」という
+      **固定値**の指定なので、全幅へ広げると隣の要素が押し潰される。
+      実機では、モバイル用スタイルに切り替わったところで映像がはみ出し、
+      「メッセージを送」の入力欄が**1文字ずつ折り返す**まで潰れていた。
+
+   正しい書き方は2つ:
+     `[class~="w-screen"]`  … 単語そのもの（`w-screen` だけ。`max-w-screen-lg` は別の単語）
+     `[class*=":w-screen"]` … 変種の接頭辞つき（`lg:w-screen` / `3xl:w-xvw` など）
+   ⚠️ 後者が `max-w-screen-lg` を拾わないのは、`:` の直後が `m` だから。
+      **`:max-w-screen` を足すと `lg:max-w-screen-md` を拾って元の木阿弥になる。**
+
+   ⚠️ `max-w-screen-*` は Tailwind の**固定値**（sm/md/lg/xl/2xl）。ビューポート基準ではないので
+      **そもそも読み替えの対象ではない。** 対象は Kick 独自の `max-w-xvw` だけ。 */
+
+/* 🔴 **重ねる時は読み替えを一切しない**（doc/09 項目CE）。
+   場所を空けていないので、寄せ幅は 0。`calc(100vw - 0px)` は 100vw だが、
+   それでも `!important` で当ててしまうと Kick 自身の `lg:w-full` などを上書きする。
+   **何もしないのが正解。** `:not(.nns-overlay)` で規則ごと外す。 */
+/* ① 幅そのもの */
+html.nns-kick-active:not(.nns-overlay) [class~="w-xvw"],
+html.nns-kick-active:not(.nns-overlay) [class*=":w-xvw"],
+html.nns-kick-active:not(.nns-overlay) [class~="w-screen"],
+html.nns-kick-active:not(.nns-overlay) [class*=":w-screen"] {
+    width: calc(100vw - var(--nns-kick-reserved)) !important;
+    max-width: calc(100vw - var(--nns-kick-reserved)) !important;
     min-width: 0 !important;
 }
 
+/* ② 下限だけ。`width` まで固定すると、縮んでよい要素まで縮めなくなる。 */
+html.nns-kick-active:not(.nns-overlay) [class~="min-w-xvw"],
+html.nns-kick-active:not(.nns-overlay) [class*=":min-w-xvw"],
+html.nns-kick-active:not(.nns-overlay) [class~="min-w-screen"],
+html.nns-kick-active:not(.nns-overlay) [class*=":min-w-screen"] {
+    min-width: calc(100vw - var(--nns-kick-reserved)) !important;
+}
+
+/* ③ 上限だけ。Kick 独自の `max-w-xvw` のみ（`max-w-screen-*` は上のとおり対象外）。 */
+html.nns-kick-active:not(.nns-overlay) [class~="max-w-xvw"],
+html.nns-kick-active:not(.nns-overlay) [class*=":max-w-xvw"] {
+    max-width: calc(100vw - var(--nns-kick-reserved)) !important;
+}
+
+/* 🔴 **`position: fixed` はビューポート基準なので、body を寄せても動かない。**
+   上の読み替えは**幅**のルールで、固定配置の**位置**には効かない。
+   そのため Kick のモーダルがサイドバーの下へ潜り込み、左端が隠れる（利用者の指摘・2026-08-07）。
+
+   実測した2種類（Radix 系の作り。`z-index: 601`）:
+
+     暗幕   class="z-dialog fixed inset-0 bg-black/75 …"
+            left=0 width=1920（画面いっぱい）
+     本体   class="… z-dialog fixed … w-xvw … lg:left-[50%] lg:translate-x-[-50%] …"
+            left=349 width=1223 ← 幅は上の読み替えで既に可視領域ぶんになっている
+
+   本体は**幅は合っていて、中央寄せだけがビューポート基準**だった。
+   可視領域は `[reserved, 100vw]` なので、その中心は `50% + reserved/2`。差の `reserved/2` を足す。
+
+   ⚠️ Kick 固有名ではなく**汎用のユーティリティ名**で当てる（`w-xvw` の読み替えと同じ方針）。
+      `fixed` は token 一致（`~=`）、`left-[50%]` は `lg:` 接頭辞が付くので部分一致（`*=`）。 */
+html.nns-kick-active:not(.nns-overlay) [class~="fixed"][class~="inset-0"] {
+    /* 暗幕。`right: 0` はそのままなので、これだけで可視領域と同じ箱になる。 */
+    left: var(--nns-kick-reserved) !important;
+}
+
+html.nns-kick-active:not(.nns-overlay) [class~="fixed"][class*="left-[50%]"] {
+    /* 中央寄せの本体。`translate-x-[-50%]` はそのまま効く。 */
+    left: calc(50% + var(--nns-kick-reserved) / 2) !important;
+}
+
 /* 上の読み替えを**サイドバー自身には適用しない**。
-   サイドバーは html 直下なので `html.nns-kick-open` の子孫ではあるが、
-   万一クラス名が衝突した時に幅を奪われないよう明示的に戻す。 */
-html.nns-kick-open #niconamasidebar-kick-root,
-html.nns-kick-open #niconamasidebar-kick-root * {
+   サイドバーは html 直下なので `html.nns-kick-active` の子孫ではあるが、
+   万一クラス名が衝突した時に幅を奪われないよう明示的に戻す。
+   ⚠️ 上の読み替えは `!important` なので、打ち消す側も `!important` でないと勝てない。 */
+html.nns-kick-active #niconamasidebar-kick-root,
+html.nns-kick-active #niconamasidebar-kick-root * {
     max-width: none;
 }
 
-html.nns-kick-open #niconamasidebar-kick-root #sidebar {
+html.nns-kick-active #niconamasidebar-kick-root {
     width: var(--nns-kick-width) !important;
-    max-width: var(--nns-kick-width) !important;
+    max-width: none !important;
+}
+
+html.nns-kick-active #niconamasidebar-kick-root #sidebar {
+    width: 100% !important;
+    max-width: none !important;
 }

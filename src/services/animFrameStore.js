@@ -1,70 +1,133 @@
 /**
- * 動くサムネのフレーム永続化ストア（IndexedDB）
+ * 動くサムネのフレーム永続化ストア。
  *
- * ライブサムネのフレーム(blob)を番組IDキーで保存し、リロードや番組移動をまたいで復元できるようにする。
- * サイドバーに出るのはフォロー中番組でページ間で同じなので、復元フレームはそのまま使える。
+ * 🔴 **実体は Service Worker 側の IndexedDB。ここは中継。**
+ *    以前はこのファイルが直接 IndexedDB を開いていたが、**IndexedDB はオリジンごとに
+ *    完全に分離される**ため、live.nicovideo.jp と kick.com で別々の保管庫になっていた。
+ *    サイトを移るたびにコマを貯め直しになる（実測で1〜2分）。
+ *    SW は拡張のオリジンなので、どちらのサイトから来ても同じ保管庫を見られる。
  *
- * - Blob をそのまま保存（structured clone）。追加権限は不要（content script でも IndexedDB は使える）。
- * - IndexedDB が使えない環境（プライベート等）では全メソッドが静かに no-op/null を返す（グレースフル）。
+ * ⚠️ **Blob は `chrome.runtime` のメッセージを通れない**（JSON 直列化のため）。
+ *    ここで base64 にしてから渡し、受け取り側で Blob に戻す。
+ *    ・保存は1周期あたり1〜3件（ローリング更新なので全件同時ではない）
+ *    ・復元はホバーしたカード1件分だけ（`ensureHydrated` が呼ぶ）
+ *    実測規模ではどちらも数十〜数百KBで、ローカルIPCとして問題にならない。
+ *
+ * 使えない状況（拡張の無効化・SW 応答なし・容量超過）では**静かに no-op / null を返す**。
+ * 永続化が落ちてもメモリ上のコマだけで動き続ける。
  */
 
-const DB_NAME = 'niconamasidebar'
-const STORE = 'animFrames'
-const DB_VERSION = 1
+/** 拡張が生きているか。無効化後もコンテンツスクリプトは動き続けるので、呼ぶ前に確かめる。 */
+function alive() {
+    try {
+        return typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id
+    } catch (e) {
+        return false
+    }
+}
 
-let dbPromise = null
+/** 引数が多すぎて落ちないよう分割して base64 化する。 */
+function bytesToB64(bytes) {
+    let bin = ''
+    const CHUNK = 0x8000
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
+    }
+    return btoa(bin)
+}
 
-function openDB() {
-    if (dbPromise) return dbPromise
-    dbPromise = new Promise((resolve, reject) => {
-        let req
-        try {
-            req = indexedDB.open(DB_NAME, DB_VERSION)
-        } catch (e) {
-            reject(e)
-            return
-        }
-        req.onupgradeneeded = () => {
-            const db = req.result
-            if (!db.objectStoreNames.contains(STORE)) {
-                db.createObjectStore(STORE, { keyPath: 'id' })
-            }
-        }
-        req.onsuccess = () => {
-            const db = req.result
-            // 🔴 **別タブがバージョンを上げようとしたら接続を手放すこと。**
-            // 掴んだままだと相手の open が blocked で止まり、こちらの読み書きも道連れになる。
-            // 利用者は視聴ページを複数タブ開くので、ここは現実に起きうる（doc/09 項目BA）。
-            db.onversionchange = () => { try { db.close() } catch (_e) { /* noop */ } dbPromise = null }
-            db.onclose = () => { dbPromise = null }
-            resolve(db)
-        }
-        req.onerror = () => reject(req.error)
-        // onblocked を拾わないと、**どちらのハンドラも呼ばれずこの Promise が永久に未解決**になる。
-        req.onblocked = () => reject(new Error('IndexedDB open blocked'))
-    })
-    // 失敗時は次回リトライできるよう promise をリセット
-    dbPromise.catch(() => { dbPromise = null })
-    return dbPromise
+function b64ToBytes(b64) {
+    const bin = atob(b64)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+}
+
+async function blobToWire(blob) {
+    const buf = await blob.arrayBuffer()
+    return { b64: bytesToB64(new Uint8Array(buf)), type: blob.type || 'image/jpeg' }
+}
+
+// 🔴 **どのコマを SW へ送り済みかを覚えておく（番組ID -> sig の集合）。**
+//    毎回すべてのコマを base64 化して送ると、1回の保存が数百KBになる。
+//    kick.com は全カードをまとめて更新するので、1周期で1MBを超えていた。
+//    送るのは**新しく増えたコマだけ**にする。
+const sentSigs = new Map()
+
+function sentSetFor(id) {
+    let s = sentSigs.get(id)
+    if (!s) { s = new Set(); sentSigs.set(id, s) }
+    return s
 }
 
 /**
- * 番組1件のフレームを保存（put で置換）。
- * @param {string} id 番組ID（数値文字列）
+ * メモリ上のレコードを差分の形へ。
+ * `order` は全コマの並び（sig の base64）。`payload` は**未送信のコマだけ**。
+ * `sig`（知覚ハッシュ）は Uint8Array なのでこれも base64 にする。
+ */
+async function toDelta(id, record) {
+    const sent = sentSetFor(id)
+    const order = []
+    const payload = {}
+    for (const f of (record && record.frames) || []) {
+        if (!f || !f.blob) continue
+        // sig が無いコマは同一性を判断できない。毎回送るしかないので、内容から鍵を作る。
+        const sig = f.sig ? bytesToB64(f.sig) : null
+        if (!sig) continue
+        order.push(sig)
+        if (!sent.has(sig)) {
+            const { b64, type } = await blobToWire(f.blob)
+            payload[sig] = { b64, type }
+        }
+    }
+    return {
+        delta: {
+            order,
+            payload,
+            lastSig: record && record.lastSig ? bytesToB64(record.lastSig) : null,
+            updatedAt: (record && record.updatedAt) || Date.now(),
+        },
+        order,
+    }
+}
+
+/** 運ばれてきた形をメモリ上のレコードへ戻す。 */
+function fromWire(wire) {
+    if (!wire) return null
+    const frames = []
+    for (const f of wire.frames || []) {
+        if (!f || !f.b64) continue
+        frames.push({
+            blob: new Blob([b64ToBytes(f.b64)], { type: f.type || 'image/jpeg' }),
+            sig: f.sig ? b64ToBytes(f.sig) : null,
+        })
+    }
+    return { frames, lastSig: wire.lastSig ? b64ToBytes(wire.lastSig) : null, updatedAt: wire.updatedAt || 0 }
+}
+
+/**
+ * 番組1件のフレームを保存（置換）。
+ * @param {string} id 番組ID
  * @param {{frames: Array<{blob: Blob, sig: Uint8Array}>, lastSig: Uint8Array|null, updatedAt: number}} record
  */
 export async function saveFrames(id, record) {
+    if (!alive() || !id) return
+    const key = String(id)
     try {
-        const db = await openDB()
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, 'readwrite')
-            tx.objectStore(STORE).put({ id, ...record })
-            tx.oncomplete = () => resolve()
-            tx.onerror = () => reject(tx.error)
-            tx.onabort = () => reject(tx.error)
-        })
-    } catch (_e) {
-        // IndexedDB 使用不可・容量超過など → 永続化はスキップ（機能はメモリのみで継続）
+        const { delta, order } = await toDelta(key, record)
+        if (!order.length) return
+        const res = await chrome.runtime.sendMessage({ type: 'frames:save', id: key, record: delta })
+
+        // 揃わなかった＝SW 側が cleanup で消していた等。送信済みの記録を捨てて、
+        // 次回に全部送り直す（黙って欠けたまま固定されるのを防ぐ）。
+        if (!res || res.ok !== true || res.stored !== order.length) {
+            sentSigs.delete(key)
+            return
+        }
+        sentSigs.set(key, new Set(order))
+    } catch (e) {
+        // 永続化はスキップ（機能はメモリのみで継続）。次回に全部送り直す。
+        sentSigs.delete(key)
     }
 }
 
@@ -74,58 +137,39 @@ export async function saveFrames(id, record) {
  * @returns {Promise<null|{frames: Array<{blob: Blob, sig: Uint8Array}>, lastSig: Uint8Array|null, updatedAt: number}>}
  */
 export async function loadFrames(id) {
+    if (!alive() || !id) return null
+    const key = String(id)
     try {
-        const db = await openDB()
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, 'readonly')
-            const req = tx.objectStore(STORE).get(id)
-            req.onsuccess = () => resolve(req.result || null)
-            req.onerror = () => reject(req.error)
-            // ⚠️ トランザクションが中断した時（別タブのバージョン変更・接続断など）は
-            // req のハンドラが**どちらも呼ばれない**。ここを拾わないと Promise が永久に未解決になり、
-            // 呼び出し元（ensureHydrated → 給餌）が返らなくなる（doc/09 項目BA）。
-            tx.onabort = () => reject(tx.error || new Error('tx aborted'))
-            tx.onerror = () => reject(tx.error || new Error('tx error'))
-        })
-    } catch (_e) {
+        const res = await chrome.runtime.sendMessage({ type: 'frames:load', id: key })
+        const wire = res && res.ok ? res.record : null
+        // 🔴 **復元したコマは「送信済み」として記録すること。**
+        //    記録しないと、復元直後の保存で**同じコマをもう一度全部送る**ことになる
+        //    （差分にした意味が半分無くなる）。
+        if (wire && Array.isArray(wire.frames)) {
+            sentSigs.set(key, new Set(wire.frames.map((f) => f && f.sig).filter(Boolean)))
+        }
+        return fromWire(wire)
+    } catch (e) {
         return null
     }
 }
 
 /**
- * 期限切れ（updatedAt が古い）レコードを削除し、件数上限を超えた分を古い順に削除。
+ * 期限切れ・上限超過のレコードを掃除する。実処理は SW 側。
  * @param {number} ttlMs これより古いレコードは削除
  * @param {number} maxEntries 生存レコードの上限
  */
 export async function cleanupFrames(ttlMs, maxEntries) {
+    if (!alive()) return
     try {
-        const db = await openDB()
-        await new Promise((resolve) => {
-            const tx = db.transaction(STORE, 'readwrite')
-            const store = tx.objectStore(STORE)
-            const cutoff = Date.now() - ttlMs
-            const survivors = []
-            store.openCursor().onsuccess = (e) => {
-                const cursor = e.target.result
-                if (cursor) {
-                    const v = cursor.value
-                    if (!v || typeof v.updatedAt !== 'number' || v.updatedAt < cutoff) {
-                        cursor.delete()
-                    } else {
-                        survivors.push({ id: v.id, updatedAt: v.updatedAt })
-                    }
-                    cursor.continue()
-                } else if (survivors.length > maxEntries) {
-                    survivors.sort((a, b) => a.updatedAt - b.updatedAt)
-                    const overflow = survivors.length - maxEntries
-                    for (let i = 0; i < overflow; i++) store.delete(survivors[i].id)
-                }
-            }
-            tx.oncomplete = () => resolve()
-            tx.onerror = () => resolve()
-            tx.onabort = () => resolve()
-        })
-    } catch (_e) {
+        await chrome.runtime.sendMessage({ type: 'frames:cleanup', ttlMs, maxEntries })
+    } catch (e) {
         // skip
+    } finally {
+        // ⚠️ 掃除で何が消えたかは分からない。**送信済みの記録を全部捨てる。**
+        //    残したままだと「SW には無いのに送らない」コマが生まれ、
+        //    そのコマは二度と保存されない（次回の保存で `stored` が合わず自己修復はするが、
+        //    ここで捨てておけば1周期無駄にせずに済む）。
+        sentSigs.clear()
     }
 }

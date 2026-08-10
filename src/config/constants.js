@@ -31,6 +31,38 @@ export const endCheckMaxPerCycle = 20;
 //   番組ページ（HTML内 `embedded-data` の `program.status`）は 1〜2秒速いが 50KB・245ms のため不採用。
 
 export const sidebarMinWidth = 180;
+/**
+ * 番組カードの大きさ。設定「カードの大きさ」の値がそのままキー。
+ *
+ * `columnFactor` … 列を増やすしきい値の倍率。**大きいほど列が増えにくい＝カードが広い。**
+ *   カード幅は「サイドバー幅 ÷ 列数」しか取れず、列数は整数なので、
+ *   幅360pxなら 360 / 180 / 120px の3通りしか無い。段数を増やしても狭い時は効かない。
+ * `contentScale` … カードの中身（アイコン・文字）の倍率。列数が変わらない幅でも
+ *   見た目が変わるようにするためのもの。CSS 変数 `--nns-card-scale` として渡す。
+ *
+ * 🔴 **`medium` は 1 / 1 から動かさないこと。** 既定値であり、ここが 1 の間だけ
+ *    「既定は従来と完全に同じ」が成り立つ。検査（項目BS）もそれを見ている。
+ */
+export const cardSizes = {
+    small: { columnFactor: 0.7, contentScale: 0.85 },
+    medium: { columnFactor: 1, contentScale: 1 },
+    large: { columnFactor: 1.45, contentScale: 1.15 },
+};
+export const defaultCardSize = 'medium';
+// 自動更新「OFF」の保存値。
+// 🔴 **数値（'0' など）にしないこと。** `Number('0') || 120` は 0 が falsy なので 120 に化ける。
+//    文字列にしておけば `Number()` が NaN になり、素通りしても必ずどこかで気付ける。
+export const autoUpdateOffValue = 'off';
+// 保存値が壊れていた／未設定だった時に使う自動更新の間隔（秒）。
+// ⚠️ ここが唯一のフォールバック。各所に `|| 120` を書かないこと。
+export const fallbackUpdateIntervalSec = 120;
+// kick.com で、境目ラインとページ本体の間に空ける幅（px）。
+// 🔴 **これは「ライン 5px」ではなく「開閉ボタン 20px」を基準に決めてある。**
+//    ボタンはラインより太く右へはみ出すので、5px だけ空けてもボタンがコンテンツに被る。
+//    24px にすると、ラインから 19px・ボタンから 4px 離れる。
+// ⚠️ **CSS と JS の両方で使う。ここが唯一の定義。**片方だけ変えると
+//    ページの寄せ幅とビューポート単位の読み替えが食い違い、右端がはみ出すか隙間が空く。
+export const kickContentGap = 24;
 export const maxSaveProgramInfos = 200;
 export const updateThumbnailInterval = 20; // 秒（サムネ<img>更新の基準間隔。番組ごと自己連鎖タイマーで更新完了後にこの時間を張る）
 // 新番組のライブサムネ追撃(詳細API)を「放送開始からこの時間内の若い番組」だけに限定するゲート。
@@ -48,6 +80,9 @@ export const thumbnailCrossfadeMs = 500;
 
 // ローディングセッションのタイムアウト（ミリ秒）
 export const loadingSessionTimeoutMs = 60000; // 60秒
+// 更新ボタンのスピナーを最低これだけ回す。取得が速く終わっても一瞬で消えると
+// 「押しても何も起きなかった」ように見えるため。**両ページで同じ値を使う。**
+export const minLoadingDurationMs = 1000;
 // 手動更新が「サムネ反映の完了通知」を待つ上限。
 // 反映は requestAnimationFrame 駆動なので、待っている間にタブが背景へ回ると tick が止まり
 // onComplete が永久に来ない。上限が無いと isPerformingManualUpdate が立ちっぱなしになり、
@@ -100,9 +135,46 @@ export const initialMomentumMinWindowMin = 2;
 //    詳細は momentum.js の estimateConcurrentViewers を参照。
 export const defaultDwellMinutes = 10;
 
+// 「人気順の基準」スライダーの目盛り（分）。**等間隔にしないこと。**
+// W の効き方は対数的で、5→10 の差は大きいが 40→45 はほぼ分からない。
+// 等間隔にするとスライダーの右半分が死ぬ。
+// ⚠️ 既定の 10 を必ず含めること。含めないと既存ユーザーの値が最寄りへ丸められる。
+export const dwellMinutesScale = [3, 5, 8, 10, 14, 20, 30, 45];
+
 // Kick の同接（実測値）を均す時定数。生値は大きく飛ぶ（実測 155〜1275）ので、
 // そのまま順位に使うとカードが跳ねる。ニコ生側の平滑化と揃えて momentumTauMs を使う。
 export const kickConcurrentTauMs = momentumTauMs;
+
+// Kick のサムネ更新間隔（秒）。**ニコ生の 20 秒とは別に持つ。**
+// 2026-08-04 の実測: 6チャンネル×3分で平均約57秒（ばらつき 16〜96秒）。
+// ニコ生と同じ20秒で叩くと、3回に2回は同じ絵を取り直すことになる。
+export const kickThumbnailInterval = 60;
+
+// 自動移動で「見ているチャンネルがまだ配信中か」を聞きに行く間隔（ミリ秒）。
+//
+// ニコ生は DOM の終了ガイドを MutationObserver で見ているので 1秒以内に気付くが、
+// Kick は DOM に依存しない方針なので公開APIへ聞きに行く（`services/kickStatus.js`）。
+// 🔴 **詰めすぎないこと。** 応答は実測 64ms 〜 1117ms とばらつく（2026-08-07）。
+//    移動までは 10秒のカウントダウンがあるので、検知が十数秒遅れても体感は変わらない。
+// ⚠️ 聞くのは「自動移動ON」かつ「チャンネルページに居る」時だけ。
+export const kickEndCheckIntervalMs = 15000;
+
+// 「配信なし」と分かってから自動移動を始めるまでの猶予（ミリ秒）。**レイド対策。**
+//
+// 🔴 Kick には**レイド**（配信者が終了時にリスナーをまとめて別チャンネルへ送る）がある。
+//    向こうもモーダルとカウントダウンを出すので、こちらが先に決着すると
+//    **配信者が決めた移動先を奪ってしまう。** 猶予を置いて先を譲る。
+//    レイドが起きればこちらは移動先が配信中に変わったと分かり、そのまま黙る。
+// ⚠️ 効かせるのは「目の前で終わった」時だけ。自動移動で飛んできた先が最初から配信なしの
+//    場合は、レイドが飛んでくる余地が無いので待たずに次を探す。
+/**
+ * Kick の配信者アイコンが取れなかった時、次に試すまで待つ時間。
+ * 🔴 **「取れなかった」を永久に覚えないこと**（doc/09 項目CD）。以前は空文字をキャッシュしており、
+ *    通信が一瞬途切れただけでその配信者のカードが**永久にローディング画像**になった。
+ * ⚠️ 短くしすぎると、アイコンを持たない配信者に毎周期問い合わせることになる。
+ */
+export const kickIconRetryMs = 10 * 60 * 1000; // 10分
+export const kickRaidGraceMs = 15000;
 
 // 弾幕（少人数が大量に投稿していて、実際には盛り上がっていない番組）への補正。
 //

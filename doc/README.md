@@ -3,7 +3,7 @@
 このフォルダは、Chrome拡張機能「**ニコ生サイドバー**」(`niconamasidebar`) のコードベースを、
 今後の改修時に**開発者とAI（Claude）双方**が参照できるようにまとめた技術ドキュメントです。
 
-> 対象バージョン: **1.13.0**（`manifest.json` / `package.json` とも同期済み）
+> 対象バージョン: **1.13.1**（`manifest.json` / `package.json` とも同期済み）
 > 最終ドキュメント化・更新: 2026-08-04（Kick 連携・推定同接への統一・構成変更を反映）
 
 ---
@@ -23,7 +23,7 @@
 | 08 | [08-styles.md](./08-styles.md) | CSSクラス/IDインベントリ | 見た目を直す時 |
 | 09 | [09-gotchas-and-techdebt.md](./09-gotchas-and-techdebt.md) | 技術的負債・潜在バグ・改修時の注意 | バグ調査・リファクタ前に |
 | 10 | [10-verification-playbook.md](./10-verification-playbook.md) | 実機での手動検証手順・実測結果・**判定不能な項目の一覧** | 改修後に実機で確かめる時 |
-| 11 | [11-copypaste-commands.md](./11-copypaste-commands.md) | **手で実行するコマンドのコピペ元**（1行厳守）。毎回上書きするホワイトボード | コンソール等でコマンドを叩く時 |
+| 11 | [11-copypaste-commands.md](./11-copypaste-commands.md) | **手で実行するコマンドのコピペ元**（1行厳守）。毎回まるごと上書きするホワイトボード。🔴 **記録を書き溜める場所ではない** | コンソール等でコマンドを叩く時 |
 
 ---
 

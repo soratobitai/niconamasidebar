@@ -1,7 +1,6 @@
 import { observeProgramEnd, markAutoNextHop } from '../services/status.js';
+import { pickAutoNextTarget, watchTargetIdOf } from '../render/sidebar.js';
 import { autoNextListWaitMaxMs, autoNextCountdownMs } from '../config/constants.js';
-// 【診断コード】原因が分かったら import ごと消す
-import { diagEvent, diagNote, diagFail } from '../utils/diag.js';
 
 /**
  * 自動次番組機能の管理
@@ -179,32 +178,49 @@ export class AutoNextManager {
         //    （verify:loop の D6 が機械で担保している）、ここで例外を作らない。
         const deadlineAt = Date.now() + autoNextCountdownMs;
         this.appState.autoNext.canceled = false;
+
+        // 🔴 **カウントダウン中に見ているものが変わったら、移動を取りやめること。**
+        //    kick.com は SPA で、**レイド**（配信者が終了時にリスナーをまとめて別チャンネルへ
+        //    送る機能）はページを破棄せずに URL だけ変える。タイマーは生き残るので、
+        //    そのままだと**レイド先に着いた数秒後にこちらが別の配信へ引きはがす。**
+        //    ニコ生では遷移が必ずフルロードでタイマーごと消えるため、この穴は表に出ていなかった。
+        // ⚠️ 利用者の取り消し（canceled）とは別扱い。あちらは「このページではもう動かない」だが、
+        //    こちらは**移動先が変わっただけ**なので、次の終了ではまた動けるようにする。
+        const startedAtId = watchTargetIdOf(location.href);
+        const movedAway = () => watchTargetIdOf(location.href) !== startedAtId;
+        const abandon = (why) => {
+            this._clearAutoNextTimer();
+            this.hideModal();
+            this.appState.autoNext.scheduled = false;  // 再武装する（取り消しとの違い）
+            this.appState.autoNext.canceled = false;
+        };
         
         // サムネクリックで即移動（カウントダウンを待たず nextHref へ）。タイマー停止→遷移。
         const goNow = () => {
             if (this.appState.autoNext.canceled) return;
+            // 押した時点で既に別の配信へ移っていたら何もしない（レイド等）
+            if (movedAway()) return abandon('押す前に別の配信へ移っていた');
             this._clearAutoNextTimer();
             this.appState.autoNext.scheduled = true;
             this.hideModal();
-            diagEvent(`自動移動: サムネクリックで今すぐ移動 → ${nextHref}`); // 【診断コード】
             // 🔴 **飛ぶ前に印を置く。** 飛んだ先が既に終了していた時、そこで自動移動を続けるための印。
             //    印が無いと、飛んだ先は終了ガイドが出ないので誰も気付かず止まる（doc/09 項目BI-2）。
-            markAutoNextHop();
+            markAutoNextHop(watchTargetIdOf(nextHref));
             try { location.assign(nextHref); } catch (_e) {}
         };
-
-        diagEvent(`自動移動: モーダルを出した（${Math.round(autoNextCountdownMs / 1000)}秒後に ${nextHref} へ）`); // 【診断コード】
 
         this.showModal(Math.round(autoNextCountdownMs / 1000), preview, () => {
             this._clearAutoNextTimer();
             this.appState.autoNext.scheduled = true;
-            diagEvent('自動移動: 利用者が取り消した（以後このページでは動かない）'); // 【診断コード】
         }, goNow);
 
         const modal = this.ensureModal();
         const countEl = modal.querySelector('#auto_next_count');
 
         const timer = setInterval(() => {
+            // 🔴 見ているものが変わっていたら、そこで打ち切る。
+            //    レイドで移された直後にこちらが引きはがすのを防ぐ唯一の関門。
+            if (movedAway()) return abandon('カウントダウン中に別の配信へ移った');
             const remainingMs = deadlineAt - Date.now();
             if (countEl) countEl.textContent = String(Math.max(0, Math.ceil(remainingMs / 1000)));
 
@@ -217,10 +233,9 @@ export class AutoNextManager {
             if (remainingMs <= 0) {
                 this._clearAutoNextTimer();
                 this.hideModal();
-                if (!this.appState.autoNext.canceled) {
-                    diagEvent(`自動移動: 移動する → ${nextHref}`); // 【診断コード】
+                if (!this.appState.autoNext.canceled && !movedAway()) {
                     // 飛んだ先が既に終了していても自動移動を続けるための印（goNow と同じ理由）
-                    markAutoNextHop();
+                    markAutoNextHop(watchTargetIdOf(nextHref));
                     try { location.assign(nextHref); } catch (_e) {}
                 }
             }
@@ -233,20 +248,15 @@ export class AutoNextManager {
      * 視聴中番組の終了監視を開始
      * @param {Function} updateSidebarFn - サイドバー更新関数（番組終了検知時に最新リストを取得するため main.js から常に注入される）
      */
-    startWatcher(updateSidebarFn = null) {
+    startWatcher(updateSidebarFn = null, observeFn = observeProgramEnd) {
         this.stopWatcher();
         
-        diagNote('自動移動: 監視を始めた（失敗した時だけ記録を出します）'); // 【診断コード】
-
-        const stopper = observeProgramEnd(async (firstSinceArmed) => {
+        const stopper = observeFn(async (firstSinceArmed) => {
             // 多重進入抑止
             if (this.appState.autoNext.scheduled || this.appState.autoNext.selectingNext) {
-                // 【診断コード】ここで止まると、終了しても何も起きない（モーダルも出ない）
-                diagFail(`自動移動: 終了を検知したが動かなかった（${this.appState.autoNext.scheduled ? '移動が予約済み/取り消し済み' : '選択中'}）`);
                 return;
             }
             this.appState.autoNext.selectingNext = true;
-            diagEvent('自動移動: 番組終了を検知した'); // 【診断コード】
 
             try {
                 // 最新の番組リストを取得（循環依存回避のため main.js から関数を注入）
@@ -274,44 +284,15 @@ export class AutoNextManager {
                         Promise.resolve(updateSidebarFn()).catch(() => {}),
                         new Promise((resolve) => setTimeout(resolve, autoNextListWaitMaxMs)),
                     ]);
-                } else if (!firstSinceArmed) {
-                    diagEvent('自動移動: 再検知（リストは取り直さず、今あるカードから選ぶ）'); // 【診断コード】
                 }
-                const links = document.querySelectorAll('#liveProgramContainer .program_container .program_thumbnail a');
-                const currentIdMatch = location.pathname.match(/\/watch\/(lv\d+)/);
-                const currentId = currentIdMatch ? currentIdMatch[1] : '';
+                // 移動先の選び方は**両ページで共有**（render/sidebar.js の pickAutoNextTarget）。
+                // ・サービスをまたいでよい（Kick のカードへも飛ぶ）
+                // ・タブで分けている時は**見えているタブ**からだけ選ぶ
+                // ・今いる放送が分からない時（一覧ページ・VOD 等）は選ばない
+                const container = document.getElementById('liveProgramContainer');
+                const { link: targetLink, id: chosen, candidates: cand, currentId } =
+                    pickAutoNextTarget(container, location.href);
 
-                let targetLink = null;
-                for (const a of links) {
-                    try {
-                        const nextPath = new URL(a.href, location.href).pathname;
-                        const nextIdMatch = nextPath.match(/\/watch\/(lv\d+)/);
-                        const nextId = nextIdMatch ? nextIdMatch[1] : '';
-                        if (currentId && nextId && nextId !== currentId) {
-                            targetLink = a;
-                            break;
-                        }
-                    } catch (_e) {}
-                }
-
-                // 【診断コード】候補の並びと、選んだ先を残す。移動した先で読み返せるよう
-                // localStorage に積む（自動移動はページを移るので、その場で見ても間に合わない）。
-                {
-                    const cand = [];
-                    for (const a of links) {
-                        const m = (() => { try { return new URL(a.href, location.href).pathname.match(/\/watch\/(lv\d+)/); } catch (_e) { return null; } })();
-                        if (m) cand.push(m[1]);
-                    }
-                    const chosen = (() => {
-                        if (!targetLink) return null;
-                        try { return (new URL(targetLink.href, location.href).pathname.match(/\/watch\/(lv\d+)/) || [])[1] || null; } catch (_e) { return null; }
-                    })();
-                    if (chosen) {
-                        diagEvent(`自動移動: 今いる番組 ${currentId || '(URLから取れず)'} / 候補 ${cand.length}件 [${cand.join(',')}] → ${chosen} を選んだ`);
-                    } else {
-                        diagFail(`自動移動: 移動先が見つからなかった。今いる番組 ${currentId || '(URLから取れず)'} / 候補 ${cand.length}件 [${cand.join(',')}]`);
-                    }
-                }
 
                 if (targetLink && targetLink.href) {
                     // プレビュー情報抽出
@@ -346,9 +327,6 @@ export class AutoNextManager {
      * 視聴中番組の終了監視を停止
      */
     stopWatcher() {
-        // 【診断コード】監視を止めた記録。startWatcher の先頭からも呼ばれるので、
-        // 直後に「監視を始めた」が続いていれば正常。続いていなければ止まったまま。
-        if (this.appState.autoNext.liveStatusStopper) diagEvent('自動移動: 監視を止めた');
         if (this.appState.autoNext.liveStatusStopper) {
             try { this.appState.autoNext.liveStatusStopper(); } catch (_e) {}
             this.appState.autoNext.liveStatusStopper = null;
