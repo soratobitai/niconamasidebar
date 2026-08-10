@@ -23,11 +23,11 @@
 
 import './styles/main.css'
 import './styles/kickPage.css'
-import { watchTargetIdOf, buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, setDwellMinutes, syncServiceTabs, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
+import { watchTargetIdOf, buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, setDwellMinutes, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
-import { fetchKickPrograms, kickPageImageProxy } from './services/kickSource.js'
+import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
@@ -550,10 +550,15 @@ async function fetchNicoPrograms() {
     return { ok: true, programs: out }
 }
 
-/** 取得に失敗した／未ログインだけの状態を伝える。ニコ生ページ側と同じ `#api_error` を使う。 */
-function setApiError(show) {
-    const el = document.getElementById('api_error')
-    if (el) el.style.display = show ? 'block' : 'none'
+/**
+ * ニコ生の案内。ニコ生ページ側と同じ `#api_error` を、同じ関数で出し分ける。
+ *
+ * 🔴 **「ログイン」を出すのは 401/403 の時だけ**（doc/09 項目CH）。SW の
+ *    `nico:fetch` が理由を返すので、それをそのまま使う。
+ */
+function setApiError(show, reason) {
+    if (!show) return setNicoNotice(NICO_NOTICE_NONE)
+    setNicoNotice(reason === 'unauthorized' ? NICO_NOTICE_AUTH : NICO_NOTICE_UNREACHABLE)
 }
 
 /**
@@ -596,8 +601,14 @@ async function refreshProgramsInner(container) {
     const nicoPrograms = nicoRes.ok ? nicoRes.programs : lastNicoPrograms
 
     // 両方ダメ＝未ログイン・権限なしの可能性。ニコ生ページと同じ場所に案内を出す。
+    // ⚠️ **「片方でも失敗」に緩めないこと。** `#api_error` の中身はニコ生のログインリンクなので、
+    //    ニコ生を使わない利用者の kick.com に**永久にニコ生のログイン誘導**が出ることになる。
     const bothFailed = !kickRes.ok && !nicoRes.ok
-    setApiError(bothFailed)
+    setApiError(bothFailed, nicoRes.reason)
+
+    // Kick のログイン切れはニコ生と別枠で知らせる（doc/09 項目CG）。
+    // ⚠️ **毎周期 true/false を渡し切る。** 出す時だけ呼ぶと、ログインし直しても消えない。
+    setKickNotice(isKickSessionLost(kickRes))
     if (bothFailed && !kickPrograms.length && !nicoPrograms.length) return
 
     // 「盛り上がり」と到着レートは前回値との差分なので、保存を通さないと計算できない。

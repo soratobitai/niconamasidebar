@@ -160,13 +160,21 @@ body {
    場所を空けていないので、寄せ幅は 0。`calc(100vw - 0px)` は 100vw だが、
    それでも `!important` で当ててしまうと Kick 自身の `lg:w-full` などを上書きする。
    **何もしないのが正解。** `:not(.nns-overlay)` で規則ごと外す。 */
-/* ① 幅そのもの */
+/* ① 幅そのもの
+   🔴 **`max-width` をここで書かないこと**（2026-08-10・doc/09 項目CI）。
+      以前は書いており、**Kick 側が持っている上限を `!important` で潰していた。**
+      `w-xvw max-w-[500px]` のような「モバイルは全幅・広い画面では上限つき」の書き方
+      （Kick のログイン認証コードのモーダルがこれ）で、**上限が消えて全幅に伸びる。**
+      幅の読み替えの目的は「100vw を主張する要素を可視領域に収める」ことで、
+      `width` だけで足りる。上限が我々の計算より小さければ、そちらが勝つのが正しい。
+      ⚠️ ビューポート基準の上限（`max-w-xvw`）は下の③が持つ。**ここに書くと重複する。**
+   ⚠️ `min-width: 0` は残す。flex/grid の子は既定が `auto`（＝中身の最小幅）で、
+      これが無いと計算した幅まで縮めない。 */
 html.nns-kick-active:not(.nns-overlay) [class~="w-xvw"],
 html.nns-kick-active:not(.nns-overlay) [class*=":w-xvw"],
 html.nns-kick-active:not(.nns-overlay) [class~="w-screen"],
 html.nns-kick-active:not(.nns-overlay) [class*=":w-screen"] {
     width: calc(100vw - var(--nns-kick-reserved)) !important;
-    max-width: calc(100vw - var(--nns-kick-reserved)) !important;
     min-width: 0 !important;
 }
 

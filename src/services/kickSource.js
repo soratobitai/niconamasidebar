@@ -143,6 +143,27 @@ export async function fetchKickPrograms() {
     return { ok: true, programs, partial: !!res.partial }
 }
 
+/**
+ * その失敗は「Kick にログインし直せば直るもの」か。**判定はここだけに書く。**
+ *
+ * 🔴 **一時的な失敗で真を返さないこと。** `network` / `http` / `rate-limited` / `parse` は
+ *    通信が揺れただけで起こる。ここに入れると、取得のたびに案内が点いたり消えたりする。
+ *
+ * 🔴 **`no-permission` は失敗ではない。** Kick 連携は optional permission で、
+ *    既定は許可されていない状態。連携していない利用者に「ログインが切れています」と
+ *    出すのは誤報になる。
+ *
+ * 🔴 **`unavailable` も違う。** あれは拡張が無効化された（SW と話せない）状態で、
+ *    Kick にログインし直しても直らない。
+ *
+ * @param {{ok:boolean, reason?:string}} res `fetchKickPrograms` の戻り値
+ * @returns {boolean}
+ */
+export function isKickSessionLost(res) {
+    if (!res || res.ok) return false
+    return res.reason === 'no-session' || res.reason === 'unauthorized'
+}
+
 // ---- 配信者アイコンの補完 ----
 //
 // 🔴 **`/api/v1/user/livestreams` の `channel.user` にはアイコンが入っていない。**

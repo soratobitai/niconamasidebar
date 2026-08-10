@@ -2270,7 +2270,10 @@ async function bothPagesSameSpec() {
         ['開くと矢印の向きが変わる', /sidebar_arrow_re/, 'ニコ生と同じクラスを使う'],
         ['開くと境界線がリサイズカーソルになる', /col_resize/, '掴めることに気付けない'],
         ['Esc で設定を閉じる', /'Escape'/, 'ニコ生ページと同じ'],
-        ['取得できない時に案内を出す', /api_error/, 'ニコ生ページと同じ場所に出す'],
+        // 2026-08-10: `#api_error` を直接触るのをやめ、共有の `setNicoNotice` に寄せた（項目CH）。
+        // 語を `api_error` のままにすると、共有関数へ移した瞬間に**実装は正しいのに落ちる**。
+        ['取得できない時に案内を出す', /setNicoNotice\(/, 'ニコ生ページと同じ場所・同じ関数で出す'],
+        ['Kick のログイン切れを知らせる', /setKickNotice/, 'ニコ生ページ側にだけ入れると kick.com で気付けない'],
     ]) {
         check(`BN kick.com ${what}`, re.test(kpc), why)
     }
@@ -2396,15 +2399,24 @@ async function kickSidebarMovesAsOnePiece() {
     // 🔴 **CSS 側で寄せ幅を計算し直さないこと。** JS が body に当てた数値を変数1本で受け取る。
     //    以前は CSS が `100vw - 幅 - 余白` と同じ計算をしており、開閉で式が変わった時点で
     //    2箇所を手で揃える約束が保てなくなった。
-    // ⚠️ 「どこかに式があるか」では駄目。このルールは `width` と `max-width` の2つを書くので、
-    //    片方だけ直っていても通ってしまう（実際に一度そうなった）。**両方を個別に見る。**
-    const remap = rules.find((r) => /w-xvw/.test(r.sel))
+    // ⚠️ 「どこかに式があるか」では駄目。片方だけ直っていても通ってしまう（実際に一度そうなった）。
+    //    **書いてある幅の宣言を全部取り出して、1つ残らず同じ式か**を見る。
+    // 🔴 **「width と max-width の2つがある」を前提にしないこと**（2026-08-10・項目CI）。
+    //    上限の上書きをやめた時、実装は正しいのにこの検査だけが落ちた。
+    //    見たいのは「CSS 側で計算し直していないか」であって、宣言の顔ぶれではない。
     const EXPECT_W = 'calc(100vw - var(--nns-kick-reserved))'
-    const declW = remap && (remap.body.match(/(?:^|;)\s*width\s*:\s*([^;!]+)/) || [])[1]
-    const declMax = remap && (remap.body.match(/max-width\s*:\s*([^;!]+)/) || [])[1]
-    check('BO 読み替えは JS が出した幅を引くだけ（width / max-width とも）',
-        !!declW && !!declMax && declW.trim() === EXPECT_W && declMax.trim() === EXPECT_W,
-        `width: ${declW} / max-width: ${declMax}。CSS で計算し直すと寄せ幅と食い違う`)
+    const widthDecls = []
+    for (const r of rules) {
+        for (const [, prop, val] of r.body.matchAll(/(?:^|;)\s*((?:min-|max-)?width)\s*:\s*([^;!]+)/g)) {
+            widthDecls.push({ sel: r.sel, prop, val: val.trim() })
+        }
+    }
+    const sized = widthDecls.filter((d) => d.val.includes('100vw'))
+    const wrong = sized.filter((d) => d.val !== EXPECT_W)
+    check('BO 読み替えは JS が出した幅を引くだけ（100vw を使う宣言すべて）',
+        sized.length >= 3 && wrong.length === 0,
+        wrong.length ? wrong.map((d) => `${d.prop}: ${d.val}`).join(' / ')
+            : `${sized.length}件。CSS で計算し直すと寄せ幅と食い違う`)
     check('BO その幅は JS が書き込んでいる',
         /setHostVar\('--nns-kick-reserved', reservedWidth\(\) \+ 'px'\)/.test(kpc),
         'CSS が読む変数を誰も書かないと、読み替えが 0 のまま効かない')
@@ -3003,6 +3015,220 @@ async function sidebarPlacementGroup() {
         '重ねる用の規則にラインだけの transition を書かないこと')
 }
 
+async function nicoUnreachableGroup() {
+    console.log('=== CH ニコ生が落ちている時に「ログイン」と言わない／Kick を巻き添えにしない ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const um = stripComments(rd('managers/UpdateManager.js'))
+    const kpc = stripComments(rd('kickPage.js'))
+    const sb = rd('render/sidebar.js')
+
+    // --- ① 失敗の理由分け ---
+    const { classifyFollowFailure } = await import('../src/services/followPageSource.js')
+
+    // 🔴 未ログインは **HTTP 401**（2026-08-10 実測。errorCode UNAUTHORIZED）。
+    check('CH 401 は未ログイン', classifyFollowFailure({ status: 401 }) === 'unauthorized')
+    check('CH 403 も未ログイン扱い', classifyFollowFailure({ status: 403 }) === 'unauthorized')
+
+    // 🔴 **ここを取り違えると、落ちているログインページへ誘導することになる。**
+    for (const status of [500, 502, 503, 504]) {
+        check(`CH 🔴 ${status}（メンテナンス・障害）を未ログインと言わない`,
+            classifyFollowFailure({ status }) === 'server',
+            'ログインを勧めると、落ちているログインページへ送ることになる')
+    }
+    check('CH その他の HTTP エラーも未ログインと言わない',
+        classifyFollowFailure({ status: 404 }) === 'http')
+    check('CH 通信断（状態コード無し）も未ログインと言わない',
+        classifyFollowFailure(new TypeError('Failed to fetch')) === 'network')
+    check('CH JSON でない応答（メンテナンスのHTML等）も未ログインと言わない',
+        classifyFollowFailure(new SyntaxError('Unexpected token <')) === 'parse')
+    check('CH 何も渡されなくても落ちない', classifyFollowFailure(undefined) === 'network')
+
+    // --- ② 状態コードを捨てていないか ---
+    // 🔴 これが無いと理由分けの材料が消え、全部 network になる（＝常に「接続できません」）。
+    check('CH 🔴 フォローAPIの状態コードを Error に持たせている',
+        /e\.status = res \? res\.status : 0/.test(stripComments(rd('services/followPageSource.js'))),
+        '捨てると 401 と 503 が区別できなくなる')
+
+    // --- ③ 案内の出し分け ---
+    check('CH 案内の枠が2つある（ログイン／接続できません）',
+        /id="api_error_auth"/.test(sb) && /id="api_error_down"/.test(sb))
+    check('CH 🔴 ログインを出すのは unauthorized の時だけ',
+        /reason === 'unauthorized' \? NICO_NOTICE_AUTH : NICO_NOTICE_UNREACHABLE/.test(um),
+        'それ以外は接続できません側へ倒す')
+    check('CH kick.com も同じ出し分けをする',
+        /reason === 'unauthorized' \? NICO_NOTICE_AUTH : NICO_NOTICE_UNREACHABLE/.test(kpc),
+        '写し漏れると kick.com だけ誤った案内が出る')
+
+    // --- ④ ニコ生が落ちても Kick を止めない ---
+    // 🔴 **無条件 return に戻っていないこと。** 戻ると Kick が巻き添えで固まる。
+    // 🔴 **「昔の形が消えたか」で見ない。** 別の書き方で無条件 return を足されたら素通りする
+    //    （空振り検査で確認済み）。**この区間に return がいくつ在ってよいか**で見る。
+    //    許されるのは2つだけ: ①据え置く元が無い時 ②世代が変わっていた時。
+    const region = um.slice(um.indexOf('const bothFailed'), um.indexOf('const combined'))
+    const returns = (region.match(/return sessionId;/g) || []).length
+    check('CH 🔴 ニコ生が落ちた周期に帰ってよいのは「据え置く元が無い」時だけ',
+        returns === 2 && /if \(!merged\.length && nicoCards > 0\) \{[\s\S]{0,120}return sessionId;/.test(region),
+        `この区間の return が ${returns} 個（想定2個）。増えていると Kick まで巻き添えで止まる`)
+    check('CH ニコ生が落ちた周期は前回の結果を据え置く',
+        /merged = this\._nicoPrograms \|\| \[\]/.test(um),
+        '空のまま描画するとニコ生のカードが全部消える')
+    check('CH 🔴 据え置きの値を storage へ書き戻さない',
+        /this\._seedNewProgramsToStorage\(merged\);[\s\S]{0,120}this\._nicoPrograms = merged;/.test(um)
+        && !/merged = this\._nicoPrograms \|\| \[\];[\s\S]{0,200}_seedNewProgramsToStorage/.test(um),
+        '同じ値で上書きすると差分が 0 になり、盛り上がりが実際より低く出る')
+    check('CH 据え置く元が無いのに DOM にカードがある時だけ、従来どおり触らない',
+        /nicoCards > 0/.test(um) && /data-service'\) !== 'kick'/.test(um),
+        '復元できないのに描画するとニコ生のカードが消える')
+
+    // --- ⑤ モックDOMで実際に出し分ける ---
+    const { installMockDom } = await import('./mock-dom.mjs')
+    const restore = {
+        document: globalThis.document, window: globalThis.window,
+        Image: globalThis.Image, chrome: globalThis.chrome,
+    }
+    installMockDom()
+    try {
+        const sbm = await import('../src/render/sidebar.js')
+        const box = document.createElement('div'); box.id = 'api_error'
+        const auth = document.createElement('span'); auth.id = 'api_error_auth'; auth.hidden = true
+        const down = document.createElement('span'); down.id = 'api_error_down'; down.hidden = true
+        box.appendChild(auth); box.appendChild(down); document.body.appendChild(box)
+
+        sbm.setNicoNotice(sbm.NICO_NOTICE_AUTH)
+        check('CH ログインだけ出る',
+            auth.hidden === false && down.hidden === true && box.style.display !== 'none',
+            `auth=${auth.hidden} down=${down.hidden}`)
+        sbm.setNicoNotice(sbm.NICO_NOTICE_UNREACHABLE)
+        check('CH 接続できませんだけ出る', auth.hidden === true && down.hidden === false)
+        sbm.setNicoNotice(sbm.NICO_NOTICE_NONE)
+        check('CH 🔴 どちらも出ない時は枠ごと隠す（空の余白を残さない）',
+            auth.hidden === true && down.hidden === true && box.style.display === 'none',
+            `display=${box.style.display}`)
+        // 知らない値は「出さない」に倒す（保存値が壊れていた時に空枠を残さない）。
+        sbm.setNicoNotice('なにこれ')
+        check('CH 知らない値は出さないに倒す', box.style.display === 'none')
+    } finally {
+        globalThis.document = restore.document
+        globalThis.window = restore.window
+        globalThis.Image = restore.Image
+        globalThis.chrome = restore.chrome
+    }
+}
+
+async function kickSessionNoticeGroup() {
+    console.log('=== CG Kick のログインが切れたことをサイドバー上部で知らせる ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const css = rd('styles/main.css')
+    const um = stripComments(rd('managers/UpdateManager.js'))
+    const kpc = stripComments(rd('kickPage.js'))
+
+    // --- ① どの失敗を「ログイン切れ」と呼ぶか ---
+    const { isKickSessionLost } = await import('../src/services/kickSource.js')
+
+    check('CG ログインが切れた（no-session）で出す',
+        isKickSessionLost({ ok: false, reason: 'no-session' }) === true)
+    check('CG 認証が通らない（unauthorized/401）でも出す',
+        isKickSessionLost({ ok: false, reason: 'unauthorized' }) === true)
+
+    // 🔴 **既定の状態を「異常」と呼ばないこと。** Kick 連携は optional permission で、
+    //    許可していないのが普通。ここで真を返すと、連携していない全利用者に誤報が出る。
+    check('CG 🔴 連携していない（no-permission）では出さない',
+        isKickSessionLost({ ok: false, reason: 'no-permission' }) === false,
+        '既定の状態であって失敗ではない')
+
+    // 🔴 **一時的な失敗で出さないこと。** 取得のたびに案内が点滅する。
+    for (const reason of ['network', 'http', 'rate-limited', 'parse', 'unavailable', 'unknown']) {
+        check(`CG 一時的な失敗（${reason}）では出さない`,
+            isKickSessionLost({ ok: false, reason }) === false)
+    }
+    check('CG 取得できた時は出さない', isKickSessionLost({ ok: true, programs: [] }) === false)
+    check('CG 戻り値が無くても落ちない', isKickSessionLost(undefined) === false)
+
+    // --- ② 置き場所と出し入れ ---
+    check('CG サイドバー上部（#api_error と同じ場所）に案内の枠がある',
+        /id="kick_notice"/.test(sb) && sb.indexOf('id="kick_notice"') > sb.indexOf('id="api_error"')
+        && sb.indexOf('id="kick_notice"') < sb.indexOf('id="liveProgramContainer"'),
+        '.sidebar_body の先頭側に置くこと')
+
+    // 🔴 **既定は非表示。** 属性が無いと、ログインしていても開いた瞬間に出る。
+    check('CG 🔴 既定は隠れている（markup に hidden がある）',
+        /id="kick_notice"[^>]*\shidden/.test(sb))
+
+    // 🔴 CSS が display を書くと hidden が効かなくなる（UA の [hidden] を上書きする）。
+    const noticeRule = (css.match(/#kick_notice\s*\{[^}]*\}/) || [''])[0]
+    check('CG 🔴 #kick_notice の規則に display を書かない（hidden が効かなくなる）',
+        !!noticeRule && !/display\s*:/.test(noticeRule),
+        `規則=${noticeRule.replace(/\s+/g, ' ').slice(0, 80)}`)
+    check('CG 設定パネルを開いている間は隠す（#api_error と同じ扱い）',
+        /\.sidebar_body\.show-settings\s+#kick_notice\s*\{[^}]*display:\s*none\s*!important/.test(css),
+        '忘れると設定の上に浮く')
+
+    // --- ③ 両ページから、毎周期 true/false を渡し切っているか ---
+    // 🔴 **「呼んでいるか」ではなく「毎回渡し切っているか」を見る。**
+    //    `if (切れていたら) setKickNotice(true)` だと、ログインし直しても消えない。
+    for (const [page, src] of [['ニコ生ページ', um], ['kick.com', kpc]]) {
+        check(`CG ${page} が案内を出し入れする`,
+            /setKickNotice\(isKickSessionLost\(/.test(src),
+            '共有関数へ判定の結果をそのまま渡すこと')
+        // 🔴 **正規表現で `if (…) setKickNotice(true)` を狙わない。** 条件の中に
+        //    関数呼び出しが入ると括弧が入れ子になり、`[^)]*` で当てようとすると
+        //    **壊しても鳴らない**（2026-08-10 に空振りで踏んだ）。
+        //    見るのは「呼び出しが条件の下にぶら下がっていないか」だけでよい。
+        const branched = src.split('\n')
+            .filter((l) => l.includes('setKickNotice('))
+            .filter((l) => /^\s*(if|else)\b/.test(l))
+        check(`CG 🔴 ${page} は条件の中で呼んでいない（毎周期渡し切る）`,
+            branched.length === 0,
+            branched[0] ? branched[0].trim() : '条件付きにするとログインし直しても消えない')
+    }
+
+    // 🔴 ニコ生の案内と混ぜていないこと（混ぜると Kick が切れただけでニコ生を勧める）。
+    check('CG 🔴 ニコ生の案内と別枠のまま（Kick の事情を混ぜない）',
+        /setNicoNotice\(/.test(um) && !/setKickNotice\(\s*bothFailed/.test(um)
+        && !/setNicoNotice\([^)]*isKickSessionLost/.test(um),
+        'ニコ生の案内は #api_error（ログイン or 接続不可）で、Kick とは別の判断')
+    check('CG 🔴 kick.com の #api_error は「両方失敗」のまま緩めない',
+        /const bothFailed = !kickRes\.ok && !nicoRes\.ok/.test(kpc),
+        '片方でも失敗で出すと、ニコ生を使わない利用者に永久にニコ生のログイン誘導が出る')
+
+    // --- ④ 実際に DOM を作って出し入れする ---
+    const { installMockDom } = await import('./mock-dom.mjs')
+    const restore = {
+        document: globalThis.document, window: globalThis.window,
+        Image: globalThis.Image, chrome: globalThis.chrome,
+    }
+    installMockDom()
+    globalThis.chrome = {
+        runtime: { id: 'test', getURL: (p) => 'chrome-extension://test/' + p },
+        storage: { local: { get: async () => ({}), set: async () => {} } },
+    }
+    try {
+        const { setKickNotice } = await import('../src/render/sidebar.js')
+        const el = document.createElement('div')
+        el.id = 'kick_notice'
+        el.hidden = true
+        document.body.appendChild(el)
+
+        setKickNotice(true)
+        check('CG 出す', el.hidden === false)
+        setKickNotice(false)
+        check('CG 消す（ログインし直したら消える）', el.hidden === true)
+        // 枠が無いページでも落ちないこと（差し込み前に取得が返る場合がある）。
+        el.remove()
+        let threw = false
+        try { setKickNotice(true) } catch (_e) { threw = true }
+        check('CG 枠がまだ無くても落ちない', !threw)
+    } finally {
+        globalThis.document = restore.document
+        globalThis.window = restore.window
+        globalThis.Image = restore.Image
+        globalThis.chrome = restore.chrome
+    }
+}
+
 async function kickPlaceholderIconGroup() {
     console.log('=== CD 放送直後の Kick カードに、ローディングではなく配信者アイコンを出す ===')
     const { readFileSync } = await import('fs')
@@ -3260,11 +3486,30 @@ async function widthRewriteSelectorGroup() {
         JSON.stringify(maxOnly))
     check('CB min-w-screen も下限だけ', !!applied('min-w-screen')['min-width'] && !applied('min-w-screen').width)
 
+    // --- 🔴 Kick 側の「上限」を奪わない（項目CI・利用者報告） ---
+    // `w-xvw max-w-[500px]` は「モバイルは全幅・広い画面では上限つき」という普通の書き方。
+    // 幅の読み替えが `max-width` まで `!important` で書くと**上限が消えて全幅に伸びる**
+    // （Kick のログイン認証コードのモーダルがこれだった）。
+    // 目的は「100vw を可視領域に収める」ことなので `width` だけでよく、
+    // 相手の上限のほうが小さければそちらが勝つのが正しい。
+    for (const cls of ['w-xvw max-w-[500px]', 'fixed w-xvw lg:max-w-md',
+        'w-screen max-w-lg', 'z-dialog fixed w-xvw max-w-[440px] lg:left-[50%]']) {
+        const got = applied(cls)
+        check(`CI 🔴 幅は直すが上限は奪わない: "${cls}"`,
+            !!got.width && !got['max-width'], JSON.stringify(got))
+    }
+    // ⚠️ ビューポート基準の上限は③の担当。**①へ戻して重複させないこと。**
+    check('CI 🔴 上限を書く規則は1つだけ（①と③で二重に持たない）',
+        rules.filter((r) => /max-width/.test(r.body)).length === 1,
+        rules.filter((r) => /max-width/.test(r.body)).map((r) => r.sel).join(' / '))
+
     // --- 引く量は1本（CSS 側で計算し直さない） ---
     const calcs = [...css.matchAll(/calc\(100vw - ([^)]*)\)/g)].map((x) => x[1].trim())
     check('CB 🔴 引くのは --nns-kick-reserved ただ1つ（2箇所で同じ計算をしない）',
         // ⚠️ 取り出しは最初の ')' で切れるので 'var(--nns-kick-reserved' になる。閉じ括弧まで求めない。
-        calcs.length >= 4 && calcs.every((c) => c === 'var(--nns-kick-reserved'),
+        // ⚠️ **件数を上限つきで固定しないこと。** 宣言を1つ減らした時（項目CI）に、
+        //    実装は正しいのに落ちた。空振り防止に要るのは「0件ではない」ことだけ。
+        calcs.length >= 3 && calcs.every((c) => c === 'var(--nns-kick-reserved'),
         [...new Set(calcs)].join(' / '))
 
     // --- 🔴 部分一致が残っていないか（これが今回の原因そのもの） ---
@@ -4599,6 +4844,8 @@ if (real) {
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()
     await kickPlaceholderIconGroup()
+    await kickSessionNoticeGroup()
+    await nicoUnreachableGroup()
     console.log('')
     await syncRender()
     console.log('')

@@ -500,6 +500,47 @@ export function setDwellMinutes(value) {
  */
 const SERVICE_TABS = ['mixed', 'nicolive', 'kick']
 
+/** ニコ生の案内の種類。**この3つ以外を渡さないこと**（知らない値は「出さない」に倒す）。 */
+export const NICO_NOTICE_NONE = 'none'
+export const NICO_NOTICE_AUTH = 'auth'              // 401/403。ログインを勧めてよい
+export const NICO_NOTICE_UNREACHABLE = 'unreachable' // それ以外。メンテナンス・通信断・仕様変更
+
+/**
+ * ニコ生の案内を出す／消す。**この表示を触るのはここだけ**（両ページ共通）。
+ *
+ * 🔴 **「ログイン」と「接続できません」を取り違えないこと**（doc/09 項目CH）。
+ *    メンテナンス中に「ログイン」を出すと、落ちているログインページへ誘導することになる。
+ *
+ * @param {'none'|'auth'|'unreachable'} kind
+ */
+export function setNicoNotice(kind) {
+    const box = document.getElementById('api_error')
+    if (!box) return
+    const auth = kind === NICO_NOTICE_AUTH
+    const down = kind === NICO_NOTICE_UNREACHABLE
+    // ⚠️ 中身が両方隠れているのに枠だけ出すと、**空の余白**が見出しの下に残る。
+    box.style.display = (auth || down) ? 'block' : 'none'
+    const authEl = document.getElementById('api_error_auth')
+    const downEl = document.getElementById('api_error_down')
+    if (authEl) authEl.hidden = !auth
+    if (downEl) downEl.hidden = !down
+}
+
+/**
+ * Kick のログイン切れの案内を出す／消す。**この表示を触るのはここだけ。**
+ *
+ * ニコ生ページ（UpdateManager）と kick.com（refreshProgramsInner）の両方から、
+ * 取得のたびに呼ぶ。**毎周期 true/false を渡し切る**こと。片方向だけ（出す時だけ呼ぶ）に
+ * すると、ログインし直しても案内が残る。
+ *
+ * @param {boolean} show
+ */
+export function setKickNotice(show) {
+    const el = document.getElementById('kick_notice')
+    if (!el) return
+    el.hidden = !show
+}
+
 export function syncServiceTabs(container, mode, activeTab) {
     const tabs = document.getElementById('serviceTabs')
     if (!container) return 0
@@ -1324,8 +1365,28 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     </div>
                                 </div>
                                 <div class="sidebar_body">
+                                    <!-- ニコ生の案内。**2通りある**（doc/09 項目CH）。
+                                         🔴 「ログイン」を出してよいのは **401/403 の時だけ**。
+                                            以前は「2経路とも取れなかった」だけで出しており、
+                                            **メンテナンス中でもログインを勧めていた**（落ちている
+                                            ログインページへ誘導することになる）。
+                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
                                     <div id="api_error">
-                                        <a href="https://account.nicovideo.jp/login">ログイン</a>
+                                        <span id="api_error_auth" hidden><a href="https://account.nicovideo.jp/login">ログイン</a></span>
+                                        <span id="api_error_down" hidden>ニコ生に接続できません。メンテナンス中かもしれません。</span>
+                                    </div>
+                                    <!-- Kick のログイン切れの案内（2026-08-10・利用者要望・doc/09 項目CG）。
+                                         🔴 **api_error と一緒にしないこと。** あちらは「ニコ生の2経路が
+                                            **両方**失敗した時」にだけ出す設計で、中身もニコ生のログインリンク。
+                                            Kick の事情を相乗りさせると、kick.com で Kick だけ切れた時に
+                                            **ニコ生のログインを勧める**ことになる。逆に条件を「片方でも失敗」へ
+                                            緩めると、ニコ生を使わない利用者に**永久にニコ生のログイン誘導が出る**。
+                                         ⚠️ ここはテンプレートリテラルの中。**この注意書き自身も含めて**
+                                            バックティックを書かないこと（2026-08-10 に踏んだ。id を
+                                            コード引用しようとして文字列がそこで終わり、ビルドが落ちる）。 -->
+                                    <div id="kick_notice" hidden>
+                                        Kick のログインが切れています。Kick の番組は更新されません。
+                                        <a href="https://kick.com/" target="_blank" rel="noopener">kick.com を開く</a>
                                     </div>
                                     <div id="optionContainer"></div>
                                     <!-- タブ分離モードでのみ表示。混在モードと Kick 無効時は hidden。
@@ -1385,33 +1446,6 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="range" id="dwellMinutes" name="dwellMinutes" min="0" max="7" step="1" value="3" aria-label="人気順の基準">
                                     </div>
                                 </div>
-                                <!-- カードの大きさ。**自動更新の上**（利用者指定・2026-08-07）。
-                                     ⚠️ value は constants.js の cardSizes のキーと同じにすること。
-                                        知らない値は既定（medium）に落ちるので、間違えても壊れはしないが効かない。
-                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
-                                <!-- サイドバーの置き方（2026-08-08・利用者要望・doc/09 項目CE）。
-                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        サイドバーの置き方
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>寄せる</b>: ページの中身を右へ寄せて、сサイドバーのぶんの場所を空けます（今までの動き）。ページの全体が見えます。<br><br><b>重ねる</b>: 場所を空けず、ページの上にサイドバーを乗せます。ページの表示は元のままですが、<b>左側が隠れます</b>。<br>ページ側のレイアウトを一切触らないので、寄せると崩れるサイトではこちらが安全です。</span></span>
-                                    </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">寄せる</label>
-                                        <input type="radio" id="sidebarPlacementOverlay" name="sidebarPlacement" value="overlay"><label for="sidebarPlacementOverlay">重ねる</label>
-                                    </div>
-                                </div>
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        カードの大きさ
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組カードの大きさを変えます。サイドバーの幅に対して<b>何列で並べるか</b>が変わり、アイコンと文字の大きさも一緒に変わります。<br><br>カード幅は「サイドバー幅 ÷ 列数」なので、<b>サイドバーが狭いと段階が粗くなります</b>。細かく調節したい時はサイドバーの幅（境界線をドラッグ）と組み合わせてください。</span></span>
-                                    </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
-                                        <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
-                                        <input type="radio" id="cardSizeLarge" name="cardSize" value="large"><label for="cardSizeLarge">大</label>
-                                    </div>
-                                </div>
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         自動更新
@@ -1468,6 +1502,33 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div class="opt-segment">
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
                                         <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
+                                    </div>
+                                </div>
+                                <!-- カードの大きさ。**動くサムネの下**（利用者指定・2026-08-10。以前は自動更新の上だった）。
+                                     ⚠️ value は constants.js の cardSizes のキーと同じにすること。
+                                        知らない値は既定（medium）に落ちるので、間違えても壊れはしないが効かない。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <!-- サイドバーの置き方（2026-08-08・利用者要望・doc/09 項目CE）。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        サイドバーの置き方
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>寄せる</b>: ページの中身を右へ寄せて、сサイドバーのぶんの場所を空けます（今までの動き）。ページの全体が見えます。<br><br><b>重ねる</b>: 場所を空けず、ページの上にサイドバーを乗せます。ページの表示は元のままですが、<b>左側が隠れます</b>。<br>ページ側のレイアウトを一切触らないので、寄せると崩れるサイトではこちらが安全です。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">寄せる</label>
+                                        <input type="radio" id="sidebarPlacementOverlay" name="sidebarPlacement" value="overlay"><label for="sidebarPlacementOverlay">重ねる</label>
+                                    </div>
+                                </div>
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        カードの大きさ
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組カードの大きさを変えます。サイドバーの幅に対して<b>何列で並べるか</b>が変わり、アイコンと文字の大きさも一緒に変わります。<br><br>カード幅は「サイドバー幅 ÷ 列数」なので、<b>サイドバーが狭いと段階が粗くなります</b>。細かく調節したい時はサイドバーの幅（境界線をドラッグ）と組み合わせてください。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
+                                        <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
+                                        <input type="radio" id="cardSizeLarge" name="cardSize" value="large"><label for="cardSizeLarge">大</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">

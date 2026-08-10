@@ -121,7 +121,14 @@ export function mapApiProgramToInfo(p) {
 async function fetchOnePage(offset) {
     const url = `${followApiUrl}?status=onair&offset=${offset}&limit=${PAGE_LIMIT}`
     const res = await fetch(url, { credentials: 'include' })
-    if (!res || !res.ok) throw new Error(`follow api HTTP ${res ? res.status : 'no-response'}`)
+    if (!res || !res.ok) {
+        const e = new Error(`follow api HTTP ${res ? res.status : 'no-response'}`)
+        // 🔴 **状態コードを捨てないこと。** 「未ログイン」と「メンテナンス」を分ける
+        //    唯一の材料（doc/09 項目CH）。2026-08-10 実測: 未ログインは
+        //    **HTTP 401** ＋ `{"meta":{"statusCode":401,"errorCode":"UNAUTHORIZED"}}`。
+        e.status = res ? res.status : 0
+        throw e
+    }
     const json = await res.json()
     const data = json && json.data
     return {
@@ -253,9 +260,35 @@ function warnIfFlippedThumbMissing(raw, mapped) {
 }
 
 /**
+ * 取得できなかった理由を1語にする。**この判定はここだけに書く。**
+ *
+ * 🔴 **401/403 以外を `unauthorized` にしないこと**（doc/09 項目CH）。
+ *    メンテナンスや通信断を「ログインしてください」と案内すると、
+ *    **落ちている可能性が高いログインページへ誘導する**ことになる。
+ *
+ * @param {Error & {status?:number}} error
+ * @returns {'unauthorized'|'server'|'http'|'parse'|'network'}
+ */
+export function classifyFollowFailure(error) {
+    const s = error && error.status
+    if (s === 401 || s === 403) return 'unauthorized'
+    if (typeof s === 'number' && s >= 500) return 'server'
+    if (typeof s === 'number' && s > 0) return 'http'
+    // 状態コードが無い＝fetch 自体が失敗したか、JSON でなかった
+    // （メンテナンスの HTML が 200 で返る場合はこちらに来る）。
+    if (error instanceof SyntaxError) return 'parse'
+    return 'network'
+}
+
+/**
  * 放送中フォロー番組を、内部 programInfo 形の配列で返す（ページングして全件）。
  * ライブサムネが無い番組・名前やアイコンが無い番組は詳細APIで補完する（fillMissingDetails）。
- * @returns {Promise<Array<object>|null>} 失敗時 null（フォールバックはしない）
+ *
+ * 🔴 **`null` ではなく理由つきで返す**（2026-08-10・doc/09 項目CH）。
+ *    以前は成功＝配列 / 失敗＝null で、**未ログインもメンテナンスも同じ null** だった。
+ *    呼び出し側が区別できず、ニコ生が落ちているだけの時に「ログイン」を勧めていた。
+ *
+ * @returns {Promise<{ok:true, programs:Array<object>}|{ok:false, reason:string, status?:number}>}
  */
 export async function fetchFollowedProgramsViaPage() {
     try {
@@ -276,9 +309,9 @@ export async function fetchFollowedProgramsViaPage() {
         warnIfFlippedThumbMissing(all, mapped)
         // フォローAPIで埋まらない情報（スクショ未生成の番組／想定外に名前が空の番組）を選択補完
         await fillMissingDetails(mapped)
-        return mapped
+        return { ok: true, programs: mapped }
     } catch (error) {
         handleError(error, { fn: 'fetchFollowedProgramsViaPage' })
-        return null
+        return { ok: false, reason: classifyFollowFailure(error), status: error && error.status }
     }
 }

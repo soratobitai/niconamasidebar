@@ -465,6 +465,21 @@ body.nicosidebar-light,
     color: #388bff;
 }
 
+/* Kick のログイン切れの案内（doc/09 項目CG）。#api_error と同じ場所・同じ余白に並べる。
+   🔴 **`display` を書かないこと。** 出し入れは JS が `hidden` 属性で行う。ここで
+      `display: block` を書くと `hidden` が効かなくなり（UA の `[hidden]` を上書きするため）、
+      **ログインしていても出っぱなし**になる。#api_error がインライン style と `!important` を
+      必要としているのは、そちらが逆の作りだから。 */
+#kick_notice {
+    margin: 12px 0 20px;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.5;
+}
+#kick_notice a {
+    color: #388bff;
+}
+
 
 
 
@@ -478,6 +493,10 @@ body.nicosidebar-light,
 .sidebar_body.show-settings #liveProgramContainer,
 .sidebar_body.show-settings #api_error {
     display: none !important; /* #api_error はJSがインラインstyleでdisplayを設定するため !important で確実に隠す */
+}
+/* 設定パネルを開いている間は案内も隠す。**忘れると設定の上に浮く**（#api_error と同じ扱い）。 */
+.sidebar_body.show-settings #kick_notice {
+    display: none !important;
 }
 #optionContainer .container {
     /* コンテナは全幅。ヘッダー（設定/×）を左右いっぱいに広げるため上限は設けない。

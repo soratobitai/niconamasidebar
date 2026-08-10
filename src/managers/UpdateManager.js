@@ -1,8 +1,8 @@
 import { fetchLivePrograms, fetchProgramInfo, mapNotifyboxRowToInfo } from '../services/api.js';
 import { fetchFollowedProgramsViaPage, isLiveScreenshotUrl } from '../services/followPageSource.js';
 import { getProgramInfos as getProgramInfosFromStorage, upsertProgramInfos, patchProgramThumbnail } from '../services/storage.js';
-import { fetchKickPrograms } from '../services/kickSource.js';
-import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, syncServiceTabs, cardIdOf, autoUpdateIntervalMs } from '../render/sidebar.js';
+import { fetchKickPrograms, isKickSessionLost } from '../services/kickSource.js';
+import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, flipReorder, applyProgramInfoToCard, releaseThumbnailBlobs, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, cardIdOf, autoUpdateIntervalMs } from '../render/sidebar.js';
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
@@ -635,9 +635,11 @@ export class UpdateManager {
      * 失敗（未ログイン/構造変化/通信エラー）時は何もしない＝その周は詳細が古いまま（フォールバックしない）。
      */
     async _refreshDetailsViaScrape() {
-        const scraped = await fetchFollowedProgramsViaPage(); // 内部programInfo形の配列 or null
-        if (scraped) upsertProgramInfos(scraped); // 全件フルレコードで書き戻し（_fetchedAt付与）
-        return scraped; // null = 取得失敗（未ログイン/仕様変更/通信エラー）。[] = 放送中0件
+        // 🔴 **失敗の理由ごと返す**（doc/09 項目CH）。呼び出し側が「未ログイン」と
+        //    「メンテナンス・通信断」を出し分けるのに要る。
+        const res = await fetchFollowedProgramsViaPage();
+        if (res.ok) upsertProgramInfos(res.programs); // 全件フルレコードで書き戻し（_fetchedAt付与）
+        return res; // {ok:true, programs}（[] = 放送中0件）/ {ok:false, reason}
     }
 
     /**
@@ -867,11 +869,14 @@ export class UpdateManager {
             // 🔴 **Kick をこの Promise.all に並べるのは await 地点を増やさないため。**
             //    取得後に別の await を足すと「自分がまだ最新か」の世代確認（項目AP）を
             //    もう1箇所足す必要が出る。ここに並べれば既存の確認がそのまま効く。
-            const [notifyList, fetched, kickResult] = await Promise.all([
+            const [notifyList, followRes, kickResult] = await Promise.all([
                 fetchLivePrograms(),             // 失敗時 false（件数は api.js が持つ＝失敗で下がる）
-                this._refreshDetailsViaScrape(), // 失敗時 null
+                this._refreshDetailsViaScrape(), // {ok, programs} / {ok:false, reason}
                 fetchKickPrograms(),             // 失敗時 {ok:false}
             ]);
+            // ⚠️ ここから下は**従来どおり配列 or null**として扱う（`[]` は「放送中0件」で真）。
+            //    理由が要るのは案内の出し分けだけなので、包みはここで開く。
+            const fetched = followRes.ok ? followRes.programs : null;
             // 🔴 **取れなかった周期は「0件」にせず、前回の結果を据え置くこと。**
             //    空にすると、Kick の取得が一瞬失敗するたびに**Kick のカードが全部消えて
             //    次の周期で戻る＝点滅する。** kick.com ページ側は元から据え置きにしてあり、
@@ -903,29 +908,58 @@ export class UpdateManager {
             // ログイン誘導は「両方失敗」の時だけ出す（＝未ログイン/通信断）。
             // 片方でも取れていれば描画できるので、エラー表示はしない。
             const bothFailed = !fetched && !notifyList;
-            if (this.elems.apiErrorElement) {
-                this.elems.apiErrorElement.style.display = bothFailed ? 'block' : 'none';
-            }
+            // 🔴 **「ログイン」は 401/403 の時だけ**（doc/09 項目CH）。それ以外は
+            //    メンテナンス・通信断・仕様変更なので「接続できません」を出す。
+            //    notifybox は未ログインでも 404 の HTML を返す（2026-08-10 実測）ので
+            //    認証の判定には使えない。**判断材料はフォローAPIの状態コードだけ。**
+            setNicoNotice(!bothFailed ? NICO_NOTICE_NONE
+                : (followRes.reason === 'unauthorized' ? NICO_NOTICE_AUTH : NICO_NOTICE_UNREACHABLE));
+
+            // Kick のログイン切れは**ニコ生とは別に**知らせる（doc/09 項目CG）。
+            // 🔴 上の `bothFailed` に混ぜないこと。あれはニコ生の2経路の話で、
+            //    中身もニコ生のログインリンク。Kick が切れただけでニコ生を勧めることになる。
+            // ⚠️ **毎周期 true/false を渡し切る。** 出す時だけ呼ぶと、ログインし直しても消えない。
+            setKickNotice(isKickSessionLost(kickResult));
+
+            // 🔴 **ニコ生が落ちても Kick まで止めないこと**（doc/09 項目CH）。
+            //    以前はここで無条件に return しており、Kick は正常なのに巻き添えで更新が
+            //    止まっていた（`this._kickPrograms` の更新もこの先にあるので、
+            //    サムネ更新ループまで古いリストを使い続ける）。
+            //
+            // ⚠️ **ニコ生のカードを消させないこと。** 描画は「新リストに無いカードを消す」ので、
+            //    ニコ生ぶんが空のまま描画すると全部消える。前回の取得結果を据え置いて埋める
+            //    （kick.com 側が `lastNicoPrograms` でやっているのと同じ）。
+            let merged;
             if (bothFailed) {
-                const container = document.getElementById('liveProgramContainer');
-                if (container && container.children.length > 0) {
-                    this.updateProgramCount(container.children.length);
+                merged = this._nicoPrograms || [];
+
+                // ⚠️ **据え置く元がまだ無いのに DOM にニコ生のカードがある**＝復元できない。
+                //    その周期だけ従来どおり何も描かずに帰る（消すより古いまま残すほうが良い）。
+                //    起動直後は取得が成功するまでカードが無いので、通常ここには来ない。
+                const shown = document.getElementById('liveProgramContainer');
+                const nicoCards = shown
+                    ? Array.from(shown.children).filter((el) => el.getAttribute('data-service') !== 'kick').length
+                    : 0;
+                if (!merged.length && nicoCards > 0) {
+                    this.updateProgramCount(shown.children.length);
+                    return sessionId;
                 }
-                return sessionId;
+            } else {
+                // 和集合を作ってから、終了したと**確認できた**番組を落とす。
+                // ⚠️ 順序を入れ替えないこと。先に落としても `_mergeSources` が notifybox 行を
+                //    足し直すので意味が無い。
+                merged = await this._dropEndedPrograms(this._mergeSources(notifyList, fetched), notifyList);
+
+                // 🔴 上の確認は詳細APIを叩くので、ここでもう一度世代を確かめる（項目AP と同じ理由）。
+                //    問い合わせている間に別の取得が着地して描画を終えていたら、古い結果で上書きしない。
+                //    ⚠️ **await を足したらこの確認も足すこと。** 前回は取得の直後にしか置いておらず、
+                //       ここに await が増えた時に守りが1つ抜けた形になる。
+                if (myGen !== this._renderGen) return sessionId;
+
+                this._seedNewProgramsToStorage(merged);
+                // 次にニコ生が落ちた時に据え置く元。**成功した周期だけ更新する。**
+                this._nicoPrograms = merged;
             }
-
-            // 和集合を作ってから、終了したと**確認できた**番組を落とす。
-            // ⚠️ 順序を入れ替えないこと。先に落としても `_mergeSources` が notifybox 行を
-            //    足し直すので意味が無い。
-            const merged = await this._dropEndedPrograms(this._mergeSources(notifyList, fetched), notifyList);
-
-            // 🔴 上の確認は詳細APIを叩くので、ここでもう一度世代を確かめる（項目AP と同じ理由）。
-            //    問い合わせている間に別の取得が着地して描画を終えていたら、古い結果で上書きしない。
-            //    ⚠️ **await を足したらこの確認も足すこと。** 前回は取得の直後にしか置いておらず、
-            //       ここに await が増えた時に守りが1つ抜けた形になる。
-            if (myGen !== this._renderGen) return sessionId;
-
-            this._seedNewProgramsToStorage(merged);
 
             // 🔴 **Kick を足すのはここ。`_seedNewProgramsToStorage` より後。**
             //
