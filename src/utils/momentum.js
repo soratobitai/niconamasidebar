@@ -146,27 +146,46 @@ export function initialViewerRate(info, now) {
  * 平滑化の理由・時定数は `nextMomentum` と同じ。ニコ生の統計は約60秒粒度でしか動かず、
  * 生の差分をそのまま順位に使うと跳ねる。
  *
+ * 🔴 **仮置きの初回値は、実測が1つ取れたら混ぜずに捨てる**（2026-08-10・doc/09 項目CL）。
+ *
+ *    初回は前回値が無いので `累計来場者 ÷ 経過分` で仮置きする。ところが推定同接は
+ *    それに `min(W, 経過分)` を掛けるので**経過分どうしが打ち消し合い、
+ *    推定同接＝累計来場者そのもの**になる。ニコ生の来場者は**入ってすぐ閉じた人も数える**ので、
+ *    新着番組は実際の数倍で出る（実測の再現: 5分で 300 と表示、実際は約120）。
+ *
+ *    以前はこの仮置きを普通に混ぜていたため、**根拠の弱い値が20分居座って**
+ *    「新着がいきなり上位に入り、じわじわ落ちる」動きになっていた。
+ *    実測が1つでも取れたらそちらを信じる。落ち着くまで 約20分 → 約6分。
+ *
+ * ⚠️ **増分が 0 の周期では置き換えないこと。** 静かな番組が一発で 0 に落ち、
+ *    順位が最下位へ吹き飛ぶ。0 の時は従来どおり均し、仮置きの印も残して次の機会を待つ。
+ *
  * @param {object|null} prev 前回保存したレコード（`viewerRate` と `_fetchedAt` を持つ）
  * @param {object} next 今回の programInfo
  * @param {number} now 現在時刻(ms)
- * @returns {number} 更新後の到着レート（1分あたり）
+ * @returns {{rate:number, seeded:boolean}} 到着レート（1分あたり）と、それが仮置きかどうか
  */
 export function nextViewerRate(prev, next, now) {
-    if (!next) return 0
+    if (!next) return { rate: 0, seeded: false }
     // notifybox 由来の最小レコード（来場者0）を前回値に使わない。理由は nextMomentum と同じ。
-    if (prev && prev._source === 'notifybox') return initialViewerRate(next, now)
+    if (prev && prev._source === 'notifybox') return { rate: initialViewerRate(next, now), seeded: true }
     const prevR = prev ? Number(prev.viewerRate) : NaN
-    if (!Number.isFinite(prevR)) return initialViewerRate(next, now)
+    if (!Number.isFinite(prevR)) return { rate: initialViewerRate(next, now), seeded: true }
 
+    const wasSeeded = !!(prev && prev.viewerRateSeeded)
     const dtMs = now - (Number(prev._fetchedAt) || 0)
-    if (!(dtMs >= 1000)) return prevR
+    if (!(dtMs >= 1000)) return { rate: prevR, seeded: wasSeeded }
 
     // 累計来場者は減らないはずだが、取得元の揺れで減ることがある。負のレートは作らない。
     const dv = Math.max(0, (Number(next.viewers) || 0) - (Number(prev.viewers) || 0))
     const instant = dv / (dtMs / 60000)
+
+    // 仮置きの値は捨てて、最初の実測でまるごと置き換える（上の説明を参照）。
+    if (wasSeeded && instant > 0) return { rate: instant, seeded: false }
+
     const alpha = 1 - Math.exp(-dtMs / momentumTauMs)
     const v = prevR + (instant - prevR) * alpha
-    return Number.isFinite(v) && v > 0 ? v : 0
+    return { rate: Number.isFinite(v) && v > 0 ? v : 0, seeded: wasSeeded }
 }
 
 /**

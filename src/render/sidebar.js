@@ -1449,21 +1449,22 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         自動更新
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。<br><br><b>OFF</b> にすると自動更新しません。新しい番組が出てこず、<b>終了した番組もリストに残ります</b>。更新ボタンで手動更新してください。<br>自動移動とサムネイルは OFF でも動きます。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組リストを指定秒数で自動更新します。（更新ボタンで手動更新も可）<br>サムネイルはこの設定と関係なく自動更新されます（20〜60秒）。</span></span>
                                     </div>
                                     <!-- id は値ベース（旧: updateProgramsInterval1〜3 の連番）。選択肢を増やした時に
                                          連番だと意味がずれ、検証スクリプトの「60秒に設定できた」が黙って別の値を
                                          押すようになるため。増減しても意味が動かない値ベースにしてある。 -->
                                     <div class="opt-segment opt-segment-4">
-                                        <input type="radio" id="updateProgramsInterval30" name="updateProgramsInterval" value="30"><label for="updateProgramsInterval30">30秒</label>
-                                        <input type="radio" id="updateProgramsInterval60" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval60">60秒</label>
-                                        <input type="radio" id="updateProgramsInterval120" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval120">120秒</label>
                                         <!-- 🔴 **選択肢を消したら storage.js の migrateOptions へ寄せ先を足すこと。**
                                              保存値に対応するラジオが無いと、その利用者は設定を一切保存できなくなる
                                              （updateCheckedState がどれも選ばず、saveOptions が早期 return する）。
                                              180秒 は 2026-08-07 に廃止し、120秒 へ寄せている。
-                                             ⚠️ 値は文字列 'off'。数値にすると Number() で他の値と区別できなくなる。 -->
+                                             ⚠️ 値は文字列 'off'。数値にすると Number() で他の値と区別できなくなる。
+                                             ⚠️ **OFF は左端**（利用者判断・2026-08-10）。自動移動・動くサムネと同じ並びにする。 -->
                                         <input type="radio" id="updateProgramsIntervalOff" name="updateProgramsInterval" value="off"><label for="updateProgramsIntervalOff">OFF</label>
+                                        <input type="radio" id="updateProgramsInterval30" name="updateProgramsInterval" value="30"><label for="updateProgramsInterval30">30秒</label>
+                                        <input type="radio" id="updateProgramsInterval60" name="updateProgramsInterval" value="60"><label for="updateProgramsInterval60">60秒</label>
+                                        <input type="radio" id="updateProgramsInterval120" name="updateProgramsInterval" value="120"><label for="updateProgramsInterval120">120秒</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">
@@ -1487,7 +1488,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         自動移動
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">視聴中の番組終了後、サイドバー先頭の番組へ自動で移動します。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">視聴中の番組が終わったら、リストの先頭の番組へ自動で移動します。<br>タブで分けている時は、表示中のタブの先頭へ移動します。</span></span>
                                     </div>
                                     <div class="opt-segment">
                                         <input type="radio" id="autoNextProgramOff" name="autoNextProgram" value="off"><label for="autoNextProgramOff">OFF</label>
@@ -1513,18 +1514,16 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         サイドバーの置き方
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>寄せる</b>: ページの中身を右へ寄せて、сサイドバーのぶんの場所を空けます（今までの動き）。ページの全体が見えます。<br><br><b>重ねる</b>: 場所を空けず、ページの上にサイドバーを乗せます。ページの表示は元のままですが、<b>左側が隠れます</b>。<br>ページ側のレイアウトを一切触らないので、寄せると崩れるサイトではこちらが安全です。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>画面分割</b>: ページを右へずらして、左半分にサイドバーを置きます。<br><br><b>重ねる</b>: ページの上に重ねます。左側が隠れる代わりに、ページのレイアウトを崩しません。</span></span>
                                     </div>
                                     <div class="opt-segment">
-                                        <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">寄せる</label>
+                                        <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">画面分割</label>
                                         <input type="radio" id="sidebarPlacementOverlay" name="sidebarPlacement" value="overlay"><label for="sidebarPlacementOverlay">重ねる</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        カードの大きさ
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">番組カードの大きさを変えます。サイドバーの幅に対して<b>何列で並べるか</b>が変わり、アイコンと文字の大きさも一緒に変わります。<br><br>カード幅は「サイドバー幅 ÷ 列数」なので、<b>サイドバーが狭いと段階が粗くなります</b>。細かく調節したい時はサイドバーの幅（境界線をドラッグ）と組み合わせてください。</span></span>
-                                    </div>
+                                    <!-- 「?」は付けない（利用者判断・2026-08-10）。設定名と小/中/大で伝わる。 -->
+                                    <div class="opt-label">カードの大きさ</div>
                                     <div class="opt-segment">
                                         <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
                                         <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
@@ -1555,7 +1554,10 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                      ここ（サイドバー内）で完結できる。表示/非表示は optionsHandler が
                                      kick:status の応答で切り替える。 -->
                                 <div class="opt-section opt-kick-only" hidden>
-                                    <div class="opt-label">番組表示方法</div>
+                                    <div class="opt-label opt-title-with-help">
+                                        番組表示方法
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">ニコ生と Kick の番組を、1つのリストにまとめるか、タブで切り替えるか。</span></span>
+                                    </div>
                                     <div class="opt-segment">
                                         <!-- 保存する値は 'mixed' のまま。表示ラベルだけを「統合表示」にしている。
                                              値を変えると既存ユーザーの設定が既定へ落ちる。 -->

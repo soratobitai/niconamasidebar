@@ -186,7 +186,13 @@ export function upsertProgramInfos(programInfos) {
         // 推定同接（人気順の第1キー）の材料。**来場者だけ**の到着レート。
         // momentum と同じ理由でここが唯一の計算地点であり、同じ理由で渡された info 自身へ
         // 破壊的に書き戻す（保存用のコピーにだけ書くと画面に反映されない）。
-        info.viewerRate = nextViewerRate(byId.get(info.id), info, now)
+        // 🔴 **`viewerRateSeeded` も一緒に持ち回すこと**（doc/09 項目CL）。
+        //    「この到着レートはまだ仮置き（累計来場者からの当て推量）である」という印で、
+        //    次回に実測が取れた時これを見て**混ぜずに置き換える**。落とすと元の
+        //    「新着がいきなり上位に入り20分かけて落ちる」動きに戻る。
+        const rateInfo = nextViewerRate(byId.get(info.id), info, now)
+        info.viewerRate = rateInfo.rate
+        info.viewerRateSeeded = rateInfo.seeded
         // 🔴 **サムネのURLを「空」で上書きしないこと**（2026-08-10・doc/09 項目CJ）。
         //    ここは丸ごと置き換えなので、**補完に1回失敗しただけで前回埋まったURLが消える。**
         //    実際にそれで「ライブサムネが出ず配信者アイコンのまま」になっていた（再現済み）。

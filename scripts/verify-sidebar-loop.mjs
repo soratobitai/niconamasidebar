@@ -546,6 +546,88 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
  *    そのまま書かないこと。**その並びがブロックコメントの終端**になり、
  *    ファイルが構文エラーになる（2026-08-10 に踏んだ）。
  */
+/**
+ * CL. 新着番組が「いきなり上位に入って、じわじわ落ちる」のを直したこと。
+ *
+ * 初回は前回値が無いので `累計来場者 ÷ 経過分` で仮置きするが、推定同接はそれに
+ * `min(W, 経過分)` を掛けるので**経過分どうしが打ち消し合い、推定同接＝累計来場者**になる。
+ * ニコ生の来場者は入ってすぐ閉じた人も数えるため、新着は実際の数倍で出る。
+ * 以前はその仮置きを普通に均していたので、**根拠の弱い値が20分居座っていた。**
+ */
+async function seededRateReplacement() {
+    console.log('=== CL 新着の推定同接が、実測が取れ次第すぐ正しい値へ寄ること ===')
+    const { nextViewerRate, initialViewerRate, estimateConcurrentViewers } =
+        await import('../src/utils/momentum.js')
+    const { initialMomentumMinWindowMin, defaultDwellMinutes } = await import('../src/config/constants.js')
+
+    const T0 = 1000000000000
+    const at = (min) => T0 + min * 60000
+    const prog = (viewers) => ({ providerType: 'user', viewers, onAirTime: { beginAt: new Date(T0).toISOString() } })
+
+    // --- ① 初回は仮置きで、そう名乗ること ---
+    const first = nextViewerRate(null, prog(300), at(5))
+    check('CL ① 初回は仮置き（累計来場 ÷ 経過分）',
+        Math.abs(first.rate - 300 / 5) < 1e-9, `rate=${first.rate}`)
+    check('CL 🔴 ① 仮置きだと名乗る（この印が落ちると元の動きへ戻る）',
+        first.seeded === true)
+    check('CL ① 分母には下限がある（開始直後に発散させない）',
+        Math.abs(initialViewerRate(prog(300), at(0.5)) - 300 / initialMomentumMinWindowMin) < 1e-9)
+
+    // --- 🔴 ② 実測が取れたら、仮置きは混ぜずに置き換える（本題） ---
+    const seeded = { viewerRate: first.rate, viewers: 300, _fetchedAt: at(5), viewerRateSeeded: true }
+    const second = nextViewerRate(seeded, prog(324), at(7)) // 2分で24人＝12人/分
+    check('CL 🔴 ② 仮置きは実測でまるごと置き換える（均さない）',
+        Math.abs(second.rate - 12) < 1e-9, `rate=${second.rate}（均すと 36 前後になる）`)
+    check('CL ② 置き換えたら、もう仮置きではない', second.seeded === false)
+
+    // --- ⚠️ ③ 増分 0 で置き換えない（静かな番組を最下位へ吹き飛ばさない） ---
+    const quiet = nextViewerRate(seeded, prog(300), at(7)) // 2分で 0人
+    check('CL ⚠️ ③ 増分が 0 の周期では置き換えない（0 に落とさない）',
+        quiet.rate > 0, `rate=${quiet.rate}`)
+    check('CL ③ 置き換えていないので仮置きの印は残る（次の機会を待つ）',
+        quiet.seeded === true)
+
+    // --- ④ 置き換わった後は普通の均し（急に飛ばない） ---
+    const measured = { viewerRate: 12, viewers: 324, _fetchedAt: at(7), viewerRateSeeded: false }
+    const fourth = nextViewerRate(measured, prog(444), at(9)) // 2分で120人＝60人/分 の急増
+    check('CL ④ 実測どうしは均す（1回で飛びつかない）',
+        fourth.rate > 12 && fourth.rate < 60, `rate=${fourth.rate}`)
+
+    // --- 🔴 ⑤ 若い番組を抑えるクランプは残す（外すと倍になる） ---
+    const young = { ...prog(300), viewerRate: 60 }
+    const W = defaultDwellMinutes
+    check('CL 🔴 ⑤ 経過が W 未満なら係数は「経過分」（W ではない）',
+        Math.abs(estimateConcurrentViewers(young, at(5), W) - 60 * 5) < 1e-6,
+        `${estimateConcurrentViewers(young, at(5), W)}（W を掛けると ${60 * W} になり倍に跳ねる）`)
+    check('CL ⑤ 経過が W を超えたら係数は W',
+        Math.abs(estimateConcurrentViewers(young, at(30), W) - 60 * W) < 1e-6)
+
+    // --- 🔴 ⑥ 通しで、数周期のうちに真値へ寄ること（回帰の砦） ---
+    // 立ち上がりで300人 → 以後 12人/分。本当の同接は 12 × W = 120。
+    const TRUE = 12 * W
+    const arrivals = (m) => (m <= 5 ? 60 * m : 300 + 12 * (m - 5))
+    let prev = null
+    let settledAt = null
+    for (let m = 5; m <= 25; m += 2) {
+        const info = prog(arrivals(m))
+        const r = nextViewerRate(prev, info, at(m))
+        info.viewerRate = r.rate
+        info.viewerRateSeeded = r.seeded
+        const est = estimateConcurrentViewers(info, at(m), W)
+        if (settledAt === null && m > 5 && Math.abs(est - TRUE) <= TRUE * 0.05) settledAt = m
+        prev = { ...info, _fetchedAt: at(m) }
+    }
+    check('CL 🔴 ⑥ 開始から 12分以内に真値の±5%へ入る（以前は20分以上かかっていた）',
+        settledAt !== null && settledAt <= 12, `落ち着いた時刻=${settledAt}分 / 真値=${TRUE}`)
+
+    // --- ⑦ 保存側が印を持ち回すこと（落とすと①〜⑥が全部無意味になる） ---
+    const { readFileSync } = await import('fs')
+    const st = stripComments(readFileSync(new URL('../src/services/storage.js', import.meta.url), 'utf8'))
+    check('CL 🔴 ⑦ storage が viewerRateSeeded を保存する',
+        /info\.viewerRateSeeded = rateInfo\.seeded/.test(st),
+        '落とすと毎回「仮置き」が消え、置き換えの判定ができなくなる')
+}
+
 async function webAccessibleResourcesScope() {
     console.log('=== CK 拡張の画像が、サイドバーを出す全ページから読めること ===')
     const { readFileSync } = await import('fs')
@@ -4944,6 +5026,7 @@ if (real) {
     console.log('')
     await flippedTrap()
     console.log('')
+    await seededRateReplacement()
     await webAccessibleResourcesScope()
     await thumbUrlSurvivesFailedFill()
     await newProgramThumb()
