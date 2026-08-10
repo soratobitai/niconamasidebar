@@ -535,6 +535,60 @@ async function r1(cards = 4, cycleSec = 2, workMs = 200) {
  * 詳細APIが一瞬返らなかった周期に**前回埋まったURLが消えた**。
  * その後は `applyProgramInfoToCard` が `data-src` をアイコンへ戻し、表示もアイコンに戻る。
  */
+/**
+ * CK. 拡張の画像（更新ボタン・オプション・ローディング）が、サイドバーを出す全ページから読めること。
+ *
+ * 【なぜ要るか】`web_accessible_resources.matches` を「全ホスト」から2ホストへ絞った（2026-08-10）。
+ * 絞りすぎると **画像だけが 404 になる**。例外は出ず、ボタンが空欄・繋ぎ画像が出ない、
+ * という形でしか気付けない。広すぎると審査で理由を聞かれる。**両方向を固定する。**
+ *
+ * ⚠️ ここに全ホストのワイルドカード（アスタリスク＋スラッシュ＋アスタリスク）を
+ *    そのまま書かないこと。**その並びがブロックコメントの終端**になり、
+ *    ファイルが構文エラーになる（2026-08-10 に踏んだ）。
+ */
+async function webAccessibleResourcesScope() {
+    console.log('=== CK 拡張の画像が、サイドバーを出す全ページから読めること ===')
+    const { readFileSync } = await import('fs')
+    const rd = (p) => readFileSync(new URL('../' + p, import.meta.url), 'utf8')
+    const manifest = JSON.parse(rd('manifest.json'))
+    const sw = stripComments(rd('static/sw.js'))
+    const code = stripComments(rd('src/main.js')) + stripComments(rd('src/kickPage.js'))
+
+    const hostOf = (pattern) => (String(pattern).match(/^https:\/\/([^/]+)\//) || [])[1] || ''
+
+    // サイドバーを出すページ＝静的な content_scripts ＋ SW が動的に登録する分。
+    // 🔴 **動的登録を忘れないこと。** kick.com は必須ホスト権限を避けるため
+    //    `chrome.scripting.registerContentScripts` で登録しており、manifest には出てこない。
+    const staticHosts = (manifest.content_scripts || []).flatMap((c) => c.matches || []).map(hostOf)
+    const dynamicHosts = [...sw.matchAll(/matches:\s*\[([^\]]*)\]/g)]
+        .flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => hostOf(x[1])))
+    const hosts = [...new Set([...staticHosts, ...dynamicHosts])].filter(Boolean)
+    check('CK （空振り防止）サイドバーを出すページを拾えている', hosts.length >= 2, hosts.join(' / '))
+
+    const war = manifest.web_accessible_resources || []
+    const warHosts = war.flatMap((w) => w.matches || []).map(hostOf)
+    const missing = hosts.filter((h) => !warHosts.includes(h))
+    check('CK 🔴 画像の公開先が、サイドバーを出す全ページを覆っている',
+        missing.length === 0,
+        missing.length ? `覆えていない: ${missing.join(' / ')}（画像だけ 404 になる）` : warHosts.join(' / '))
+
+    const extra = warHosts.filter((h) => !hosts.includes(h))
+    check('CK 🔴 必要以上に広げていない（審査で理由を聞かれる）',
+        extra.length === 0, extra.length ? `余分: ${extra.join(' / ')}` : 'ちょうど')
+
+    // 実際に getURL で読む画像が、公開している資源のパターンに載っているか。
+    const used = [...code.matchAll(/(?:getURL|runtimeUrl)\(\s*'(images\/[^']+)'/g)].map((m) => m[1])
+    check('CK （空振り防止）読み込んでいる画像を拾えている', used.length >= 3, used.join(' / '))
+    const patterns = war.flatMap((w) => w.resources || [])
+    const covered = (f) => patterns.some((p) => {
+        const re = new RegExp('^' + p.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$')
+        return re.test(f)
+    })
+    const uncovered = [...new Set(used)].filter((f) => !covered(f))
+    check('CK 🔴 読み込んでいる画像がすべて公開対象',
+        uncovered.length === 0, uncovered.length ? `対象外: ${uncovered.join(' / ')}` : patterns.join(' / '))
+}
+
 async function thumbUrlSurvivesFailedFill() {
     const { buildRenderHarness, wireUpdateManager, apiProgram, liveThumbUrl } = await import('./render-harness.mjs')
     console.log('=== CJ 補完が1回失敗してもライブサムネのURLを失わない ===')
@@ -4890,6 +4944,7 @@ if (real) {
     console.log('')
     await flippedTrap()
     console.log('')
+    await webAccessibleResourcesScope()
     await thumbUrlSurvivesFailedFill()
     await newProgramThumb()
     console.log('')
