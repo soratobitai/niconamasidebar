@@ -223,6 +223,78 @@ export function nextViewerRate(prev, next, now) {
  * @param {number} dwellMinutes W（平均滞在時間・分）
  * @returns {number} 推定同時視聴者数
  */
+/**
+ * 直近 W 分に入ってきた人数。**推定同接の本体。**
+ *
+ * 【考え方】滞在時間が W 分なら、W 分以内に入った人はまだ居る。
+ * つまり `累計来場(今) − 累計来場(W分前)` がそのまま同時視聴者数の推定になる。
+ *
+ * 【3つの場合】
+ *   1. 放送開始から W 分たっていない … 全員まだ居る → **累計来場者そのもの**
+ *   2. 履歴が W 分ぶん揃っている     … 窓の両端の差
+ *   3. 履歴が足りない（途中から見始めた番組）
+ *        … 持っているぶんの増分を W へ引き伸ばす。**2分ではなく持っている全期間**を使うので
+ *          従来よりはるかにましで、周期を重ねるほど 2 に近づく。
+ *
+ * @returns {number|null} 数えられなければ null（呼び出し側が従来の計算へ落ちる）
+ */
+function arrivalsInWindow(info, now, W) {
+    const cum = Number(info.viewers) || 0
+    const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
+    const elapsedMin = Number.isFinite(beginAt) ? Math.max(0, (now - beginAt) / 60000) : NaN
+
+    // 1. 放送が W より若い＝まだ誰も帰っていない
+    if (Number.isFinite(elapsedMin) && elapsedMin <= W) return cum
+
+    const samples = Array.isArray(info.viewerSamples) ? info.viewerSamples : null
+    if (!samples || samples.length < 2) return null
+
+    // 🔴 **窓をきっぱり切らないこと**（2026-08-10・利用者報告「同接が急に消えて、しばらくすると戻る」）。
+    //    「W 分ちょうどで全員帰る」と扱うと、**直近 W 分に誰も入らなかった番組が 0 になる。**
+    //    実際には W より前に入った人も残っているので、0 は明らかに嘘。
+    //
+    //    滞在時間を**平均 W の指数分布**とみなし、古い到着ほど軽く数える。
+    //      推定同接 = Σ（その区間に入った人数 × exp(-経過 / W)）
+    //    一定の流入が続く定常状態では **レート × W** に収束するので、目盛りの校正はそのまま効く。
+    //    急に 0 へ落ちることも、窓の縁で段差ができることも無くなる。
+    const sorted = samples
+        .map((s) => [Number(s[0]), Number(s[1]) || 0])
+        .filter((s) => Number.isFinite(s[0]))
+        .sort((a, b) => a[0] - b[0])
+    if (sorted.length >= 2) {
+        let sum = 0
+        for (let i = 1; i < sorted.length; i++) {
+            const arrived = Math.max(0, sorted[i][1] - sorted[i - 1][1])
+            if (!arrived) continue
+            // 区間の真ん中に入ってきたとみなす
+            const ageMin = (now - (sorted[i - 1][0] + sorted[i][0]) / 2) / 60000
+            sum += arrived * Math.exp(-Math.max(0, ageMin) / W)
+        }
+        // 最後のサンプル以降に増えたぶん（まだ履歴へ入っていない最新の増分）
+        sum += Math.max(0, cum - sorted[sorted.length - 1][1])
+
+        // ⚠️ 履歴が W 分に満たない間は、古い到着を取りこぼしている。持っている期間で割り戻す。
+        //    覆えていれば 1 倍（＝何もしない）。周期を重ねるほど 1 に近づく。
+        const spanMin = (now - sorted[0][0]) / 60000
+        const coverage = spanMin > 0 ? Math.min(1, spanMin / W) : 0
+        if (coverage > 0 && coverage < 1) sum /= coverage
+        if (sum > 0) return sum
+    }
+
+    // 3. 窓を覆えていない。持っている全期間で数えて W へ引き伸ばす。
+    let oldest = null
+    for (const s of samples) {
+        const t = Number(s && s[0])
+        if (!Number.isFinite(t)) continue
+        if (!oldest || t < oldest[0]) oldest = [t, Number(s[1]) || 0]
+    }
+    if (!oldest) return null
+    const spanMin = (now - oldest[0]) / 60000
+    if (!(spanMin > 0)) return null
+    const got = Math.max(0, cum - oldest[1])
+    return got * (W / spanMin)
+}
+
 export function estimateConcurrentViewers(info, now, dwellMinutes) {
     if (!info) return 0
 
@@ -233,11 +305,30 @@ export function estimateConcurrentViewers(info, now, dwellMinutes) {
         return Number(info.concurrentViewers) || 0
     }
 
+    const W = Number(dwellMinutes) > 0 ? Number(dwellMinutes) : 1
+    const cum = Number(info.viewers) || 0
+
+    // 🔴 **「直近 W 分に入ってきた人数」を数える**（2026-08-10・doc/09 項目CO）。
+    //    滞在時間が W なら、W 分以内に入った人はまだ居る。これがリトルの法則の素直な形。
+    //
+    //    以前は「直近2分の到着レート × W」だった。**2分の観測を20倍に引き伸ばす**ので:
+    //      - 立ち上がりの山が過ぎた瞬間に、それ以前に入った人が計算から丸ごと消える
+    //        （実測: 来場70人の番組が推定5人）
+    //      - 一時的な集中がそのまま何十分も続く前提になる
+    //        （実測: 累計200人の番組が推定800人）
+    //      - 静かな数分に当たると半減する（実測: 2600 → 1800）
+    //    どれも「短い観測を長い時間へ引き伸ばす」ことが原因で、窓で数えれば起きない。
+    const windowed = arrivalsInWindow(info, now, W)
+    if (windowed !== null) {
+        return cum > 0 ? Math.min(windowed, cum) : windowed
+    }
+
+    // --- 履歴がまだ無い時だけ、従来の引き伸ばしで代用する ---
+    // ⚠️ 初回の1周期だけここへ来る。次の取得からは上の窓が使える。
     const stored = Number(info.viewerRate)
     const rate = Number.isFinite(stored) ? stored : initialViewerRate(info, now)
     if (!(rate > 0)) return 0
 
-    const W = Number(dwellMinutes) > 0 ? Number(dwellMinutes) : 1
     const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
     // 開始時刻が不明なら定常とみなす（W をそのまま掛ける）。若い番組だと分からないので
     // 過大にならない方へ倒したいところだが、beginAt が無いのは異常系で数も少ない。

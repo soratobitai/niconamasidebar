@@ -171,7 +171,13 @@ export async function fetchProgramInfo(liveId) {
             let response = await fetch(`${liveInfoAPI}/lv${id}`)
             response = await response.json()
             if (response.meta?.status !== 200 || !response.data) {
-                if (response.meta?.status !== 200) {
+                // 🔴 **404 は異常ではない**（2026-08-10・利用者のコンソールに出て気付いた）。
+                //    この API を叩く3箇所は、どれも「その番組がまだ在るか」を確かめる用途:
+                //      終了確認 / 放送直後のサムネ追撃 / フォローAPIの穴埋め
+                //    番組が終われば消えるので、404 は**予定どおりの答え**。
+                //    警告を出すと、正常運転でコンソールが埋まって本物の異常が埋もれる。
+                //    呼び出し側は undefined を「答えが得られなかった」として既に扱っている。
+                if (response.meta?.status !== 200 && response.meta?.status !== 404) {
                     handleError(
                         new Error(`API returned status ${response.meta.status}`),
                         { api: 'fetchProgramInfo', liveId: id, status: response.meta.status }

@@ -1,9 +1,39 @@
-import { maxSaveProgramInfos, dwellMinutesScale, dwellMinutesScaleLegacy } from '../config/constants.js'
+import { maxSaveProgramInfos, dwellMinutesScale, defaultDwellMinutes, viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
 
 /** 目盛り校正の移行が済んだ印。**消さないこと**（消すと毎回移行が走る）。 */
-const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV2'
+const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV3'
+
+/**
+ * 来場者の履歴に1点足す。古いものと近すぎるものは捨てる。
+ *
+ * ⚠️ **間引かないと保存が膨らむ。** 番組は100件規模で、取得は最短30秒ごと。
+ *    間引き無しだと1番組あたり300点を超える。`viewerSampleMinGapMs` より近い点は足さない。
+ * ⚠️ 上限（`viewerSampleMaxCount`）は歯止め。間引きが効いていれば普通は届かない。
+ * 🔴 **来場者が減った時も記録すること。** 取得元の揺れで減ることがあるが、そこで
+ *    記録を止めると窓の起点が古いまま固まり、推定が過大になる。
+ *
+ * @param {Array<[number, number]>|undefined} prev 前回までの履歴
+ * @param {number} viewers 今回の累計来場者
+ * @param {number} now 現在時刻(ms)
+ * @returns {Array<[number, number]>}
+ */
+function appendViewerSample(prev, viewers, now) {
+    const list = Array.isArray(prev) ? prev.filter(
+        (s) => Array.isArray(s) && Number.isFinite(Number(s[0])) && Number.isFinite(Number(s[1])),
+    ) : []
+    const last = list.length ? list[list.length - 1] : null
+    // 近すぎる点は足さない（間引き）。ただし最後の1点は最新の値へ更新しておく。
+    if (last && now - Number(last[0]) < viewerSampleMinGapMs) {
+        list[list.length - 1] = [Number(last[0]), viewers]
+    } else {
+        list.push([now, viewers])
+    }
+    const cutoff = now - viewerSampleMaxAgeMs
+    const fresh = list.filter((s) => Number(s[0]) >= cutoff)
+    return fresh.length > viewerSampleMaxCount ? fresh.slice(fresh.length - viewerSampleMaxCount) : fresh
+}
 
 /**
  * Get options from chrome.storage.local and merge with defaults.
@@ -27,13 +57,24 @@ function migrateOptions(options) {
 
     // 「人気順の基準」の目盛りを校正し直した（2026-08-10・doc/09 項目CN）。
     //
-    // 🔴 **最寄りの値で引き当てないこと。** 旧目盛りの真ん中(10分)は新目盛りでは左端なので、
-    //    そのままだと「真ん中に居た人が端へ飛ぶ」。**添字を保って**移す。
-    // ⚠️ **1回だけ動かすこと。** 印を残さないと、新目盛りの 10分（左端）を選んだ人が
-    //    次の起動で旧目盛りの 10分（添字3）と読まれ、40分へ飛ばされ続ける。
+    // 経緯: 旧 [3,5,8,10,14,20,30,45] → 一度 [10,17,27,40,58,80,110,150] へ広げたが、
+    // 実機比較で**17分あたりが正解**と分かり、17分を中心に幅を狭めた（最終形）。
+    //
+    // 🔴 **古い保存値は新しい目盛りの外に居る。** 45分も40分も、今の範囲(11〜29)には無い。
+    //    範囲外はすべて**新しい既定へ寄せる**。中途半端に端へ丸めると、利用者が意図しない
+    //    設定のまま使い続けることになる（今の目盛りでは端＝かなり極端な指定）。
+    // ⚠️ **1回だけ動かすこと。** 印が無いと、利用者が端を選ぶたびに既定へ戻され続ける。
     if (!options[DWELL_SCALE_MIGRATED_KEY]) {
-        const i = dwellMinutesScaleLegacy.indexOf(Number(options.dwellMinutes))
-        if (i >= 0 && dwellMinutesScale[i] != null) options.dwellMinutes = dwellMinutesScale[i]
+        const m = Number(options.dwellMinutes)
+        const lo = dwellMinutesScale[0]
+        const hi = dwellMinutesScale[dwellMinutesScale.length - 1]
+        if (!Number.isFinite(m) || m < lo || m > hi) {
+            options.dwellMinutes = defaultDwellMinutes
+        } else {
+            let best = dwellMinutesScale[0]
+            for (const v of dwellMinutesScale) if (Math.abs(v - m) < Math.abs(best - m)) best = v
+            options.dwellMinutes = best
+        }
         options[DWELL_SCALE_MIGRATED_KEY] = true
     }
     return options
@@ -224,6 +265,14 @@ export function upsertProgramInfos(programInfos) {
         // 🔴 **渡された info 自身にも書き戻すこと（破壊的）。** momentum と同じ理由で、
         //    呼び出し元は upsert に渡した配列をそのまま描画へ回す。保存用のコピーにだけ書くと
         //    **保存は直るのに画面はアイコンのまま**という、いちばん分かりにくい形になる。
+        // 来場者の履歴。**推定同接の本体の材料**（doc/09 項目CO）。
+        // 🔴 **ここが唯一の記録地点。** 新しい来場者数と時刻が出会うのはここだけで、
+        //    momentum / viewerRate と同じ理由で**渡された info 自身にも書き戻す**
+        //    （保存用のコピーにだけ書くと、画面が使う側に履歴が無く推定が従来式へ落ちる）。
+        info.viewerSamples = appendViewerSample(
+            (byId.get(info.id) || {}).viewerSamples, Number(info.viewers) || 0, now,
+        )
+
         const prev = byId.get(info.id)
         if (prev) {
             if (!info.thumbnailUrl && prev.thumbnailUrl) info.thumbnailUrl = prev.thumbnailUrl

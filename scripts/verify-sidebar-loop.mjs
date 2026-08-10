@@ -734,6 +734,115 @@ async function recommendOrder() {
         /programsSort === 'recommend'/.test(oh))
 }
 
+/**
+ * CO. 推定同接を「直近 W 分に入ってきた人数」で出す。
+ *
+ * 以前は「直近2分の到着レート × W」で、**2分の観測を20倍に引き伸ばして**いた。
+ * 利用者が他サイトと比べて3つの破綻を報告（2026-08-10）:
+ *   来場70人の番組が推定5人 / 累計200人の番組が推定800人 / 同じ番組が 2600→1800
+ * どれも引き伸ばしが原因で、窓で数えれば起きない。
+ */
+async function windowedConcurrent() {
+    console.log('=== CO 推定同接を「直近 W 分に入ってきた人数」で出す ===')
+    const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
+    const { readFileSync } = await import('fs')
+    const st = stripComments(readFileSync(new URL('../src/services/storage.js', import.meta.url), 'utf8'))
+    const { viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount } =
+        await import('../src/config/constants.js')
+
+    const W = 40
+    const T = 1700000000000
+    const prog = (viewers, elapsedMin, samples) => ({
+        providerType: 'user', viewers,
+        onAirTime: { beginAt: new Date(T - elapsedMin * 60000).toISOString() },
+        ...(samples ? { viewerSamples: samples } : {}),
+    })
+    const est = (info) => estimateConcurrentViewers(info, T, W)
+    // 一定の流入が続く履歴を作る
+    const steady = (perMin, minutes) => {
+        const s = []
+        for (let m = minutes; m >= 0; m -= 5) s.push([T - m * 60000, Math.round(perMin * (minutes - m))])
+        return s
+    }
+
+    // --- ① 放送が W より若い＝まだ誰も帰っていない ---
+    check('CO ① 放送が W より若ければ累計来場者そのもの',
+        Math.abs(est(prog(70, 3, [[T - 180000, 0], [T - 120000, 65]])) - 70) < 1e-6,
+        `${est(prog(70, 3, [[T - 180000, 0], [T - 120000, 65]]))}（引き伸ばすと 8 になっていた）`)
+
+    // --- 🔴 ② 定常状態では レート×W に収束する（目盛りの校正が保たれる） ---
+    const st12 = est(prog(12 * 180, 180, steady(12, 180)))
+    check('CO 🔴 ② 定常状態は レート×W に収束（校正が変わらない）',
+        Math.abs(st12 - 12 * W) < 12 * W * 0.05, `${Math.round(st12)} / 期待 ${12 * W}`)
+
+    // --- 🔴 ③ 静かな数分で半減しない（利用者報告 2600→1800）---
+    const quiet = steady(12, 180)
+    quiet[quiet.length - 1] = [T, 12 * 180] // 直近だけ増えていない
+    const qv = est(prog(12 * 180, 180, quiet))
+    check('CO 🔴 ③ 直近が静かでも大きく下がらない',
+        Math.abs(qv - st12) < st12 * 0.1, `静か=${Math.round(qv)} / 通常=${Math.round(st12)}`)
+
+    // --- 🔴 ④ 流入が完全に止まっても 0 にしない（「—」と表示されない）---
+    const stalled = []
+    for (let m = 120; m >= 0; m -= 5) stalled.push([T - m * 60000, m >= 60 ? Math.round(10 * (120 - m)) : 600])
+    const sv = est(prog(600, 120, stalled))
+    check('CO 🔴 ④ 直近 W 分の流入が 0 でも 0 にならない',
+        sv > 0, `${Math.round(sv)}人（0 だと画面に「—」と出る）`)
+    check('CO ④ ただし流入が止まれば下がってはいく',
+        sv < 600 * 0.5, `${Math.round(sv)} / 累計600`)
+
+    // --- 🔴 ⑤ 一時的な集中を引き伸ばさない（累計を超えない）---
+    const burst = []
+    for (let m = 180; m >= 0; m -= 5) burst.push([T - m * 60000, m <= 2 ? 200 : 164])
+    const bv = est(prog(200, 180, burst))
+    check('CO 🔴 ⑤ 一時的な集中を何十分にも引き伸ばさない',
+        bv <= 200, `${Math.round(bv)} / 累計200（引き伸ばすと 720 だった）`)
+
+    // --- ⑥ 履歴が足りない時は、覆えている割合で割り戻す ---
+    // ⚠️ 長く続いている番組を、**途中から見始めた**状況にすること。累計を小さくすると
+    //    上限（累計来場者）に当たって割り戻しが見えない（この検査を書いた時に踏んだ）。
+    const partial = []
+    for (let m = 10; m >= 0; m -= 5) partial.push([T - m * 60000, 5000 - 12 * m])
+    const pv = estimateConcurrentViewers(
+        { providerType: 'user', viewers: 5000, onAirTime: { beginAt: new Date(T - 200 * 60000).toISOString() }, viewerSamples: partial },
+        T, W,
+    )
+    check('CO ⑥ 履歴が W に満たなければ割り戻す（過小に出さない）',
+        pv > 12 * 10 * 1.5, `${Math.round(pv)} / 10分ぶんの実測は ${12 * 10}（4倍前後まで割り戻る）`)
+
+    // --- ⑦ 履歴が無ければ従来式へ落ちる（初回の1周期）---
+    check('CO ⑦ 履歴が無い時も 0 にしない（従来式で代用）',
+        estimateConcurrentViewers({ providerType: 'user', viewers: 300, viewerRate: 12, onAirTime: { beginAt: new Date(T - 200 * 60000).toISOString() } }, T, W) > 0)
+
+    // --- ⑧ Kick は実測値。履歴を見ない ---
+    check('CO ⑧ Kick は履歴に関係なく実測値',
+        estimateConcurrentViewers({ service: 'kick', viewers: 0, concurrentViewers: 777, viewerSamples: [] }, T, W) === 777)
+
+    // --- ⑨ 履歴の記録（保存が膨らまないこと）---
+    check('CO ⑨ 間引きの間隔がある（保存が膨らまない）',
+        /viewerSampleMinGapMs/.test(st) && viewerSampleMinGapMs >= 60000,
+        `${viewerSampleMinGapMs}ms`)
+    check('CO ⑨ 古い点を捨てる', /viewerSampleMaxAgeMs/.test(st) && viewerSampleMaxAgeMs > 0)
+    check('CO ⑨ 件数の歯止めがある', /viewerSampleMaxCount/.test(st) && viewerSampleMaxCount > 0)
+    // 目盛りの最大より短いと、いちばん右にした時に履歴が足りなくなる。
+    const { dwellMinutesScale } = await import('../src/config/constants.js')
+    check('CO 🔴 ⑨ 履歴の保持は目盛りの最大より長い',
+        viewerSampleMaxAgeMs >= Math.max(...dwellMinutesScale) * 60000,
+        `保持=${viewerSampleMaxAgeMs / 60000}分 / 目盛り最大=${Math.max(...dwellMinutesScale)}分`)
+    // 🔴 渡された info にも書き戻さないと、画面側に履歴が届かず従来式のままになる。
+    check('CO 🔴 ⑨ storage が渡された info にも履歴を書き戻す',
+        /info\.viewerSamples = appendViewerSample\(/.test(st),
+        '保存用のコピーにだけ書くと、画面はいつまでも従来式で出る')
+
+    // --- ⑩ 404 は警告しない（正常な答え）---
+    const api = stripComments(readFileSync(new URL('../src/services/api.js', import.meta.url), 'utf8'))
+    check('CO ⑩ 番組が消えた（404）を警告にしない',
+        /status !== 404/.test(api),
+        '終了確認・サムネ追撃・穴埋めのどれも「まだ在るか」を聞く用途。404 は予定どおりの答え')
+    check('CO ⑩ それ以外の状態コードは今までどおり警告する',
+        /handleError\([\s\S]{0,120}?API returned status/.test(api))
+}
+
 async function seededRateReplacement() {
     console.log('=== CL 新着の推定同接が、実測が取れ次第すぐ正しい値へ寄ること ===')
     const { nextViewerRate, initialViewerRate, estimateConcurrentViewers } =
@@ -778,9 +887,13 @@ async function seededRateReplacement() {
     //    累計が小さいと上限（項目⑦）に当たって、係数の違いが見えなくなる（実際に踏んだ）。
     const young = { ...prog(100000), viewerRate: 60 }
     const W = defaultDwellMinutes
-    check('CL 🔴 ⑤ 経過が W 未満なら係数は「経過分」（W ではない）',
-        Math.abs(estimateConcurrentViewers(young, at(5), W) - 60 * 5) < 1e-6,
-        `${estimateConcurrentViewers(young, at(5), W)}（W を掛けると ${60 * W} になり倍に跳ねる）`)
+    // 🔴 **2026-08-10 に意味が変わった**（doc/09 項目CO）。若い番組は「レート × 経過分」ではなく
+    //    **累計来場者そのもの**になった（W 分たっていない＝まだ誰も帰っていない）。
+    //    以前の式は「直近2分のレート」を経過分へ引き伸ばしており、立ち上がりの山が過ぎた瞬間に
+    //    それ以前の人が計算から消えていた（実測: 来場70人の番組が推定5人）。
+    check('CL 🔴 ⑤ 経過が W 未満なら累計来場者そのもの',
+        Math.abs(estimateConcurrentViewers(young, at(5), W) - 100000) < 1e-6,
+        `${estimateConcurrentViewers(young, at(5), W)} / 累計=100000`)
     // ⚠️ 経過は W から導くこと。固定の分数を書くと、既定値を変えた時に落ちる（実際に踏んだ）。
     check('CL ⑤ 経過が W を超えたら係数は W',
         Math.abs(estimateConcurrentViewers(young, at(W * 2), W) - 60 * W) < 1e-6)
@@ -5235,6 +5348,7 @@ if (real) {
     await flippedTrap()
     console.log('')
     await recommendOrder()
+    await windowedConcurrent()
     await seededRateReplacement()
     await webAccessibleResourcesScope()
     await thumbUrlSurvivesFailedFill()
