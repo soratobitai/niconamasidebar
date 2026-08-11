@@ -5,6 +5,7 @@ import {
     commentWeightViewerFloor,
     commentBaseWeight,
     initialMomentumMinWindowMin,
+    viewerSampleStaleGraceMs,
 } from '../config/constants.js'
 
 /**
@@ -119,7 +120,12 @@ export function initialMomentum(info, now) {
 }
 
 /**
- * 来場者「だけ」の到着レートの初期値（1分あたり）。推定同接の材料。
+ * 来場者「だけ」の到着レートの初期値（1分あたり）。
+ *
+ * ⚠️ **2026-08-11 以降、推定同接はこれを使っていない**（doc/09 項目CQ）。
+ *    推定は来場者の履歴だけから計算する1本の式になり、レートの経路は要らなくなった。
+ *    `nextViewerRate` ともども、実機で到着の速さを覗くための値として残してある。
+ *    `momentum` と同じ扱い＝**消してよい候補**。
  *
  * `initialMomentum` との違いはコメントを足さないことだけ。分母の下限も同じものを使う
  * （入室ラッシュがそのままレートに化けるのを防ぐ。項目BG）。
@@ -139,26 +145,21 @@ export function initialViewerRate(info, now) {
 /**
  * 来場者「だけ」の到着レートを更新する（指数移動平均）。
  *
+ * ⚠️ **2026-08-11 以降、推定同接はこれを使っていない**（doc/09 項目CQ）。以下は経緯。
+ *    項目CL（新着がいきなり上位に入る）を仮置きの捨て方で直したが、
+ *    **観測前の到着を数えない**という本体の欠陥はレート側では直せなかった。
+ *    今は履歴そのものから計算している。この関数は覗き窓＝消してよい候補。
+ *
  * 🔴 **`momentum` とは別に持つこと。** `momentum` は `Δ来場者 + w×Δコメント` で、
- *    弾幕補正が入っている。推定同接に使うのは**純粋な到着レート**でなければならない
- *    （コメントが混ざると人数の推定として意味を失う）。
+ *    弾幕補正が入っている。人数の推定に使うなら**純粋な到着レート**でなければならない。
  *
  * 平滑化の理由・時定数は `nextMomentum` と同じ。ニコ生の統計は約60秒粒度でしか動かず、
  * 生の差分をそのまま順位に使うと跳ねる。
  *
  * 🔴 **仮置きの初回値は、実測が1つ取れたら混ぜずに捨てる**（2026-08-10・doc/09 項目CL）。
+ *    根拠の弱い値が20分居座ると「新着がいきなり上位に入り、じわじわ落ちる」動きになる。
  *
- *    初回は前回値が無いので `累計来場者 ÷ 経過分` で仮置きする。ところが推定同接は
- *    それに `min(W, 経過分)` を掛けるので**経過分どうしが打ち消し合い、
- *    推定同接＝累計来場者そのもの**になる。ニコ生の来場者は**入ってすぐ閉じた人も数える**ので、
- *    新着番組は実際の数倍で出る（実測の再現: 5分で 300 と表示、実際は約120）。
- *
- *    以前はこの仮置きを普通に混ぜていたため、**根拠の弱い値が20分居座って**
- *    「新着がいきなり上位に入り、じわじわ落ちる」動きになっていた。
- *    実測が1つでも取れたらそちらを信じる。落ち着くまで 約20分 → 約6分。
- *
- * ⚠️ **増分が 0 の周期では置き換えないこと。** 静かな番組が一発で 0 に落ち、
- *    順位が最下位へ吹き飛ぶ。0 の時は従来どおり均し、仮置きの印も残して次の機会を待つ。
+ * ⚠️ **増分が 0 の周期では置き換えないこと。** 静かな番組が一発で 0 に落ちる。
  *
  * @param {object|null} prev 前回保存したレコード（`viewerRate` と `_fetchedAt` を持つ）
  * @param {object} next 今回の programInfo
@@ -197,26 +198,13 @@ export function nextViewerRate(prev, next, now) {
  * なったため、本来の目的に戻した（2026-08-04 決定）。
  * これにより弾幕補正（`commentWeight`）は順位計算の経路から外れている。
  *
- * 【式】リトルの法則。
- * ```
- *   推定同接 = 到着レート(人/分) × min(W, 放送開始からの経過分)
- * ```
- * `W` は平均滞在時間（分）。`min` は「開始から W 分たっていない番組は、まだ誰も帰っていない
- * とみなす」ことを表す（若い番組では実質 `累計来場者` がそのまま同接になる）。
- *
- * 🔴 **W が順位に効く範囲を取り違えないこと。**
- *    - 経過が W を**超えている**番組どうし → 一律に W を掛けるだけなので**順位は変わらない**
- *    - 経過が W **未満**の番組が混ざると → その番組の係数は W ではなく「経過分」なので、
- *      **W を大きくすると、続いている番組が若い番組より上に来やすくなる**
- *
- *    つまり W のつまみは2つのことを同時に動かす:
- *      (1) ニコ生と Kick の釣り合い
- *      (2) ニコ生内部の「立ち上がったばかりの番組 vs 続いている番組」の釣り合い
- *
- *    2026-08-04 の設計時に (2) を見落として「W はニコ生内部の順位を変えない」と説明していた。
- *    検証で反例が出た（若5分/毎分30人 と 古60分/毎分10人 は W=10 と W=20 で順位が入れ替わる）。
- *
+ * 式そのものは `estimateFromArrivals` にある（場合分けの無い1本・doc/09 項目CQ）。
  * Kick は同接が実測で返るので、推定せずそのまま使う（呼び出し側で平滑化済みの値が入る）。
+ *
+ * 🔴 **W は「ニコ生と Kick の釣り合い」だけのつまみではない。**
+ *    W を大きくすると古い到着ほど生き残るので、**長く続いている番組が、立ち上がったばかりの
+ *    番組より上に来やすくなる**。ニコ生内部の順位も動く（2026-08-04 の設計時に見落とし、
+ *    検証で反例が出た）。
  *
  * @param {object} info programInfo
  * @param {number} now 現在時刻(ms)
@@ -224,75 +212,85 @@ export function nextViewerRate(prev, next, now) {
  * @returns {number} 推定同時視聴者数
  */
 /**
- * 直近 W 分に入ってきた人数。**推定同接の本体。**
+ * 推定同接の本体。**場合分けの無い1本の式**（2026-08-11・doc/09 項目CQ）。
  *
- * 【考え方】滞在時間が W 分なら、W 分以内に入った人はまだ居る。
- * つまり `累計来場(今) − 累計来場(W分前)` がそのまま同時視聴者数の推定になる。
+ * 【考え方】滞在時間を**平均 W の指数分布**とみなし、これまでに来た人ひとりずつを
+ * 「まだ居る確率 exp(-経過/W)」で数え上げる。
  *
- * 【3つの場合】
- *   1. 放送開始から W 分たっていない … 全員まだ居る → **累計来場者そのもの**
- *   2. 履歴が W 分ぶん揃っている     … 窓の両端の差
- *   3. 履歴が足りない（途中から見始めた番組）
- *        … 持っているぶんの増分を W へ引き伸ばす。**2分ではなく持っている全期間**を使うので
- *          従来よりはるかにましで、周期を重ねるほど 2 に近づく。
+ * ```
+ *   推定同接 = Σ（その区間に来た人数 × exp(-経過 / W)）
+ * ```
  *
- * @returns {number|null} 数えられなければ null（呼び出し側が従来の計算へ落ちる）
+ * 定常状態では **レート × W** に収束する（リトルの法則）。
+ *
+ * 🔴 **観測より前に来た人を必ず足すこと**（本項の要）。履歴に残っているのは
+ *    「サイドバーが見ていた間」の到着だけで、それ以前の到着は1件も入っていない。
+ *    旧実装はここを `span/W` の線形割り戻しで埋め合わせていたが、**減衰の形と違う**ので
+ *    観測が短いほど過小になった。実測（毎分5人・W=17・真値85）:
+ *
+ *      観測2分→16 / 5分→48 / 17分→46 / 30分→63 / 60分→75 / 120分→77
+ *
+ *    つまり表示は**サイドバーがその番組を何分見ているかで5倍変わる**。W は全カードへ同じ
+ *    倍率を掛けるだけなので、この偏りは目盛りでは直せない（校正しても合わない相手が残る）。
+ *    さらに「累計500人でも新規が止まれば 0」＝画面に「—」が出る原因でもあった。
+ *
+ *    観測前のぶんは、その番組自身の平均レート（観測開始時の累計 ÷ そこまでの放送時間）で
+ *    散らして同じように減衰させる。積分すると `レート × W × (e^(-a/W) − e^(-b/W))`。
+ *
+ * 🔴 **場合分けを戻さないこと。** 旧実装には「放送が W より若ければ累計そのもの」という枝が
+ *    あり、経過が W をまたぐ瞬間に段差ができた（実測: 300 → 186）。1本の式なら跳ねない。
+ *
+ * ⚠️ 履歴が1点も無い周期もこの式で通る（観測前の項だけが残る）。専用の代替計算は要らない。
+ *
+ * @param {object} info programInfo
+ * @param {number} now 現在時刻(ms)
+ * @param {number} W 平均滞在時間（分）
+ * @returns {number}
  */
-function arrivalsInWindow(info, now, W) {
+function estimateFromArrivals(info, now, W) {
     const cum = Number(info.viewers) || 0
     const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
-    const elapsedMin = Number.isFinite(beginAt) ? Math.max(0, (now - beginAt) / 60000) : NaN
 
-    // 1. 放送が W より若い＝まだ誰も帰っていない
-    if (Number.isFinite(elapsedMin) && elapsedMin <= W) return cum
-
-    const samples = Array.isArray(info.viewerSamples) ? info.viewerSamples : null
-    if (!samples || samples.length < 2) return null
-
-    // 🔴 **窓をきっぱり切らないこと**（2026-08-10・利用者報告「同接が急に消えて、しばらくすると戻る」）。
-    //    「W 分ちょうどで全員帰る」と扱うと、**直近 W 分に誰も入らなかった番組が 0 になる。**
-    //    実際には W より前に入った人も残っているので、0 は明らかに嘘。
-    //
-    //    滞在時間を**平均 W の指数分布**とみなし、古い到着ほど軽く数える。
-    //      推定同接 = Σ（その区間に入った人数 × exp(-経過 / W)）
-    //    一定の流入が続く定常状態では **レート × W** に収束するので、目盛りの校正はそのまま効く。
-    //    急に 0 へ落ちることも、窓の縁で段差ができることも無くなる。
-    const sorted = samples
-        .map((s) => [Number(s[0]), Number(s[1]) || 0])
+    const samples = (Array.isArray(info.viewerSamples) ? info.viewerSamples : [])
+        .map((s) => [Number(s && s[0]), Number(s && s[1]) || 0])
         .filter((s) => Number.isFinite(s[0]))
         .sort((a, b) => a[0] - b[0])
-    if (sorted.length >= 2) {
-        let sum = 0
-        for (let i = 1; i < sorted.length; i++) {
-            const arrived = Math.max(0, sorted[i][1] - sorted[i - 1][1])
-            if (!arrived) continue
-            // 区間の真ん中に入ってきたとみなす
-            const ageMin = (now - (sorted[i - 1][0] + sorted[i][0]) / 2) / 60000
-            sum += arrived * Math.exp(-Math.max(0, ageMin) / W)
-        }
-        // 最後のサンプル以降に増えたぶん（まだ履歴へ入っていない最新の増分）
-        sum += Math.max(0, cum - sorted[sorted.length - 1][1])
 
-        // ⚠️ 履歴が W 分に満たない間は、古い到着を取りこぼしている。持っている期間で割り戻す。
-        //    覆えていれば 1 倍（＝何もしない）。周期を重ねるほど 1 に近づく。
-        const spanMin = (now - sorted[0][0]) / 60000
-        const coverage = spanMin > 0 ? Math.min(1, spanMin / W) : 0
-        if (coverage > 0 && coverage < 1) sum /= coverage
-        if (sum > 0) return sum
+    // 🔴 **取得が止まっている間は時計を進めない**（doc/09 項目CQ）。
+    //    この式は `now` が進むだけで全部の項が減る。通信が切れている間じゅう
+    //    推定値が独りでに溶けていた（実測: 85 → 24 → 1 →「—」）。
+    // ⚠️ 凍らせるのは**取得できていない時だけ**。取得が成功していて誰も来ないなら
+    //    最新サンプルの時刻は進み続けるので、静かな番組はちゃんと減っていく。
+    const lastT = samples.length ? samples[samples.length - 1][0] : NaN
+    const at = Number.isFinite(lastT) ? Math.min(now, lastT + viewerSampleStaleGraceMs) : now
+
+    let sum = 0
+    for (let i = 1; i < samples.length; i++) {
+        const arrived = Math.max(0, samples[i][1] - samples[i - 1][1])
+        if (!arrived) continue
+        // 区間の真ん中に入ってきたとみなす
+        const ageMin = Math.max(0, (at - (samples[i - 1][0] + samples[i][0]) / 2) / 60000)
+        sum += arrived * Math.exp(-ageMin / W)
+    }
+    // まだ履歴へ入っていない最新の増分（可動点が今を指していれば 0）
+    if (samples.length) sum += Math.max(0, cum - samples[samples.length - 1][1])
+
+    // --- 観測より前に来た人 ---
+    const firstT = samples.length ? samples[0][0] : at
+    const before = samples.length ? samples[0][1] : cum
+    const beforeMin = Number.isFinite(beginAt) ? Math.max(0, (firstT - beginAt) / 60000) : 0
+    if (before > 0 && beforeMin > 0) {
+        const rate = before / beforeMin
+        const a = Math.max(0, (at - firstT) / 60000)  // 観測開始からの経過
+        const b = a + beforeMin                       // 放送開始からの経過
+        sum += rate * W * (Math.exp(-a / W) - Math.exp(-b / W))
     }
 
-    // 3. 窓を覆えていない。持っている全期間で数えて W へ引き伸ばす。
-    let oldest = null
-    for (const s of samples) {
-        const t = Number(s && s[0])
-        if (!Number.isFinite(t)) continue
-        if (!oldest || t < oldest[0]) oldest = [t, Number(s[1]) || 0]
-    }
-    if (!oldest) return null
-    const spanMin = (now - oldest[0]) / 60000
-    if (!(spanMin > 0)) return null
-    const got = Math.max(0, cum - oldest[1])
-    return got * (W / spanMin)
+    // 🔴 **累計来場者を超えないこと**（2026-08-10・利用者報告で発覚）。
+    //    「今見ている人数」が「これまでに入ってきた人数」を超えるのはあり得ない。
+    //    重みが1以下なので式の上では超えないが、**動かせない事実**なので明示して残す。
+    // ⚠️ 恣意的な係数ではないので、設定では変えられないようにする。
+    return cum > 0 ? Math.min(sum, cum) : sum
 }
 
 export function estimateConcurrentViewers(info, now, dwellMinutes) {
@@ -306,47 +304,8 @@ export function estimateConcurrentViewers(info, now, dwellMinutes) {
     }
 
     const W = Number(dwellMinutes) > 0 ? Number(dwellMinutes) : 1
-    const cum = Number(info.viewers) || 0
-
-    // 🔴 **「直近 W 分に入ってきた人数」を数える**（2026-08-10・doc/09 項目CO）。
-    //    滞在時間が W なら、W 分以内に入った人はまだ居る。これがリトルの法則の素直な形。
-    //
-    //    以前は「直近2分の到着レート × W」だった。**2分の観測を20倍に引き伸ばす**ので:
-    //      - 立ち上がりの山が過ぎた瞬間に、それ以前に入った人が計算から丸ごと消える
-    //        （実測: 来場70人の番組が推定5人）
-    //      - 一時的な集中がそのまま何十分も続く前提になる
-    //        （実測: 累計200人の番組が推定800人）
-    //      - 静かな数分に当たると半減する（実測: 2600 → 1800）
-    //    どれも「短い観測を長い時間へ引き伸ばす」ことが原因で、窓で数えれば起きない。
-    const windowed = arrivalsInWindow(info, now, W)
-    if (windowed !== null) {
-        return cum > 0 ? Math.min(windowed, cum) : windowed
-    }
-
-    // --- 履歴がまだ無い時だけ、従来の引き伸ばしで代用する ---
-    // ⚠️ 初回の1周期だけここへ来る。次の取得からは上の窓が使える。
-    const stored = Number(info.viewerRate)
-    const rate = Number.isFinite(stored) ? stored : initialViewerRate(info, now)
-    if (!(rate > 0)) return 0
-
-    const beginAt = info.onAirTime && info.onAirTime.beginAt ? Date.parse(info.onAirTime.beginAt) : NaN
-    // 開始時刻が不明なら定常とみなす（W をそのまま掛ける）。若い番組だと分からないので
-    // 過大にならない方へ倒したいところだが、beginAt が無いのは異常系で数も少ない。
-    const elapsedMin = Number.isFinite(beginAt) ? Math.max(0, (now - beginAt) / 60000) : W
-    const v = rate * Math.min(W, elapsedMin)
-
-    // 🔴 **累計来場者を超えないこと**（2026-08-10・利用者報告で発覚）。
-    //    「今見ている人数」が「これまでに入ってきた人数」を超えるのはあり得ない。
-    //    上限を入れていなかったため、**累計200人の番組で800人**と出ていた。
-    //
-    //    なぜ超えるのか: 到着レートは**直近数分**の値。そこへ滞在時間（最大45分）を掛けるので、
-    //    一時的に人が集まった瞬間を捕まえると、その勢いが何十分も続いた前提の数になる。
-    //    長い放送ほど「直近の勢い」と「これまでの実績」が乖離しやすい。
-    //
-    // ⚠️ これは恣意的な係数ではなく**動かせない事実**なので、設定では変えられないようにする。
-    const cap = Number(info.viewers) || 0
-    const capped = cap > 0 ? Math.min(v, cap) : v
-    return Number.isFinite(capped) && capped > 0 ? capped : 0
+    const v = estimateFromArrivals(info, now, W)
+    return Number.isFinite(v) && v > 0 ? v : 0
 }
 
 /**

@@ -142,6 +142,40 @@ export const initialMomentumMinWindowMin = 2;
 //    詳細は momentum.js の estimateConcurrentViewers を参照。
 export const defaultDwellMinutes = 17;
 
+// chrome.storage.local のうち「設定」であるキー。**保存はこの一覧に載っているものだけ。**
+//
+// 🔴 **一覧に無いキーを設定として書き戻さないこと**（2026-08-11・利用者報告「おすすめ順の
+//    点数が急に0に戻る」の原因）。`getOptions` は `chrome.storage.local.get()` を
+//    **キー未指定**で呼ぶので、返るのは設定だけでなく **storage 全体**（視聴履歴
+//    `watchCounts`、Kick のアイコンキャッシュ、自動移動の印…）。それをそのまま
+//    `options` として持ち回り、`saveOptions` が丸ごと書き戻していた。
+//
+//    実害: `options` が持っているのは**ページを開いた瞬間のスナップショット**なので、
+//    設定を1つ変えるだけで、その後に貯まった視聴点数が読み込み時点まで巻き戻る。
+//    タブは1つでよい。人気順の基準スライダーは 400ms 後に保存するため、
+//    **動かすたびに巻き戻る**（scripts/verify-sidebar-loop.mjs の CP 群で再現）。
+//
+// ⚠️ **設定を足したら必ずここへも足すこと。** 落とすと「その設定だけ保存されない」に
+//    なる。main.js / kickPage.js の defaultOptions と一致しているかは検証 CP-1 が見る。
+export const optionKeys = [
+    'programsSort',
+    'autoOpen',
+    'updateProgramsInterval',
+    'sidebarWidth',
+    'isOpenSidebar',
+    'sidebarTheme',
+    'autoNextProgram',
+    'animatedThumbnail',
+    'kickDisplayMode',
+    'kickActiveTab',
+    'dwellMinutes',
+    'cardSize',
+    'sidebarPlacement',
+    // 目盛り校正の移行済みフラグ。設定画面には出ないが、設定と一緒に永続化する必要がある
+    // （落とすと毎回移行が走る）。storage.js の DWELL_SCALE_MIGRATED_KEY と同じ文字列。
+    'dwellScaleV3',
+];
+
 // おすすめ順で覚えておく配信者の数の上限。**無制限にしないこと。**
 // フォローが入れ替わっても記録だけが増え続ける。落とすのは「最後に見たのが古い順」。
 // 500件で保存はおよそ数十KB。chrome.storage.local の余裕から見て十分小さい。
@@ -153,8 +187,10 @@ export const watchHistoryMaxOwners = 500;
 // 🔴 **上限を必ず設けること。** 付けっぱなしのタブが一晩で何十点も稼ぐと、
 //    一度も見ていない配信者が上位に居座る。
 // ⚠️ 刻みと上限はここだけ。実機の感触で動かす前提の値。
-export const watchPointIntervalMs = 5 * 60 * 1000; // 5分ごとに1点
-export const watchPointMaxPerVisit = 5;            // 1回の視聴で加点できる上限（開いた分を除く）
+// ⚠️ **満点までの時間は「刻み × 上限」。** 片方だけ動かすと意味が変わる
+//    （2026-08-11・利用者判断で 25分満点 → **60分満点**。刻みを 5分 → 12分にした）。
+export const watchPointIntervalMs = 12 * 60 * 1000; // 12分ごとに1点（× 上限5 = 60分で満点）
+export const watchPointMaxPerVisit = 5;             // 1回の視聴で加点できる上限（開いた分を除く）
 
 // 「人気順の基準」スライダーの目盛り（分）。**等間隔にしないこと。**
 // W の効き方は対数的で、5→10 の差は大きいが 40→45 はほぼ分からない。
@@ -178,7 +214,18 @@ export const viewerSampleMinGapMs = 2 * 60 * 1000;  // 2分
 // 目盛りの最大（150分）より少し長く持つ。これ以上古いものは捨てる。
 export const viewerSampleMaxAgeMs = 170 * 60 * 1000;
 // 1番組あたりの上限。間引きが効かない異常時の歯止め。
+// ⚠️ 確定点は上の間隔ちょうどで並ぶので、170分 ÷ 2分 = 85点。上限はその少し上に置く。
 export const viewerSampleMaxCount = 90;
+
+// 取得が止まってから、推定同接の時計を進めるのをやめるまでの猶予（doc/09 項目CQ）。
+//
+// 🔴 **これが無いと、通信が切れている間じゅう推定値が独りでに減っていく。**
+//    推定は「各到着を exp(-経過/W) で重み付けした和」なので、`now` だけが進むと
+//    全部の項が減る。実測（間隔120秒・切断）: 85 → 24 → 1 →「—」。
+//    番組は放送中で人も居るのに、こちらの通信事情だけで数字が溶ける。
+// ⚠️ 最長の更新間隔（120秒）＋ゆらぎ を超える値にすること。短いと正常運転でも凍る。
+// ⚠️ 逆に「静かで誰も来ない」場合は取得は成功しているので凍らない（＝ちゃんと減る）。
+export const viewerSampleStaleGraceMs = 4 * 60 * 1000;  // 4分
 
 // Kick の同接（実測値）を均す時定数。生値は大きく飛ぶ（実測 155〜1275）ので、
 // そのまま順位に使うとカードが跳ねる。ニコ生側の平滑化と揃えて momentumTauMs を使う。

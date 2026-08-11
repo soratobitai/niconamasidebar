@@ -1,9 +1,30 @@
-import { maxSaveProgramInfos, dwellMinutesScale, defaultDwellMinutes, viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount } from '../config/constants.js'
+import { maxSaveProgramInfos, dwellMinutesScale, defaultDwellMinutes, viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount, optionKeys } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
 import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
 
 /** 目盛り校正の移行が済んだ印。**消さないこと**（消すと毎回移行が走る）。 */
 const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV3'
+
+/**
+ * 設定として保存してよいキーだけを取り出す。**storage へ書く手前の唯一の関所。**
+ *
+ * 🔴 **`getOptions` の戻り値をそのまま storage へ書かないこと**（2026-08-11・doc/09 項目CP）。
+ *    あれは `chrome.storage.local.get()` をキー未指定で呼んだ結果＝**storage 全体**であり、
+ *    視聴履歴 `watchCounts` や Kick のアイコンキャッシュまで混ざっている。
+ *    しかも**ページを開いた瞬間のスナップショット**なので、書き戻すとその後に他の書き手が
+ *    足したものが消える（利用者報告「おすすめ順の点数が急に0に戻る」の正体）。
+ *
+ * ⚠️ 値が無いキーは**書かない**。`undefined` を渡すと storage に null が入り、
+ *    次回の `{...defaultOptions, ...stored}` で既定値を上書きしてしまう。
+ * @param {Record<string, any>} obj
+ * @returns {Record<string, any>}
+ */
+function pickOptionKeys(obj) {
+    const out = {}
+    if (!obj) return out
+    for (const k of optionKeys) if (obj[k] !== undefined) out[k] = obj[k]
+    return out
+}
 
 /**
  * 来場者の履歴に1点足す。古いものと近すぎるものは捨てる。
@@ -23,12 +44,24 @@ function appendViewerSample(prev, viewers, now) {
     const list = Array.isArray(prev) ? prev.filter(
         (s) => Array.isArray(s) && Number.isFinite(Number(s[0])) && Number.isFinite(Number(s[1])),
     ) : []
-    const last = list.length ? list[list.length - 1] : null
-    // 近すぎる点は足さない（間引き）。ただし最後の1点は最新の値へ更新しておく。
-    if (last && now - Number(last[0]) < viewerSampleMinGapMs) {
-        list[list.length - 1] = [Number(last[0]), viewers]
+    // 末尾は**可動点**。毎回 `[now, 今の累計]` へ進める。その手前が最後の確定点。
+    //
+    // 🔴 **時刻を据え置いたまま値だけ更新しないこと**（2026-08-11・doc/09 項目CQ）。
+    //    旧実装は `[last[0], viewers]` と書いていた。すると「その時刻に累計はこれだった」が
+    //    嘘になり、**次の点との差分＝その区間に来た人数が足りなくなる。**
+    //    しかもいちばん重みの大きい直近の区間で起きるので、推定が常に1割ほど低く出た
+    //    （実測: 真値85に対し 77 で頭打ち。観測を始めた直後は 16）。
+    //
+    // ⚠️ 確定させるのは「可動点が最後の確定点から間隔ぶん離れたら」。可動点の**今の時刻**で
+    //    判定すること。`now` で判定すると確定点どうしが間隔より詰まり、
+    //    170分ぶん持つと上限（`viewerSampleMaxCount`）に当たって古い方から落ちる。
+    const n = list.length
+    if (n < 2) {
+        list.push([now, viewers])                    // 1点目＝観測の起点、2点目＝可動点
+    } else if (Number(list[n - 1][0]) - Number(list[n - 2][0]) >= viewerSampleMinGapMs) {
+        list.push([now, viewers])                    // 可動点が離れた → そこで確定させ、新しい可動点を作る
     } else {
-        list.push([now, viewers])
+        list[n - 1] = [now, viewers]                 // まだ近い → 可動点を今へ進める
     }
     const cutoff = now - viewerSampleMaxAgeMs
     const fresh = list.filter((s) => Number(s[0]) >= cutoff)
@@ -94,8 +127,10 @@ export async function getOptions(defaultOptions = {}) {
 
         const merged = migrateOptions({ ...defaultOptions, ...stored })
 
+        // 🔴 **書き戻すのは設定キーだけ。** `merged` は storage 全体を含んでいるので、
+        //    そのまま set すると読み込み時点のスナップショットで他の書き手を上書きする。
         await new Promise((resolve, reject) => {
-            chrome.storage.local.set(merged, () => {
+            chrome.storage.local.set(pickOptionKeys(merged), () => {
                 if (chrome.runtime.lastError) {
                     reject(chrome.runtime.lastError)
                 } else {
@@ -130,7 +165,9 @@ export async function getOptions(defaultOptions = {}) {
 const UI_STATE_KEYS = ['isOpenSidebar', 'sidebarWidth']
 
 export async function saveOptions(options) {
-    const toSave = { ...options }
+    // 🔴 **設定キーだけを取り出してから書く**（doc/09 項目CP）。呼び出し側が渡してくるのは
+    //    `getOptions` の戻り値＝storage 全体のスナップショットで、視聴履歴などが混ざっている。
+    const toSave = pickOptionKeys(options)
     for (const k of UI_STATE_KEYS) delete toSave[k]
     return new Promise((resolve, reject) => {
         chrome.storage.local.set(toSave, () => {

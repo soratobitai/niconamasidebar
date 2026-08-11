@@ -686,6 +686,13 @@ async function recommendOrder() {
         '上限=' + watchPointMaxPerVisit)
     check('CM 加点の間隔が現実的（分単位）',
         watchPointIntervalMs >= 60000, watchPointIntervalMs + 'ms')
+    // 🔴 **満点までの時間を固定する**（利用者判断・2026-08-11: 25分 → 60分）。
+    //    満点は「刻み × 上限」で決まるので、**どちらか片方を動かしただけで黙って変わる。**
+    //    間隔にも上限にも個別のガードはあるが、その積は誰も見ていなかった。
+    const fullMarksMin = (watchPointIntervalMs / 60000) * watchPointMaxPerVisit
+    check('CM 🔴 1回の視聴が満点になるまで 60分',
+        Math.abs(fullMarksMin - 60) < 1e-9,
+        `${fullMarksMin}分（${watchPointIntervalMs / 60000}分ごと × 上限${watchPointMaxPerVisit}）`)
     // 裏タブでも加点する（利用者判断・2026-08-10。音声だけ聞く使い方があるため）。
     check('CM 裏タブでも加点する（可視判定で止めない）',
         !/visibilityState/.test(wh), '止めると音声だけ聞いている時間が入らない')
@@ -765,10 +772,15 @@ async function windowedConcurrent() {
         return s
     }
 
-    // --- ① 放送が W より若い＝まだ誰も帰っていない ---
-    check('CO ① 放送が W より若ければ累計来場者そのもの',
-        Math.abs(est(prog(70, 3, [[T - 180000, 0], [T - 120000, 65]])) - 70) < 1e-6,
-        `${est(prog(70, 3, [[T - 180000, 0], [T - 120000, 65]]))}（引き伸ばすと 8 になっていた）`)
+    // --- ① 放送が W より若い＝まだほとんど誰も帰っていない ---
+    // ⚠️ **累計ぴったりを要求しないこと**（2026-08-11・doc/09 項目CQ）。
+    //    場合分け（「W より若ければ累計そのもの」）を持っていた頃は完全一致だったが、
+    //    その枝は経過が W をまたぐ瞬間に段差を作っていたので消した。今は経過ぶんの減衰が
+    //    連続して乗る。ぴったりを求めると場合分けが復活し、段差も一緒に戻ってくる。
+    const youngInfo = prog(70, 3, [[T - 180000, 0], [T - 120000, 65]])
+    check('CO ① 放送が W より若ければ累計来場者に近い',
+        est(youngInfo) >= 70 * 0.85 && est(youngInfo) <= 70 + 1e-9,
+        `${est(youngInfo).toFixed(1)} / 累計70（引き伸ばすと 8 になっていた）`)
 
     // --- 🔴 ② 定常状態では レート×W に収束する（目盛りの校正が保たれる） ---
     const st12 = est(prog(12 * 180, 180, steady(12, 180)))
@@ -882,61 +894,76 @@ async function seededRateReplacement() {
     check('CL ④ 実測どうしは均す（1回で飛びつかない）',
         fourth.rate > 12 && fourth.rate < 60, `rate=${fourth.rate}`)
 
-    // --- 🔴 ⑤ 若い番組を抑えるクランプは残す（外すと倍になる） ---
-    // ⚠️ **累計来場者を大きくしておくこと。** ここで見たいのは「係数が経過分か W か」だけ。
-    //    累計が小さいと上限（項目⑦）に当たって、係数の違いが見えなくなる（実際に踏んだ）。
-    const young = { ...prog(100000), viewerRate: 60 }
+    // --- ⑤⑥⑦ 推定同接そのもの ---
+    // 🔴 **2026-08-11 に入口が変わった**（doc/09 項目CQ）。推定は `viewerRate` を読まなくなり、
+    //    来場者の履歴（`viewerSamples`）だけから計算する1本の式になった。
+    //    ⚠️ ここを「`viewerRate` を渡して確かめる」形に戻さないこと。**その値は今どこにも効かない**ので、
+    //       検査は通るのに実物は別の計算をしている、といういちばん悪い形になる。
+    //    ①〜④（`nextViewerRate` 自体）は覗き窓として残っているので引き続き見る。
     const W = defaultDwellMinutes
-    // 🔴 **2026-08-10 に意味が変わった**（doc/09 項目CO）。若い番組は「レート × 経過分」ではなく
-    //    **累計来場者そのもの**になった（W 分たっていない＝まだ誰も帰っていない）。
-    //    以前の式は「直近2分のレート」を経過分へ引き伸ばしており、立ち上がりの山が過ぎた瞬間に
-    //    それ以前の人が計算から消えていた（実測: 来場70人の番組が推定5人）。
-    check('CL 🔴 ⑤ 経過が W 未満なら累計来場者そのもの',
-        Math.abs(estimateConcurrentViewers(young, at(5), W) - 100000) < 1e-6,
-        `${estimateConcurrentViewers(young, at(5), W)} / 累計=100000`)
+    /** 一定レートで増える履歴を作る。`[時刻, その時点の累計]` の並び。 */
+    const samplesAt = (perMin, fromMin, toMin, base = 0) => {
+        const s = []
+        for (let m = fromMin; m <= toMin; m += 2) s.push([at(m), base + Math.round(perMin * (m - fromMin))])
+        return s
+    }
+    const withSamples = (viewers, samples) => ({ ...prog(viewers), viewerSamples: samples })
+
+    // --- 🔴 ⑤ 若い番組が沈まないこと（旧: 来場70人の番組が推定5人） ---
+    // 経過が W 未満＝まだ誰も帰っていないはずなので、累計に近い値が出る。
+    // ⚠️ **累計ぴったりを要求しないこと。** 場合分けを持っていた頃は完全一致だったが、
+    //    今は経過ぶんの減衰が乗るので少しだけ小さい。ぴったりを求めると場合分けが復活する。
+    const youngCum = 700
+    const youngEst = estimateConcurrentViewers(
+        withSamples(youngCum, samplesAt(100, 0, 6)), at(7), W)
+    check('CL 🔴 ⑤ 経過が W 未満の番組は累計に近い（沈まない）',
+        youngEst >= youngCum * 0.8 && youngEst <= youngCum + 1e-9,
+        `${youngEst.toFixed(0)} / 累計=${youngCum}。旧実装の引き伸ばしでは 5 になっていた`)
+
+    // 定常に達した番組は レート×W に寄る（目盛りの校正が意味を持つ条件）。
     // ⚠️ 経過は W から導くこと。固定の分数を書くと、既定値を変えた時に落ちる（実際に踏んだ）。
-    check('CL ⑤ 経過が W を超えたら係数は W',
-        Math.abs(estimateConcurrentViewers(young, at(W * 2), W) - 60 * W) < 1e-6)
+    const steadyEst = estimateConcurrentViewers(
+        withSamples(60 * 200, samplesAt(60, 0, 200)), at(200), W)
+    check('CL ⑤ 定常に達した番組は レート×W に寄る',
+        Math.abs(steadyEst - 60 * W) < 60 * W * 0.1, `${steadyEst.toFixed(0)} / 期待 ${60 * W}`)
 
     // --- 🔴 ⑦ 累計来場者を超えないこと（利用者報告・2026-08-10） ---
-    // 到着レートは直近数分の値。そこへ滞在時間（最大45分）を掛けるので、一時的に人が
-    // 集まった瞬間を捕まえると **累計200人の番組で800人** のような数が出ていた。
     // 「今見ている人数」が「これまでに入ってきた人数」を超えるのはあり得ない。
-    const burst = { ...prog(200), viewerRate: 18 } // 直近18人/分 × 45分 = 810 になる形
+    // 直近だけ人が集中した番組（残り時間ぶん引き伸ばすと累計を超える形）で確かめる。
+    const burstSamples = samplesAt(0, 0, 176, 164).concat([[at(178), 200], [at(180), 200]])
     for (const w of [10, 45]) {
-        const got = estimateConcurrentViewers(burst, at(180), w)
+        const got = estimateConcurrentViewers(withSamples(200, burstSamples), at(180), w)
         check(`CL 🔴 ⑦ 累計来場者を超えない（滞在時間 ${w}分）`,
             got <= 200 + 1e-9, `推定=${got.toFixed(0)} / 累計=200`)
     }
-    check('CL ⑦ 上限に当たらない番組は素通し',
-        Math.abs(estimateConcurrentViewers({ ...prog(100000), viewerRate: 12 }, at(180), 10) - 120) < 1e-6)
+    // 🔴 上限が**常時**効いていたら、それは推定ではなく累計を出しているだけ。素通しも確かめる。
+    const passThrough = estimateConcurrentViewers(
+        withSamples(12 * 400, samplesAt(12, 0, 400)), at(400), 10)
+    check('CL ⑦ 上限に当たらない番組は素通し（上限が常時効いていない）',
+        Math.abs(passThrough - 120) < 120 * 0.1 && passThrough < 12 * 400,
+        `${passThrough.toFixed(0)} / 期待 120・累計 ${12 * 400}`)
     // ⚠️ Kick は実測値。上限（累計来場者）を持たないので、この処理より前に返ること。
     check('CL ⑦ Kick は累計0でも実測値がそのまま出る',
         estimateConcurrentViewers({ service: 'kick', viewers: 0, concurrentViewers: 900 }, at(180), 10) === 900,
         'Kick に来場者の概念は無い。上限を当てると 0 になる')
 
     // --- 🔴 ⑥ 通しで、数周期のうちに真値へ寄ること（回帰の砦） ---
-    // 🔴 **ここで見たいのは「仮置きをどれだけ早く手放すか」だけ。** 既定の滞在時間には依存させない
-    //    （2026-08-10 に既定を 10分→40分 へ校正した時、実装は正しいのにここが落ちた）。
-    //    係数 min(W, 経過) が伸びきるまでの時間が混ざると、測っているものが変わってしまう。
-    const Wt = 10
     // 立ち上がりで300人 → 以後 12人/分。本当の同接は 12 × Wt = 120。
+    // 🔴 **立ち上がりの山を必ず入れること。** 項目CL の症状は「新着がいきなり上位に入り、
+    //    じわじわ落ちる」。山を入れないと、寄るのが速いのか単に山が無いのか区別が付かない。
+    // ⚠️ 落ち着くまでの時間は W の数倍かかる（山が減衰しきるのに必要）。**W と無関係にはできない。**
+    const Wt = 10
     const TRUE = 12 * Wt
-    // ⚠️ 累計来場者は上限（項目⑦）に当たらない大きさにしておく。当たると収束を測れない。
-    const arrivals = (m) => (m <= 5 ? 60 * m : 300 + 12 * (m - 5)) + 100000
-    let prev = null
+    const arrivals = (m) => (m <= 5 ? 60 * m : 300 + 12 * (m - 5))
     let settledAt = null
-    for (let m = 5; m <= 25; m += 2) {
-        const info = prog(arrivals(m))
-        const r = nextViewerRate(prev, info, at(m))
-        info.viewerRate = r.rate
-        info.viewerRateSeeded = r.seeded
-        const est = estimateConcurrentViewers(info, at(m), Wt)
-        if (settledAt === null && m > 5 && Math.abs(est - TRUE) <= TRUE * 0.05) settledAt = m
-        prev = { ...info, _fetchedAt: at(m) }
+    for (let m = 6; m <= 60; m += 2) {
+        const s = []
+        for (let k = 0; k <= m; k += 2) s.push([at(k), arrivals(k)])
+        const est = estimateConcurrentViewers(withSamples(arrivals(m), s), at(m), Wt)
+        if (settledAt === null && Math.abs(est - TRUE) <= TRUE * 0.05) settledAt = m
     }
-    check('CL 🔴 ⑥ 開始から 12分以内に真値の±5%へ入る（以前は20分以上かかっていた）',
-        settledAt !== null && settledAt <= 12, `落ち着いた時刻=${settledAt}分 / 真値=${TRUE}`)
+    check('CL 🔴 ⑥ 立ち上がりの山が抜けて真値の±5%へ入る', settledAt !== null && settledAt <= 4 * Wt,
+        `落ち着いた時刻=${settledAt}分 / 真値=${TRUE} / 上限 ${4 * Wt}分（滞在時間の4倍）`)
 
     // --- ⑦ 保存側が印を持ち回すこと（落とすと①〜⑥が全部無意味になる） ---
     const { readFileSync } = await import('fs')
@@ -1551,7 +1578,35 @@ async function momentumRanking() {
     //    **初期値（開始からの平均で立ち上がった値）との比**で見れば、W が変わっても意味が保たれる。
     const base900 = ap('900'); const base901 = ap('901')
     let v900 = 30000; let v901 = 100
-    for (let cycle = 1; cycle <= 3; cycle++) {
+
+    // 🔴 **ハーネスが本当に時間を進めているか先に確かめる**（2026-08-11・doc/09 項目CQ）。
+    //    `ageStorage` が `viewerSamples` の時刻を取り残していた時、推定同接から見ると
+    //    1秒も経っておらず減衰が起きない。**実装が壊れていても下の検査が通ってしまう**ので、
+    //    経過を作れていること自体をここで固定する。
+    {
+        const before = JSON.parse(globalThis.localStorage.getItem('programInfos'))
+            .find((p) => p.id === 'lv900')
+        h.ageStorage(60000)
+        const after = JSON.parse(globalThis.localStorage.getItem('programInfos'))
+            .find((p) => p.id === 'lv900')
+        const bs = before && before.viewerSamples, as = after && after.viewerSamples
+        check('AY 前提: ageStorage が来場者履歴の時刻も進める（進めないと減衰が起きない）',
+            Array.isArray(bs) && Array.isArray(as) && bs.length === as.length
+            && bs.every((s, i) => Math.abs((Number(s[0]) - Number(as[i][0])) - 60000) < 2),
+            `履歴 ${bs ? bs.length : 0} 点。ここが落ちたら以降の AY は測定になっていない`)
+    }
+    // 🔴 **逆転までの周期数を 3 に固定しないこと**（2026-08-11・doc/09 項目CQ）。
+    //    推定同接は「滞在時間 W で減衰する」モデルなので、**lv900 の 2833人 が 3分で消えることは
+    //    原理的にありえない**（e^(-3/17) = 0.84 ＝ 3分では16%しか減らない）。
+    //    3周期で逆転していたのは、観測前の到着を数え落としていた旧実装の副作用にすぎない
+    //    ＝「山が過ぎた瞬間に過去の到着が丸ごと消える」（項目CO で直したはずの症状）。
+    //
+    //    見るべきは「**逆転するか**」と「**W で決まる時間内に逆転するか**」。実測 8分（W=17）。
+    //    上限は W と結び付けておく（目盛りを変えても意味が保たれる。固定の分数は書かない）。
+    const { defaultDwellMinutes } = await import('../src/config/constants.js')
+    const LIMIT = Math.ceil(defaultDwellMinutes)   // 分＝周期数（1周期1分で回す）
+    let flippedAt = null
+    for (let cycle = 1; cycle <= LIMIT + 5; cycle++) {
         h.ageStorage(60000)
         v900 += 10; v901 += 300
         h.state.followPrograms = [
@@ -1560,18 +1615,22 @@ async function momentumRanking() {
         ]
         await run()
         if (cycle === 1) {
-            check('AY 1周期目はまだ暖機中（開始からの平均から寄り始める）',
+            check('AY 1周期目から、静かになった方は下降・伸びている方は上昇',
                 ap('900') < base900 && ap('901') > base901,
                 `lv900 ${ap('900').toFixed(1)}（初期${base900.toFixed(1)}から下降中）`
                 + ` / lv901 ${ap('901').toFixed(1)}（初期${base901.toFixed(1)}から上昇中）`)
         }
+        if (flippedAt === null && ids() === '901,900') flippedAt = cycle
     }
-    check('AY 🔴 長時間放送より、いま伸びている番組が上に来る', ids() === '901,900', ids())
-    // 3周期後は「初期値(167 / 10)」から「実レート(10 / 300)」の側へ十分寄っているはず。
-    // ぴったりの値ではなく“どちらの側に居るか”で見る（時定数を変えても意味が壊れないように）。
-    check('AY 🔴 スコアが「開始からの平均」ではなく「直近の勢い」に寄る',
+    check('AY 🔴 長時間放送より、いま伸びている番組が上に来る',
+        flippedAt !== null, `${flippedAt ?? '逆転しなかった'} 周期目 / ${ids()}`)
+    check('AY 🔴 逆転が滞在時間の範囲で起きる（何十分も居座らない）',
+        flippedAt !== null && flippedAt <= LIMIT, `${flippedAt} 周期目 / 上限 ${LIMIT}（W=${defaultDwellMinutes}分）`)
+    // 「開始からの平均」に貼り付いていないこと。伸びている方は実レート側へ、
+    // 静かになった方は下へ、はっきり動いているはず。
+    check('AY 🔴 スコアが「開始からの平均」に貼り付かない',
         ap('901') > ap('900') && ap('900') < base900 * 0.6 && ap('901') > base901 * 3,
-        `3周期後: lv901=${ap('901').toFixed(1)}（初期${base901.toFixed(1)}の3倍超へ）`
+        `lv901=${ap('901').toFixed(1)}（初期${base901.toFixed(1)}の3倍超へ）`
         + ` / lv900=${ap('900').toFixed(1)}（初期${base900.toFixed(1)}の6割未満へ）`
         + ' ※旧スコア（開始からの平均）なら、どちらも初期値のまま動かず逆転しない')
     check('AY 第2キー data-begin-at が両方のカードに入っている',
@@ -2768,6 +2827,267 @@ async function cardIdentity() {
  *   更新ボタンのローディング / 境界線ドラッグでの幅変更 / 開いた時の矢印の向き /
  *   「自動で開く=ON」/ Esc で設定を閉じる / 取得失敗の案内表示
  */
+/**
+ * CQ: 推定同接（doc/09 項目CQ）。**実コードを回して数字で確かめる。**
+ *
+ * 🔴 いちばん大事な不変条件は「**同じ番組なら、サイドバーが何分見ていても同じ数字**」。
+ *    ここが崩れると、表示は「観測時間」を測っていることになり、W の校正が永久に収束しない。
+ */
+async function concurrentEstimate() {
+    console.log('=== CQ 推定同接 ===')
+    const { upsertProgramInfos } = await import('../src/services/storage.js')
+    const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
+    const { viewerSampleMinGapMs, viewerSampleStaleGraceMs } = await import('../src/config/constants.js')
+
+    const MIN = 60000
+    const T0 = 1_700_000_000_000
+
+    /**
+     * 番組を1本まわす。`cumAt(観測分)` が累計来場者、null なら取得失敗（その周期は書かない）。
+     * @returns {{shown:number[], last:object}} 周期ごとの表示値
+     */
+    function run({ cumAt, startElapsedMin, obsMin, intervalSec = 30, W = 17 }) {
+        globalThis.localStorage.setItem('programInfos', '[]')
+        const beginAt = new Date(T0 - startElapsedMin * MIN).toISOString()
+        const shown = []
+        let info = null
+        for (let i = 0; i * intervalSec <= obsMin * 60; i++) {
+            const now = T0 + i * intervalSec * 1000
+            const cum = cumAt((i * intervalSec) / 60)
+            if (cum !== null) {
+                info = { id: 'lv1', viewers: cum, comments: 0, onAirTime: { beginAt }, _source: 'followApi' }
+                const real = Date.now
+                Date.now = () => now
+                try { upsertProgramInfos([info]) } finally { Date.now = real }
+            }
+            if (info) shown.push(estimateConcurrentViewers(info, now, W))
+        }
+        return { shown, last: info }
+    }
+
+    // --- 1. 観測時間で値が変わらないこと（本命） ---
+    // 毎分5人・W=17 → 真値 85。開始から120分たっている番組を、2分見た時と120分見た時で比べる。
+    const steady = (obs) => run({
+        cumAt: (m) => 600 + Math.round(m * 5), startElapsedMin: 120, obsMin: obs,
+    }).shown.slice(-1)[0]
+    const short = steady(2)
+    const long = steady(120)
+    check('CQ 🔴 観測2分でも120分でも同じ値になる',
+        Math.abs(short - long) / long < 0.1, `2分=${short.toFixed(0)} / 120分=${long.toFixed(0)}`)
+    check('CQ 🔴 定常番組は「到着レート×W」に一致する（真値85）',
+        Math.abs(long - 85) / 85 < 0.1, `${long.toFixed(1)}`)
+    check('CQ 観測を始めた直後から真値に近い',
+        Math.abs(short - 85) / 85 < 0.1, `${short.toFixed(1)}。旧実装はここが 16 だった`)
+
+    // --- 2. 静かな番組が 0（画面では「—」）にならないこと ---
+    const quiet = run({ cumAt: () => 500, startElapsedMin: 60, obsMin: 60 })
+    check('CQ 🔴 新規が来ない番組でも 0 にならない（「—」が出ない）',
+        quiet.shown.every((v) => v > 0),
+        `最小 ${Math.min(...quiet.shown).toFixed(1)}。0 になると画面は「—」`)
+    check('CQ ただし新規が来なければ数字は減っていく',
+        quiet.shown[quiet.shown.length - 1] < quiet.shown[0] * 0.6,
+        `${quiet.shown[0].toFixed(0)} → ${quiet.shown[quiet.shown.length - 1].toFixed(0)}`)
+
+    // --- 3. 段差が無いこと（旧実装は経過が W をまたぐ瞬間に 300→186 と落ちた） ---
+    const young = run({ cumAt: (m) => Math.round((5 + m) * 20), startElapsedMin: 5, obsMin: 40 })
+    let worstJump = 0
+    for (let i = 1; i < young.shown.length; i++) {
+        const a = young.shown[i - 1], b = young.shown[i]
+        if (a > 0) worstJump = Math.max(worstJump, Math.abs(b - a) / a)
+    }
+    check('CQ 🔴 経過が W をまたいでも段差ができない', worstJump < 0.15,
+        `1周期の最大変化 ${(worstJump * 100).toFixed(1)}%`)
+
+    // --- 4. 累計来場者を超えないこと ---
+    const burst = run({ cumAt: (m) => (m < 2 ? 200 : 205), startElapsedMin: 3, obsMin: 30 })
+    check('CQ 🔴 推定が累計来場者を超えない',
+        burst.shown.every((v) => v <= 205 + 1e-9), `最大 ${Math.max(...burst.shown).toFixed(1)} / 累計 205`)
+
+    // --- 5. 通信が切れている間に値が溶けないこと ---
+    const cut = run({
+        cumAt: (m) => (m < 20 ? 600 + Math.round(m * 5) : null),
+        startElapsedMin: 120, obsMin: 90, intervalSec: 120,
+    })
+    const tail = cut.shown.slice(-10)
+    check('CQ 🔴 取得できない間は値が減り続けない（猶予後に凍る）',
+        Math.abs(Math.max(...tail) - Math.min(...tail)) < 0.5,
+        `最後の10周期: ${Math.min(...tail).toFixed(1)}〜${Math.max(...tail).toFixed(1)}`)
+    check('CQ 凍る前に猶予がある（正常な間隔では凍らない）',
+        viewerSampleStaleGraceMs > 120000, `${viewerSampleStaleGraceMs / 1000}秒 > 最長間隔120秒`)
+
+    // --- 6. 履歴の持ち方（可動点） ---
+    const rec = JSON.parse(globalThis.localStorage.getItem('programInfos'))[0]
+    const s = rec.viewerSamples
+    check('CQ 履歴を持っている', Array.isArray(s) && s.length >= 3, `${s ? s.length : 0} 点`)
+    // 🔴 確定点は間隔ちょうどで並ぶこと。詰まると 170分ぶんが上限（90点）に収まらない。
+    let tooClose = 0
+    for (let i = 1; i < s.length - 1; i++) if (s[i][0] - s[i - 1][0] < viewerSampleMinGapMs) tooClose++
+    check('CQ 確定点の間隔が詰まっていない', tooClose === 0,
+        `${tooClose} 箇所。詰まると古い点から捨てられ、観測前の補正が効かなくなる`)
+
+    const q = run({ cumAt: (m) => 100 + Math.round(m * 3), startElapsedMin: 30, obsMin: 10 })
+    const qs = JSON.parse(globalThis.localStorage.getItem('programInfos'))[0].viewerSamples
+    const lastT = qs[qs.length - 1][0]
+    const lastCum = qs[qs.length - 1][1]
+    check('CQ 🔴 末尾は可動点（時刻も値も最新）', lastCum === q.last.viewers,
+        `末尾=${lastCum} / 今の累計=${q.last.viewers}。時刻を据え置くと直近の到着が数え落ちる`)
+    check('CQ 末尾の時刻も進んでいる', lastT === T0 + 10 * MIN, `${(lastT - T0) / MIN} 分`)
+
+    // --- 7. Kick は実測値をそのまま返す（推定に巻き込まない） ---
+    check('CQ Kick は平滑化済みの実測値をそのまま返す',
+        estimateConcurrentViewers({ service: 'kick', concurrentViewersSmoothed: 1234, viewers: 0 }, T0, 17) === 1234)
+    check('CQ Kick は平滑化前しか無ければそれを返す',
+        estimateConcurrentViewers({ service: 'kick', concurrentViewers: 77 }, T0, 17) === 77)
+
+    // --- 8. 壊れた入力で NaN を出さない ---
+    for (const [name, bad] of [
+        ['空', {}],
+        ['来場者が文字列', { viewers: 'ほげ', onAirTime: { beginAt: new Date(T0).toISOString() } }],
+        ['開始時刻が無い', { viewers: 100 }],
+        ['履歴が壊れている', { viewers: 100, viewerSamples: [null, [NaN, 1], 'x'] }],
+    ]) {
+        const v = estimateConcurrentViewers(bad, T0, 17)
+        check(`CQ 壊れた入力（${name}）で NaN を返さない`, Number.isFinite(v) && v >= 0, `${v}`)
+    }
+    check('CQ W が 0 や負でも壊れない',
+        Number.isFinite(estimateConcurrentViewers({ viewers: 10 }, T0, 0)))
+}
+
+/**
+ * CP: 設定の保存が「設定以外」を巻き込まないか（doc/09 項目CP）。
+ *
+ * 🔴 症状は**おすすめ順の点数が急に0に戻る**で、エラーは出ない。原因は
+ *    `getOptions` が `chrome.storage.local.get()` をキー未指定で呼ぶため
+ *    戻り値が storage 全体（視聴履歴を含む）であること。それを `options` として
+ *    持ち回り、`saveOptions` が丸ごと書き戻すと、**ページを開いた時点まで巻き戻る。**
+ *
+ * 正規表現ではなく**実際に書き戻して確かめる**。chrome.storage.local を本物と同じ
+ * 「キー単位マージ」で作り、getOptions → recordWatch → saveOptions を実コードで順に呼ぶ。
+ */
+async function optionsPersistScope() {
+    console.log('=== CP 設定の保存が視聴履歴を巻き込まないか ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+
+    const saved = { chrome: globalThis.chrome, performance: globalThis.performance }
+    const store = {}
+    globalThis.chrome = {
+        runtime: { id: 'test-extension-id', lastError: null, getURL: (p) => p },
+        storage: {
+            local: {
+                // キー未指定は全件、文字列/配列はそのキーだけ。本物と同じ振る舞い。
+                get(keys, cb) {
+                    if (typeof keys === 'function') { keys(structuredClone(store)); return }
+                    const out = {}
+                    for (const k of (Array.isArray(keys) ? keys : [keys])) {
+                        if (k in store) out[k] = structuredClone(store[k])
+                    }
+                    if (typeof cb === 'function') { cb(out); return }
+                    return Promise.resolve(out)
+                },
+                // 🔴 set は**渡したキーだけ**を差し替える（本物と同じ）。全消しではない。
+                set(obj, cb) {
+                    for (const [k, v] of Object.entries(obj)) store[k] = structuredClone(v)
+                    if (typeof cb === 'function') cb()
+                    return Promise.resolve()
+                },
+                remove(k) { delete store[k]; return Promise.resolve() },
+            },
+            onChanged: { addListener: () => {} },
+        },
+    }
+    globalThis.performance = { getEntriesByType: () => [{ type: 'navigate' }] }
+
+    try {
+        const { getOptions, saveOptions } = await import('../src/services/storage.js')
+        const { recordWatch, getWatchPoints, loadWatchHistory } = await import('../src/services/watchHistory.js')
+        const { optionKeys } = await import('../src/config/constants.js')
+
+        // 前のセッションで貯まっていた点数
+        store.watchCounts = { 'nico:1111': { points: 4, lastAt: 1 } }
+
+        const defaults = { programsSort: 'newest', dwellMinutes: 17, sidebarTheme: 'light' }
+        const options = await getOptions(defaults)
+
+        check('CP 前提: getOptions は storage 全体を返す（＝設定以外も混ざる）',
+            'watchCounts' in options,
+            'ここが false になったら getOptions の仕様が変わっている。CP の前提を書き直すこと')
+
+        await loadWatchHistory()
+        await recordWatch('nico:2222')   // 初見の配信者を1回見た
+        await recordWatch('nico:1111')   // 前から見ている配信者も1回
+        const beforeSave = [getWatchPoints('nico:2222'), getWatchPoints('nico:1111')]
+        check('CP 前提: 視聴を記録すると点数が増える', beforeSave[0] === 1 && beforeSave[1] === 5,
+            `2222=${beforeSave[0]} 1111=${beforeSave[1]}`)
+
+        // 設定を1つ変えて保存する（人気順の基準スライダーが 400ms 後にやることと同じ）
+        options.dwellMinutes = 19
+        await saveOptions(options)
+
+        // 🔴 本命。storage 側が巻き戻っていないこと。
+        const after = store.watchCounts || {}
+        check('CP 🔴 設定を保存しても視聴点数が巻き戻らない',
+            (after['nico:2222'] || {}).points === 1 && (after['nico:1111'] || {}).points === 5,
+            `保存後: ${JSON.stringify(after)}`)
+
+        // 設定そのものはちゃんと保存されている（巻き込み防止で保存が死んでいないか）
+        check('CP 設定は保存されている', store.dwellMinutes === 19, `dwellMinutes=${store.dwellMinutes}`)
+        check('CP 移行済みの印も保存されている（消えると毎回移行が走る）',
+            store.dwellScaleV3 === true, `dwellScaleV3=${store.dwellScaleV3}`)
+        check('CP UI状態（開閉・幅）は設定として書かない',
+            !('isOpenSidebar' in store) && !('sidebarWidth' in store),
+            `${Object.keys(store).join(', ')}`)
+
+        // getOptions 自身の書き戻しも同じ関所を通ること（ページを開くだけで巻き戻らない）
+        store.watchCounts = { 'nico:3333': { points: 9, lastAt: 2 } }
+        const stale = await getOptions(defaults)
+        stale.programsSort = 'recommend'
+        await recordWatch('nico:3333')
+        await getOptions(defaults)   // 別ページを開いた／読み直した
+        check('CP 🔴 getOptions の書き戻しでも視聴点数が巻き戻らない',
+            (store.watchCounts['nico:3333'] || {}).points === 10,
+            `${JSON.stringify(store.watchCounts)}`)
+
+        // --- 一覧の取りこぼし（設定を足してここへ足し忘れると、その設定だけ保存されない） ---
+        const keysOf = (txt) => {
+            const m = txt.match(/defaultOptions = \{([\s\S]*?)\n\}/)
+            return m ? [...m[1].matchAll(/^\s{4}([A-Za-z0-9_]+):/gm)].map((x) => x[1]) : []
+        }
+        for (const [name, file] of [['ニコ生', 'main.js'], ['kick.com', 'kickPage.js']]) {
+            const declared = keysOf(rd(file))
+            check(`CP ${name}ページの既定値を拾えている`, declared.length >= 10, `${declared.length} 個`)
+            const missing = declared.filter((k) => !optionKeys.includes(k))
+            check(`CP ${name}ページの設定が全て optionKeys に載っている`, missing.length === 0,
+                `漏れ: ${missing.join(', ') || 'なし'}。載せ忘れるとその設定だけ無言で保存されない`)
+        }
+
+        // --- 関所を迂回する経路が無いか ---
+        const st = stripComments(rd('services/storage.js'))
+        check('CP 関所は1つだけ（pickOptionKeys）',
+            (st.match(/function pickOptionKeys\(/g) || []).length === 1)
+        check('CP getOptions の書き戻しが関所を通る',
+            /chrome\.storage\.local\.set\(pickOptionKeys\(merged\)/.test(st),
+            'ページを開くだけで storage 全体を書き戻すと、他タブの書き込みを巻き戻す')
+        check('CP saveOptions が関所を通る',
+            /const toSave = pickOptionKeys\(options\)/.test(st),
+            '{ ...options } に戻すと、設定を1つ変えるだけで視聴履歴が巻き戻る')
+        // 🔴 関所を通さない set が新しく足されていないか。通してよいのは3つの形だけ:
+        //      pickOptionKeys(...)  … 関所そのもの
+        //      { ... }              … 単一キーの専用関数（setIsOpenSidebar / setSidebarWidth）
+        //      toSave               … 直前の行が pickOptionKeys 由来（上の検査が固定している）
+        //    ⚠️ toSave を許すのは**上の「saveOptions が関所を通る」と対**。あちらが落ちれば
+        //       こちらの免除は根拠を失うので、片方だけ通ることはない。
+        const rawSets = [...st.matchAll(/chrome\.storage\.local\.set\(([^\n]*)/g)]
+            .map((m) => m[1].trim())
+            .filter((a) => !/^(pickOptionKeys\(|\{|toSave[,)])/.test(a))
+        check('CP 関所を迂回して set しているところが無い', rawSets.length === 0,
+            rawSets.join(' / ') || 'なし')
+    } finally {
+        globalThis.chrome = saved.chrome
+        globalThis.performance = saved.performance
+    }
+}
+
 async function bothPagesSameSpec() {
     const { readFileSync } = await import('fs')
     const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
@@ -5389,6 +5709,8 @@ if (real) {
     await kickSidebarMovesAsOnePiece()
     await settingsSegmentOrder()
     await autoUpdateOff()
+    await optionsPersistScope()
+    await concurrentEstimate()
     await serviceTabs()
     await cardSize()
     await autoNextTarget()

@@ -126,18 +126,31 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
     }
 
     /**
-     * 保存済みレコードの取得時刻を ms だけ過去へずらす＝「時間が経ったこと」にする。
+     * 保存済みレコードの時刻を ms だけ過去へずらす＝「時間が経ったこと」にする。
      *
      * 盛り上がり(momentum)は「前回取得からの増分 ÷ 経過時間」なので、実時間が進まない検証環境では
      * **1ミリ秒差の更新が続き、値が一切動かない**（Δt<1秒は据え置く仕様。α も実質0）。
      * 数字を変えても順位が変わらず「壊れている」ように見えるが、それは検証側の都合である。
      * 周期をまたぐ挙動を見たいテストは、run() の間にこれを呼ぶこと。
+     *
+     * 🔴 **時刻を持つフィールドを取り残さないこと**（2026-08-11・doc/09 項目CQ）。
+     *    `_fetchedAt` だけずらして `viewerSamples` を置き去りにしていた。推定同接は
+     *    `now` とサンプル時刻の差で減衰させるので、**推定から見ると1秒も経っていない**ことになり、
+     *    減衰が一切起きない。実測: 2833人の番組を22分ぶん「経過」させても 2745 のまま
+     *    （本来は 900 前後まで下がる）。**実装が壊れていても検査が気付かない形**だった。
+     * ⚠️ 時刻を持つフィールドを増やしたら、ここへも足すこと。足し忘れは静かに検査を骨抜きにする。
      * @param {number} ms 経過させたい時間
      */
     function ageStorage(ms) {
         const raw = globalThis.localStorage.getItem('programInfos')
         if (!raw) return
-        const list = JSON.parse(raw).map((info) => ({ ...info, _fetchedAt: (info._fetchedAt || Date.now()) - ms }))
+        const list = JSON.parse(raw).map((info) => {
+            const next = { ...info, _fetchedAt: (info._fetchedAt || Date.now()) - ms }
+            if (Array.isArray(info.viewerSamples)) {
+                next.viewerSamples = info.viewerSamples.map((s) => [Number(s[0]) - ms, s[1]])
+            }
+            return next
+        })
         globalThis.localStorage.setItem('programInfos', JSON.stringify(list))
     }
 
