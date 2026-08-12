@@ -2058,6 +2058,12 @@ async function cardSettingsGroup() {
         `見出し ${helpSubs} / ヘルプ ${(group.match(/class="help-wrap"/g) || []).length}`)
 
     // --- ④ CSS ---
+    // 🔴 **吹き出しの大きさを見出しに引きずらせない**（利用者指定・2026-08-12「見づらい」）。
+    //    em だと 見出し(0.9em) × 吹き出し(0.92em) で 2割以上縮む。px で固定する。
+    check('CY 🔴 ヘルプの吹き出しは見出しの大きさに引きずられない',
+        /\.help-tooltip\s*\{[^}]*font-size:\s*\d+px/.test(css)
+        && !/\.help-tooltip\s*\{[^}]*font-size:\s*[\d.]+em/.test(css),
+        'em で書くとサブ項目の中だけ小さくなる')
     check('CY サブ項目は一段下げてある',
         /\.opt-group \.opt-subsection\s*\{[^}]*padding-left/.test(css))
     // 🔴 **「小さく細く薄く」の3つとも見る**（利用者指定・2026-08-12「サブらしく差を付けて」）。

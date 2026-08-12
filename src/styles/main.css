@@ -916,7 +916,12 @@ html.nns-show-elapsed .program_container .program_thumbnail .elapsed_overlay {
     border-radius: 6px;
     padding: 8px 10px;
     font-weight: normal;
-    font-size: 0.92em;
+    /* 🔴 **em で持たないこと。** 見出しの大きさに掛け算されてしまう。
+       サブ項目（.opt-sublabel = 0.9em）の中では 13 × 0.9 × 0.92 = 10.8px まで縮み、
+       「小さくすると見づらい」と指摘された（2026-08-12）。
+       説明文はどこでも同じ大きさでよいので、パネルの地の文（13px）に合わせて固定する。
+       ⚠️ 検査 CY が「em で書かれていないこと」を見ている。 */
+    font-size: 13px;
     line-height: 1.5;
     white-space: normal;
     overflow-wrap: anywhere;
