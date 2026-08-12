@@ -808,7 +808,7 @@ async function windowedConcurrent() {
     for (let m = 120; m >= 0; m -= 5) stalled.push([T - m * 60000, m >= 60 ? Math.round(10 * (120 - m)) : 600])
     const sv = est(prog(600, 120, stalled))
     check('CO 🔴 ④ 直近 W 分の流入が 0 でも 0 にならない',
-        sv > 0, `${Math.round(sv)}人（0 だと画面に「—」と出る）`)
+        sv > 0, `${Math.round(sv)}人（0 だと画面に「計算中」と出る）`)
     check('CO ④ ただし流入が止まれば下がってはいく',
         sv < 600 * 0.5, `${Math.round(sv)} / 累計600`)
 
@@ -2172,6 +2172,29 @@ async function elapsedTimeGroup() {
         /document\.documentElement\.classList\.toggle/.test(src('ui/elapsedTime.js'))
         && !/document\.body\b/.test(src('ui/elapsedTime.js')))
 
+    // --- ③-1 数字が無い時の文言（利用者指定・2026-08-12:「—」→「計算中」）---
+    //    ⚠️ 0 になるのは「推定できない」ではなく「ニコ生側の集計がまだ始まっていない」。
+    //       待てば出るので、そう読める言葉にしてある。**実物のカードで確かめる。**
+    {
+        const { installMockDom } = await import('./mock-dom.mjs')
+        const dom2 = installMockDom()
+        try {
+            const { makeProgramElement } = await import('../src/render/sidebar.js')
+            const overlayText = (viewers) => makeProgramElement({
+                id: 'lv9', title: 't', providerType: 'user',
+                contentOwner: { id: 'u9', name: 'n', icon: 'https://icon/9.png' },
+                thumbnailUrl: 'https://dlive.nicovideo.jp/live/9/screenshot/1.jpg',
+                isMemberOnly: false, viewers,
+                onAirTime: { beginAt: new Date(Date.now() - 60000).toISOString() },
+            }, { loadingImageURL: 'l.gif', watchPageBaseUrl: 'https://live.nicovideo.jp/watch/' })
+                .querySelector('.viewer_overlay').textContent
+            const zero = overlayText(0)
+            check('CX 🔴 数字が無い時は「計算中」（「—」ではない）',
+                zero === '計算中', JSON.stringify(zero))
+        } finally {
+            dom2.restore()
+        }
+    }
     // --- ③-2 🔴 生成した直後のカードに入っているか（実物を作る） ---
     //    `applyRankAttributes` はカード生成の**先頭**で走るので、あとから append する
     //    バッジには何も書けない。生成時に自分で埋めないと、ticker（30秒）か次のリスト更新
@@ -3722,11 +3745,11 @@ async function concurrentEstimate() {
     check('CQ 観測を始めた直後から真値に近い',
         Math.abs(short - 85) / 85 < 0.1, `${short.toFixed(1)}。旧実装はここが 16 だった`)
 
-    // --- 2. 静かな番組が 0（画面では「—」）にならないこと ---
+    // --- 2. 静かな番組が 0（画面では「計算中」）にならないこと ---
     const quiet = run({ cumAt: () => 500, startElapsedMin: 60, obsMin: 60 })
-    check('CQ 🔴 新規が来ない番組でも 0 にならない（「—」が出ない）',
+    check('CQ 🔴 新規が来ない番組でも 0 にならない（「計算中」のまま止まらない）',
         quiet.shown.every((v) => v > 0),
-        `最小 ${Math.min(...quiet.shown).toFixed(1)}。0 になると画面は「—」`)
+        `最小 ${Math.min(...quiet.shown).toFixed(1)}。0 になると画面は「計算中」`)
     check('CQ ただし新規が来なければ数字は減っていく',
         quiet.shown[quiet.shown.length - 1] < quiet.shown[0] * 0.6,
         `${quiet.shown[0].toFixed(0)} → ${quiet.shown[quiet.shown.length - 1].toFixed(0)}`)

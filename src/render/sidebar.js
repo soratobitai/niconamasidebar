@@ -795,7 +795,9 @@ export function reapplyRankAttributes(container, infos) {
  */
 function formatViewers(v) {
     const n = Math.round(Number(v) || 0)
-    return n > 0 ? n.toLocaleString('ja-JP') : '—'
+    // ⚠️ **数字が無い時の文言（利用者指定・2026-08-12: 「—」→「計算中」）。**
+    //    0 になるのは「推定できない」ではなく「ニコ生側の集計がまだ始まっていない」＝待てば出る。
+    return n > 0 ? n.toLocaleString('ja-JP') : '計算中'
 }
 
 /**
@@ -1635,7 +1637,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-subsection">
                                     <div class="opt-sublabel opt-title-with-help">
                                         同時視聴者数<span class="opt-beta-badge">β版</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">ニコ生の同時視聴者数は公表されていないので独自の計算方法による<b>推定値</b>です。</span></span>
                                     </div>
                                     <div class="opt-segment">
                                         <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
@@ -1643,10 +1645,8 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     </div>
                                 </div>
                                 <div class="opt-subsection">
-                                    <div class="opt-sublabel opt-title-with-help">
-                                        経過時間
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの右下に、放送が始まってからの時間を出します。<br><br>分より細かくは出しません。</span></span>
-                                    </div>
+                                    <!-- 「?」は付けない（利用者判断・2026-08-12）。設定名だけで伝わる。 -->
+                                    <div class="opt-sublabel">経過時間</div>
                                     <div class="opt-segment">
                                         <input type="radio" id="showElapsedTimeOff" name="showElapsedTime" value="off"><label for="showElapsedTimeOff">OFF</label>
                                         <input type="radio" id="showElapsedTimeOn" name="showElapsedTime" value="on"><label for="showElapsedTimeOn">ON</label>
