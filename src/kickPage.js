@@ -31,6 +31,7 @@ import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './serv
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
+import { applyLiveStatistics } from './services/liveStatistics.js'
 import { getOptions as getOptionsFromStorage, upsertProgramInfos, getProgramInfos, setSidebarWidth } from './services/storage.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { AppState } from './core/AppState.js'
@@ -572,6 +573,21 @@ function dropEndedByAutoNext(programs) {
     return programs.filter((p) => !(p && String(p.id) === endedByAutoNextId))
 }
 
+/**
+ * live2 の来場者数を SW 経由で取る（kick.com からは CORS で直接叩けないため）。
+ * @param {string[]} ids
+ * @returns {Promise<Map<string, {watchCount:number, commentCount:number}>|null>}
+ */
+async function fetchLiveStatisticsViaSw(ids) {
+    try {
+        const res = await chrome.runtime.sendMessage({ type: 'nico:statistics', ids })
+        if (!res || res.ok !== true || !res.stats) return null
+        return new Map(Object.entries(res.stats))
+    } catch (e) {
+        return null   // 権限なし・SW 停止など。一覧APIの値のまま進む
+    }
+}
+
 async function fetchNicoPrograms() {
     // 🔴 **「失敗」と「0件」を区別して返すこと。** 両方 `[]` にすると、取得に失敗しただけの周期で
     //    ニコ生のカードが**全部消えて次の周期で戻る**（＝リストが点滅する）。
@@ -583,6 +599,12 @@ async function fetchNicoPrograms() {
         return { ok: false, programs: [] }
     }
     if (!res || res.ok !== true || !Array.isArray(res.programs)) return { ok: false, programs: [] }
+
+    // 🔴 **写像する前に来場者数を新しくする**（doc/09 項目CT。ニコ生ページ側と同じ位置・同じ関数）。
+    //    live2 は live.nicovideo.jp オリジンにしか CORS を開いていないので、ここからは直接叩けない。
+    //    取り方だけ SW 経由にして、混ぜ方は `applyLiveStatistics` の1箇所に置いてある。
+    // ⚠️ 権限が無い／取れない時は何もしない（一覧APIの値のまま＝従来どおり）。
+    await applyLiveStatistics(res.programs, fetchLiveStatisticsViaSw)
 
     const out = []
     for (const p of res.programs) {

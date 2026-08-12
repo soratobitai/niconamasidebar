@@ -45,6 +45,26 @@ const KICK_PERMISSIONS = {
     ],
 }
 
+// 来場者数を早く・細かく取るAPI（doc/09 項目CT）。**kick.com 上でだけ中継が要る。**
+// live2 は `https://live.nicovideo.jp` オリジンにしか CORS を開いていないので、
+// ニコ生の視聴ページは自分で叩ける（権限も不要）。kick.com からは叩けないのでここを通す。
+//
+// 🔴 **`KICK_PERMISSIONS` に足さないこと。** あれは `hasKickPermission()` が
+//    `permissions.contains` で丸ごと照合しており、origin を1つ足すと**既に許可済みの
+//    利用者が全員 false になって Kick 連携ごと止まる。** 要求する集合（KICK_REQUEST_PERMISSIONS）
+//    にだけ足し、確認は下の hasLive2Permission で別に行う。
+// ⚠️ 許可が無い時は「取れない」だけにする（kick.com では一覧APIの値のまま出る）。
+const LIVE2_ORIGIN = 'https://live2.nicovideo.jp/*'
+// ⚠️ src/config/constants.js の liveStatisticsApi と同じURL・同じ値にすること（検査 CT が突き合わせる）。
+const LIVE2_STATISTICS_API = 'https://live2.nicovideo.jp/watch'
+const LIVE2_MAX_CONCURRENT = 8
+
+// 権限を**要求する**時の集合。⚠️ 確認（contains）には使わない。上の 🔴 を参照。
+const KICK_REQUEST_PERMISSIONS = {
+    permissions: KICK_PERMISSIONS.permissions,
+    origins: [...KICK_PERMISSIONS.origins, LIVE2_ORIGIN],
+}
+
 // 画像中継で受け付ける最大サイズ。サムネは数十KBなので、これを超えるものは想定外。
 const IMAGE_PROXY_MAX_BYTES = 2 * 1024 * 1024
 
@@ -194,6 +214,60 @@ function hasKickPermission() {
             resolve(false)
         }
     })
+}
+
+/**
+ * live2（来場者数）の中継が使えるか。**Kick 連携とは別に確かめる。**
+ *
+ * 🔴 **`hasKickPermission` に混ぜないこと。** 混ぜると、この origin を足す前に Kick を
+ *    許可していた利用者が全員 false になり、**Kick 連携そのものが止まる。**
+ *    ここが false でも kick.com のリストは出る（一覧APIの値のまま＝従来どおり）。
+ */
+function hasLive2Permission() {
+    return new Promise((resolve) => {
+        try {
+            chrome.permissions.contains({ origins: [LIVE2_ORIGIN] }, (granted) => {
+                resolve(!chrome.runtime.lastError && granted === true)
+            })
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+/**
+ * live2 の statistics を中継する（**kick.com 用**）。
+ *
+ * ⚠️ **任意のURLを取れる中継にしないこと。** 受け取るのは `lv` 番号だけで、URLはここで組む。
+ * ⚠️ 混ぜ方（どちらを採るか）は持たない。**数字を返すだけ**で、上書きはページ側の
+ *    `applyLiveStatistics` が1箇所でやる（ニコ生ページと同じ関数）。
+ */
+async function fetchLive2Statistics(ids) {
+    if (!Array.isArray(ids) || !ids.length) return { ok: true, stats: {} }
+    if (!(await hasLive2Permission())) return { ok: false, reason: 'no-permission' }
+
+    const wanted = ids.filter((id) => typeof id === 'string' && /^lv\d+$/.test(id)).slice(0, 200)
+    const stats = {}
+    let next = 0
+    const runners = Array.from({ length: Math.min(LIVE2_MAX_CONCURRENT, wanted.length) }, async () => {
+        for (let i = next++; i < wanted.length; i = next++) {
+            const id = wanted[i]
+            try {
+                const res = await fetch(`${LIVE2_STATISTICS_API}/${id}/statistics`, {
+                    credentials: 'include', cache: 'no-store',
+                })
+                if (!res.ok) continue
+                const json = await res.json()
+                const d = json && json.data
+                const w = d ? Number(d.watchCount) : NaN
+                if (!Number.isFinite(w) || w < 0) continue
+                const c = d ? Number(d.commentCount) : NaN
+                stats[id] = { watchCount: w, commentCount: Number.isFinite(c) && c >= 0 ? c : 0 }
+            } catch (e) { /* 1件の失敗で全体を落とさない */ }
+        }
+    })
+    await Promise.all(runners)
+    return { ok: true, stats }
 }
 
 /**
@@ -560,6 +634,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === 'nico:followed') {
         fetchNicoFollowed().then(sendResponse, (e) => {
+            sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
+        })
+        return true
+    }
+
+    if (msg.type === 'nico:statistics') {
+        fetchLive2Statistics(msg.ids).then(sendResponse, (e) => {
             sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
         })
         return true

@@ -4,6 +4,15 @@ export const notifyboxAPI = 'https://papi.live.nicovideo.jp/api/relive/notifybox
 export const liveInfoAPI = 'https://api.cas.nicovideo.jp/v1/services/live/programs';
 export const watchPageBaseUrl = 'https://live.nicovideo.jp/watch/'; // ニコ生視聴ページのベースURL（末尾に lv 番号 or 数値ID）
 
+// 来場者数を早く・細かく取るためのAPI（doc/09 項目CT）。`{lv}/statistics` を足して使う。
+// 応答は 86バイト・約100ms で `{"data":{"watchCount":…,"commentCount":…}}` だけ。
+// 🔴 **要ログイン**（未ログインは 401）／**CORS は live.nicovideo.jp オリジンにしか開いていない**。
+//    kick.com からは SW 経由で取る。⚠️ `static/sw.js` にも同じURLがある（バンドル外で共有できない）。
+export const liveStatisticsApi = 'https://live2.nicovideo.jp/watch';
+// 同時に走らせる数。⚠️ **全番組ぶんを一斉に投げないこと**（フォロー数が多いと70件級になる）。
+// ⚠️ `static/sw.js` の LIVE2_MAX_CONCURRENT と同じ値にすること（検査 CT が突き合わせる）。
+export const liveStatisticsMaxConcurrent = 8;
+
 // notifybox に一度に要求する件数（ページングは無い）。
 //
 // 🔴 2026-08-01: 500 を要求したら**5件しか返らなかった**（実機・放送中12件時。`meta.status` は 200）。

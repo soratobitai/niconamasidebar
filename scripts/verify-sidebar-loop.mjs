@@ -1974,6 +1974,151 @@ async function programEndConfirmation() {
 }
 
 /**
+ * CT: 来場者数を live2 から取る（2026-08-12）。
+ *
+ * 実測（利用者の実機・15秒ごと）: 一覧APIは live2 より **30〜45秒遅く**、しかも
+ * **約60秒に1回しか動かない**（1,1,11,11,11,11,16,16 と階段状。live2 は 11,13,14,16,18,20,21）。
+ * 推定同接は来場者の**増分**から計算するので、粒度が効く。
+ *
+ * 🔴 **ここの失敗は「数字が少し古い」で、エラーが出ない。** よって
+ *    「取れた時に新しくなること」より**「取れない時に壊れないこと」**を厚く固定する。
+ */
+async function liveStatisticsGroup() {
+    console.log('=== CT 来場者数を live2 から取る ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8')
+    const src = (f) => stripComments(readFileSync(new URL('../src/' + f, import.meta.url), 'utf8'))
+    const { applyLiveStatistics, normalizeLiveStatistics, liveStatisticsUrl } =
+        await import('../src/services/liveStatistics.js')
+    const { liveStatisticsApi, liveStatisticsMaxConcurrent } = await import('../src/config/constants.js')
+
+    // --- ① 混ぜ方（唯一の判断） ---
+    const prog = (id, w, c) => ({ id, statistics: { watchCount: w, commentCount: c } })
+    let ps = [prog('lv1', 1, 0), prog('lv2', 5, 2)]
+    await applyLiveStatistics(ps, async () => new Map([['lv1', { watchCount: 11, commentCount: 3 }]]))
+    check('CT 新しい値で上書きする', ps[0].statistics.watchCount === 11 && ps[0].statistics.commentCount === 3,
+        JSON.stringify(ps[0].statistics))
+    check('CT 取れなかった番組は一覧APIの値のまま', ps[1].statistics.watchCount === 5)
+
+    // 🔴 下げない。取れた周期と取れない周期が混ざると値が行き来し、増分が壊れる。
+    ps = [prog('lv1', 30, 10)]
+    await applyLiveStatistics(ps, async () => new Map([['lv1', { watchCount: 7, commentCount: 1 }]]))
+    check('CT 🔴 小さくしない（増分が「誰も来ていない」に化けない）',
+        ps[0].statistics.watchCount === 30 && ps[0].statistics.commentCount === 10,
+        JSON.stringify(ps[0].statistics))
+
+    // 取得が失敗しても投げない・壊さない
+    for (const [name, getter] of [
+        ['例外', async () => { throw new Error('boom') }],
+        ['null', async () => null],
+        ['Map でない', async () => ({ lv1: { watchCount: 99 } })],
+    ]) {
+        ps = [prog('lv1', 4, 1)]
+        let threw = false
+        try { await applyLiveStatistics(ps, getter) } catch (e) { threw = true }
+        check(`CT 取得が「${name}」でも投げず、値も変えない`,
+            !threw && ps[0].statistics.watchCount === 4, `threw=${threw} / ${ps[0].statistics.watchCount}`)
+    }
+    ps = [prog('lv1', 4, 1)]
+    await applyLiveStatistics(ps, async () => new Map([['lv1', null]]))
+    check('CT 1件だけ欠けても他を壊さない', ps[0].statistics.watchCount === 4)
+
+    // statistics が無い形でも落ちない（フォローAPIの応答が想定外だった時）
+    const noStats = [{ id: 'lv1' }]
+    await applyLiveStatistics(noStats, async () => new Map([['lv1', { watchCount: 8, commentCount: 2 }]]))
+    check('CT statistics が無くても入れられる', noStats[0].statistics.watchCount === 8)
+
+    // lv 以外は問い合わせない（中継に任意のIDを渡さない）
+    let asked = null
+    await applyLiveStatistics([{ id: 'kick:foo' }, prog('lv9', 1, 1)], async (ids) => { asked = ids; return new Map() })
+    check('CT 🔴 lv 形式だけを問い合わせる', Array.isArray(asked) && asked.join(',') === 'lv9', String(asked))
+
+    // --- ② 応答の正規化（壊れた値で上書きしない） ---
+    check('CT 正しい応答を読める',
+        JSON.stringify(normalizeLiveStatistics({ data: { watchCount: 3552, commentCount: 995 } }))
+        === JSON.stringify({ watchCount: 3552, commentCount: 995 }))
+    for (const bad of [null, {}, { data: null }, { data: {} }, { data: { watchCount: -1 } },
+        { data: { watchCount: 'x' } }, { meta: { status: 401 } }]) {
+        if (normalizeLiveStatistics(bad) !== null) {
+            check('CT 🔴 壊れた応答は採らない', false, JSON.stringify(bad)); break
+        }
+    }
+    check('CT 🔴 壊れた応答は採らない',
+        [null, {}, { data: null }, { data: {} }, { data: { watchCount: -1 } }, { data: { watchCount: 'x' } }]
+            .every((b) => normalizeLiveStatistics(b) === null))
+    check('CT commentCount が無ければ 0 にする（watchCount は捨てない）',
+        (normalizeLiveStatistics({ data: { watchCount: 5 } }) || {}).commentCount === 0)
+
+    // --- ③ 両ページが同じ混ぜ方を通る（写し漏れ対策・doc/09 項目BN の型） ---
+    const fps = src('services/followPageSource.js')
+    const kick = src('kickPage.js')
+    check('CT 🔴 ニコ生ページが applyLiveStatistics を通る', /applyLiveStatistics\(/.test(fps))
+    check('CT 🔴 kick.com ページも applyLiveStatistics を通る', /applyLiveStatistics\(/.test(kick))
+    check('CT 🔴 混ぜ方の実装は1つだけ（各ページが自前で上書きしない）',
+        (src('services/liveStatistics.js').match(/export async function applyLiveStatistics/g) || []).length === 1
+        && !/statistics\.watchCount\s*=/.test(fps) && !/statistics\.watchCount\s*=/.test(kick))
+    // 🔴 写像より前に入れること。後だと programInfo に反映されない。
+    check('CT 🔴 写像（mapApiProgramToInfo）より前に入れる',
+        fps.indexOf('applyLiveStatistics(') < fps.indexOf('all.map(mapApiProgramToInfo)')
+        && kick.indexOf('applyLiveStatistics(') < kick.indexOf('mapApiProgramToInfo(p)'))
+    check('CT kick.com は SW 経由で取る（CORS が live.nicovideo.jp にしか開いていない）',
+        /nico:statistics/.test(kick) && !/live2\.nicovideo\.jp/.test(kick))
+
+    // --- ④ バンドル外（static/sw.js）との二重管理を縛る ---
+    const sw = stripComments(rd('static/sw.js'))
+    const opt = stripComments(rd('static/options.js'))
+    check('CT 🔴 SW の live2 URL が constants と一致',
+        sw.includes(`'${liveStatisticsApi}'`), `constants=${liveStatisticsApi}`)
+    const swCap = Number((sw.match(/LIVE2_MAX_CONCURRENT = (\d+)/) || [])[1])
+    check('CT 🔴 SW の同時数が constants と一致',
+        swCap === liveStatisticsMaxConcurrent, `sw=${swCap} / constants=${liveStatisticsMaxConcurrent}`)
+    check('CT URL の組み立てが揃っている',
+        liveStatisticsUrl('lv1') === `${liveStatisticsApi}/lv1/statistics`, liveStatisticsUrl('lv1'))
+
+    // 🔴 いちばん危ない罠: 確認用の集合に origin を足すと、許可済みの利用者が全員 false になる
+    // ⚠️ **正規表現でオブジェクトの中身を切り出さないこと。** `[\s\S]*?` は閉じ括弧を越えて
+    //    後続の `live2` まで届いてしまい、「入っていない」のに入っている判定になる（実際に踏んだ）。
+    //    波括弧を数えて中身だけを取る。
+    const objectLiteral = (text, name) => {
+        const i = text.indexOf('const ' + name + ' = {')
+        if (i < 0) return ''
+        const open = text.indexOf('{', i)
+        let depth = 0
+        for (let j = open; j < text.length; j++) {
+            if (text[j] === '{') depth++
+            else if (text[j] === '}') { depth--; if (depth === 0) return text.slice(open + 1, j) }
+        }
+        return ''
+    }
+    for (const [name, text] of [['SW', sw], ['options', opt]]) {
+        const body = objectLiteral(text, 'KICK_PERMISSIONS')
+        check(`CT （空振り防止）${name}: KICK_PERMISSIONS の中身を取り出せている`,
+            body.includes('kick.com'), body.slice(0, 60).replace(/\s+/g, ' '))
+        check(`CT 🔴 ${name}: 確認用の KICK_PERMISSIONS に live2 を足していない`,
+            !!body && !body.includes('live2'),
+            '足すと既存の Kick 利用者が「未許可」になって連携ごと止まる')
+    }
+    check('CT 🔴 options: 確認・削除は KICK_PERMISSIONS のまま',
+        /permissions\.contains\(KICK_PERMISSIONS/.test(opt) && /permissions\.remove\(KICK_PERMISSIONS/.test(opt))
+    check('CT 🔴 options: 要求だけ live2 込みの集合を使う',
+        /permissions\.request\(KICK_REQUEST_PERMISSIONS/.test(opt)
+        && /KICK_REQUEST_PERMISSIONS = \{[\s\S]*?live2\.nicovideo\.jp/.test(opt))
+    check('CT 🔴 SW も要求用の集合を別に持つ',
+        /KICK_REQUEST_PERMISSIONS = \{[\s\S]*?LIVE2_ORIGIN/.test(sw))
+    check('CT 🔴 SW: live2 の許可は別に確かめる（Kick の確認に混ぜない）',
+        /function hasLive2Permission\(\)/.test(sw)
+        && /hasLive2Permission\(\)\)\) return \{ ok: false, reason: 'no-permission' \}/.test(sw))
+    check('CT 🔴 SW: 中継は lv 番号だけ受け取り、URL は自分で組む',
+        /\/\^lv\\d\+\$\/\.test\(id\)/.test(sw) && /`\$\{LIVE2_STATISTICS_API\}\/\$\{id\}\/statistics`/.test(sw),
+        '任意のURLを取れる中継にすると、ページ側から拡張の権限を借りて何でも読める')
+    const mf = JSON.parse(rd('manifest.json'))
+    check('CT manifest に live2 がある（optional のまま）',
+        (mf.optional_host_permissions || []).includes('https://live2.nicovideo.jp/*')
+        && !(mf.host_permissions || []).length,
+        '必須にすると更新で既存ユーザーの拡張が無効化される')
+}
+
+/**
  * CS: 自動移動で離れた番組を、飛び先で即座にリストから外す（2026-08-12）。
  *
  * 【なぜ要るか】終了検知は「一覧APIに載っていない番組を詳細APIに聞く」形なので、
@@ -6058,6 +6203,7 @@ if (real) {
     console.log('')
     await programEndConfirmation()
     await endedByAutoNextGroup()
+    await liveStatisticsGroup()
     await endedRecheckDoesNotRefetch()
     console.log('')
     await r1NoSpin()

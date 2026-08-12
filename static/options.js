@@ -36,6 +36,17 @@ const KICK_PERMISSIONS = {
     ],
 }
 
+// 🔴 **要求する時だけ足す origin。確認（contains）や削除（remove）には混ぜないこと。**
+//    混ぜると、これを足す前に許可していた利用者が `contains` で false になり、
+//    **Kick 連携そのものが「未許可」に見えて止まる**（sw.js の hasKickPermission と対）。
+//    - live2.nicovideo.jp … kick.com 上でニコ生の来場者数を早く取るための中継（doc/09 項目CT）。
+//      無くても kick.com のリストは出る（一覧APIの値のまま＝従来どおり）。
+// ⚠️ **sw.js の KICK_REQUEST_PERMISSIONS と必ず一致させること。**
+const KICK_REQUEST_PERMISSIONS = {
+    permissions: KICK_PERMISSIONS.permissions,
+    origins: [...KICK_PERMISSIONS.origins, 'https://live2.nicovideo.jp/*'],
+}
+
 // ⚠️ **表示方法（kickDisplayMode）とバランス（dwellMinutes）はここで扱わない。**
 //    権限を伴わない設定はサイドバー内の設定 UI が持つ（利用者の要望・2026-08-04）。
 //    このページの責務は「権限が必要な ON/OFF」と接続テストだけ。
@@ -99,7 +110,9 @@ el.enabled.addEventListener('change', async () => {
 
     // ON: ここは change ハンドラ＝ユーザー操作の文脈なので request() を呼べる。
     // 呼べる文脈から外れると Chrome に拒否されるので、await を挟んでから呼ばないこと。
-    chrome.permissions.request(KICK_PERMISSIONS, async (granted) => {
+    // ⚠️ **要求は KICK_REQUEST_PERMISSIONS（live2 込み）。確認と削除は KICK_PERMISSIONS のまま。**
+    //    確認に混ぜると、既に許可済みの利用者が未許可扱いになって Kick が止まる。
+    chrome.permissions.request(KICK_REQUEST_PERMISSIONS, async (granted) => {
         if (chrome.runtime.lastError) {
             await syncFromPermissions()
             setNote('許可を要求できませんでした: ' + chrome.runtime.lastError.message, true)

@@ -1,6 +1,7 @@
 import { handleError } from '../utils/error.js'
 import { mapProviderType } from '../utils/providerType.js'
 import { fetchProgramInfo } from './api.js'
+import { applyLiveStatistics, fetchLiveStatisticsDirect } from './liveStatistics.js'
 
 /**
  * フォロー中（放送中）番組の詳細を一括取得するデータソース
@@ -305,6 +306,11 @@ export async function fetchFollowedProgramsViaPage() {
             }
             if (all.length >= total) break   // total まで取り切った
         }
+        // 🔴 **写像する前に来場者数を新しくする**（doc/09 項目CT）。一覧APIの watchCount は
+        //    30〜45秒 遅く、しかも約60秒に1回しか動かない。live2 は15秒ごとに動く。
+        //    ここで生データを直しておけば、写像から先（推定同接・順位・表示）は何も変えずに済む。
+        // ⚠️ 失敗しても描画は止めない（一覧APIの値のまま進む）。
+        await applyLiveStatistics(all, fetchLiveStatisticsDirect)
         const mapped = all.map(mapApiProgramToInfo).filter(Boolean)
         warnIfFlippedThumbMissing(all, mapped)
         // フォローAPIで埋まらない情報（スクショ未生成の番組／想定外に名前が空の番組）を選択補完
