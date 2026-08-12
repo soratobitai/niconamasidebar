@@ -66,7 +66,7 @@ export function adjustWatchPageChild(elems) {
 // いま選ばれているカードの大きさ。**設定は各ページの初期化と storage.onChanged から流し込む。**
 // ⚠️ 引数で渡す形にしなかったのは、setProgramContainerWidth の呼び出しが10箇所あり、
 //    片方のページで1つ渡し忘れると**そこだけ既定に戻る**という無言の壊れ方をするため
-//    （`setDwellMinutes` と同じ形）。両ページが setCardSize を呼ぶことは検査で縛っている。
+//    両ページが setCardSize を呼ぶことは検査で縛っている。
 let currentCardSize = defaultCardSize
 
 /** 設定「カードの大きさ」を反映する。次に描画/幅計算した時から効く。 */

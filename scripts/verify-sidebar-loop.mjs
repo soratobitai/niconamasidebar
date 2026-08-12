@@ -667,7 +667,11 @@ async function recommendOrder() {
         '_sortOrderChanged と食い違うと毎周期 replaceChildren と FLIP が走る')
 
     // --- 設定 ---
-    check('CM 設定に「おすすめ」がある', /name="programsSort" value="recommend"/.test(sb))
+    check('CM 設定に「よく見る順」がある（🔴 値は recommend のまま）',
+        /name="programsSort" value="recommend"/.test(sb)
+        && /<label for="programsSort3">よく見る順<\/label>/.test(sb)
+        && !/>おすすめ<\/label>/.test(sb),
+        'ラベルと値を一緒に変えないこと。値を変えると保存済みの設定が無効になる')
     check('CM 既存の値を変えていない（保存済みの設定が無効にならない）',
         /name="programsSort" value="newest"/.test(sb) && /name="programsSort" value="active"/.test(sb))
     check('CM カードが回数を持つ（書き手は applyRankAttributes だけ）',
@@ -693,6 +697,12 @@ async function recommendOrder() {
     check('CM 🔴 1回の視聴が満点になるまで 60分',
         Math.abs(fullMarksMin - 60) < 1e-9,
         `${fullMarksMin}分（${watchPointIntervalMs / 60000}分ごと × 上限${watchPointMaxPerVisit}）`)
+    // 🔴 **満点の「価値」も別に固定する**（利用者報告・2026-08-12: 開くだけ1点に対して長時間視聴が軽い）。
+    //    上の積だけでは、刻みと上限を同時にいじると通ってしまう（実際 6点→11点へ上げた変更が
+    //    積を保ったまま入った）。**満点までの時間と満点の価値は別の話**なので両方見る。
+    check('CM 🔴 満点の価値は 11点（開くだけの11倍）',
+        watchPointMaxPerVisit + 1 === 11,
+        `1回の視聴で最大 ${watchPointMaxPerVisit + 1}点（開いた1点＋見続けた${watchPointMaxPerVisit}点）`)
     // 裏タブでも加点する（利用者判断・2026-08-10。音声だけ聞く使い方があるため）。
     check('CM 裏タブでも加点する（可視判定で止めない）',
         !/visibilityState/.test(wh), '止めると音声だけ聞いている時間が入らない')
@@ -737,8 +747,6 @@ async function recommendOrder() {
         globalThis.chrome = realChromeForPoints
     }
 
-    check('CM おすすめの時も「人気順の基準」を出す（同点の並びに効くため）',
-        /programsSort === 'recommend'/.test(oh))
 }
 
 /**
@@ -753,7 +761,8 @@ async function windowedConcurrent() {
     console.log('=== CO 推定同接を「直近 W 分に入ってきた人数」で出す ===')
     const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
     const { readFileSync } = await import('fs')
-    const st = stripComments(readFileSync(new URL('../src/services/storage.js', import.meta.url), 'utf8'))
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const st = stripComments(rd('services/storage.js'))
     const { viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount } =
         await import('../src/config/constants.js')
 
@@ -836,35 +845,34 @@ async function windowedConcurrent() {
         `${viewerSampleMinGapMs}ms`)
     check('CO ⑨ 古い点を捨てる', /viewerSampleMaxAgeMs/.test(st) && viewerSampleMaxAgeMs > 0)
     check('CO ⑨ 件数の歯止めがある', /viewerSampleMaxCount/.test(st) && viewerSampleMaxCount > 0)
-    // 目盛りの最大より短いと、いちばん右にした時に履歴が足りなくなる。
-    const { dwellMinutesScale, defaultDwellMinutes } = await import('../src/config/constants.js')
-    check('CO 🔴 ⑨ 履歴の保持は目盛りの最大より長い',
-        viewerSampleMaxAgeMs >= Math.max(...dwellMinutesScale) * 60000,
-        `保持=${viewerSampleMaxAgeMs / 60000}分 / 目盛り最大=${Math.max(...dwellMinutesScale)}分`)
+    // W より短いと履歴が足りなくなる。⚠️ 旧「目盛りの最大」ではなく固定値 W と比べる
+    //    （2026-08-12 にスライダーを廃止。doc/09 項目CU）。
+    const { defaultDwellMinutes, optionKeys } = await import('../src/config/constants.js')
+    check('CO 🔴 ⑨ 履歴の保持は W より十分長い',
+        viewerSampleMaxAgeMs >= defaultDwellMinutes * 60000 * 3,
+        `保持=${viewerSampleMaxAgeMs / 60000}分 / W=${defaultDwellMinutes}分`)
 
-    // --- CN 目盛りそのものの形（2026-08-11・利用者要望「ちょうど真ん中を作る」） ---
-    // 🔴 偶数個だと中央の目盛りが存在せず、既定値がつまみの中央に来ない。
-    check('CN 🔴 目盛りは奇数個（ちょうど真ん中が存在する）',
-        dwellMinutesScale.length % 2 === 1, `${dwellMinutesScale.length} 段`)
-    check('CN 🔴 ちょうど真ん中が既定値',
-        dwellMinutesScale[(dwellMinutesScale.length - 1) / 2] === defaultDwellMinutes,
-        `中央=${dwellMinutesScale[(dwellMinutesScale.length - 1) / 2]} / 既定=${defaultDwellMinutes}`)
-    // ⚠️ 既定値が目盛りに無いと、既存ユーザーの値が最寄りへ丸められる（上の中央判定でも落ちるが、
-    //    中央を動かした時にどちらが原因か分かるよう別に見る）。
-    check('CN 既定値が目盛りに実在する', dwellMinutesScale.includes(defaultDwellMinutes))
-    check('CN 目盛りは昇順で重複が無い',
-        dwellMinutesScale.every((v, i) => i === 0 || v > dwellMinutesScale[i - 1]),
-        dwellMinutesScale.join(','))
-    // 対数的な効き方に合わせた等比。等間隔にするとスライダーの右半分が死ぬ。
-    const ratios = dwellMinutesScale.slice(1).map((v, i) => v / dwellMinutesScale[i])
-    check('CN 刻みが等比に近い（右半分が死んでいない）',
-        Math.min(...ratios) > 1.05 && Math.max(...ratios) < 1.45,
-        `比 ${Math.min(...ratios).toFixed(2)}〜${Math.max(...ratios).toFixed(2)}`)
-    // 🔴 目盛りを差し替えたら移行の印も上げること。上げないと既存ユーザーが古い値のまま残る。
-    const markKey = (st.match(/DWELL_SCALE_MIGRATED_KEY = '([^']+)'/) || [])[1]
-    const { optionKeys } = await import('../src/config/constants.js')
-    check('CN 🔴 移行の印が optionKeys に載っている（載せないと毎回移行が走る）',
-        !!markKey && optionKeys.includes(markKey), `印=${markKey} / optionKeys=${optionKeys.includes(markKey)}`)
+    // --- CU W が固定であること（2026-08-12・「人気順の基準」を廃止した） ---
+    // 🔴 **保存値から差し替える経路を復活させないこと。** 復活させると、古い値を持っている
+    //    環境だけ違う数字で動く。設定を消しただけでは足りず、読む側も1本にする必要がある。
+    const sbSrc = stripComments(rd('render/sidebar.js'))
+    check('CU 🔴 W は固定値を直接使う（可変の状態を持たない）',
+        /estimateConcurrentViewers\(data, Date\.now\(\), defaultDwellMinutes\)/.test(sbSrc)
+        && !/setDwellMinutes/.test(sbSrc),
+        '可変にすると、保存値を持つ環境だけ数字が変わる')
+    check('CU 🔴 保存対象から外れている（optionKeys に無い）',
+        !optionKeys.includes('dwellMinutes') && !optionKeys.some((k) => k.startsWith('dwellScale')),
+        `optionKeys=${optionKeys.join(',')}`)
+    check('CU 設定 UI から消えている',
+        !/name="dwellMinutes"/.test(rd('render/sidebar.js'))
+        && !/opt-active-only/.test(rd('render/sidebar.js')))
+    for (const [name, f] of [['ニコ生', 'main.js'], ['kick.com', 'kickPage.js'], ['設定ハンドラ', 'handlers/optionsHandler.js']]) {
+        check(`CU ${name}に差し替えの配線が残っていない`,
+            !/setDwellMinutes|changes\.dwellMinutes|dwellMinutesScale/.test(stripComments(rd(f))))
+    }
+    check('CU 目盛りと移行は消えている（死にコードを残さない）',
+        !/dwellMinutesScale/.test(stripComments(rd('config/constants.js')))
+        && !/DWELL_SCALE_MIGRATED_KEY/.test(st))
     // 🔴 渡された info にも書き戻さないと、画面側に履歴が届かず従来式のままになる。
     check('CO 🔴 ⑨ storage が渡された info にも履歴を書き戻す',
         /info\.viewerSamples = appendViewerSample\(/.test(st),
@@ -3351,7 +3359,7 @@ async function optionsPersistScope() {
         // 前のセッションで貯まっていた点数
         store.watchCounts = { 'nico:1111': { points: 4, lastAt: 1 } }
 
-        const defaults = { programsSort: 'newest', dwellMinutes: 17, sidebarTheme: 'light' }
+        const defaults = { programsSort: 'newest', sidebarTheme: 'light' }
         const options = await getOptions(defaults)
 
         check('CP 前提: getOptions は storage 全体を返す（＝設定以外も混ざる）',
@@ -3365,8 +3373,8 @@ async function optionsPersistScope() {
         check('CP 前提: 視聴を記録すると点数が増える', beforeSave[0] === 1 && beforeSave[1] === 5,
             `2222=${beforeSave[0]} 1111=${beforeSave[1]}`)
 
-        // 設定を1つ変えて保存する（人気順の基準スライダーが 400ms 後にやることと同じ）
-        options.dwellMinutes = 19
+        // 設定を1つ変えて保存する（かつては人気順の基準スライダーが 400ms 後にやっていた）
+        options.sidebarTheme = 'dark'
         await saveOptions(options)
 
         // 🔴 本命。storage 側が巻き戻っていないこと。
@@ -3376,12 +3384,8 @@ async function optionsPersistScope() {
             `保存後: ${JSON.stringify(after)}`)
 
         // 設定そのものはちゃんと保存されている（巻き込み防止で保存が死んでいないか）
-        check('CP 設定は保存されている', store.dwellMinutes === 19, `dwellMinutes=${store.dwellMinutes}`)
-        // ⚠️ 印の名前を直書きしない。目盛りを差し替えるたびに版が上がるので、実装から読む。
-        const markKey = (stripComments(rd('services/storage.js'))
-            .match(/DWELL_SCALE_MIGRATED_KEY = '([^']+)'/) || [])[1]
-        check('CP 移行済みの印も保存されている（消えると毎回移行が走る）',
-            !!markKey && store[markKey] === true, `${markKey}=${store[markKey]}`)
+        check('CP 設定は保存されている', store.sidebarTheme === 'dark',
+            `sidebarTheme=${store.sidebarTheme}`)
         check('CP UI状態（開閉・幅）は設定として書かない',
             !('isOpenSidebar' in store) && !('sidebarWidth' in store),
             `${Object.keys(store).join(', ')}`)
@@ -4230,10 +4234,11 @@ async function viewerCountGroup() {
             bad.join(' / ') || 'なし')
     }
 
-    // 🔴 **仕上げは「実際に効く値」で見る。** 直書きが消えても、移行が寄せ直せば元の木阿弥。
-    //    getOptions を通した結果が目盛りのちょうど中央であることまで確かめる。
+    // 🔴 **仕上げは「実際に効く値」で見る。** 2026-08-12 に W は設定から外れた（項目CU）ので、
+    //    ここで見るのは「保存領域に何が入っていても、効く W が変わらないこと」。
+    //    ⚠️ 古い保存値（旧スライダーの残骸）が残っている環境が実在する。それを読んだら退行。
     const savedChrome = Object.getOwnPropertyDescriptor(globalThis, 'chrome')
-    const store = {}
+    const store = { dwellMinutes: 35, dwellScaleV4: true }   // 旧設定の残骸
     globalThis.chrome = {
         runtime: { id: 'verify', lastError: null },
         storage: {
@@ -4246,15 +4251,24 @@ async function viewerCountGroup() {
     }
     try {
         const { getOptions } = await import('../src/services/storage.js')
-        const pairs = pairsOf(stripComments(rd('main.js')))
-        // ページが書いている既定をそのまま解決して渡す（検査側で 17 と決め打ちしない）
-        const raw = pairs.dwellMinutes
-        const seed = raw in consts ? consts[raw] : Number(raw)
-        const fresh = await getOptions({ dwellMinutes: seed })
-        const mid = consts.dwellMinutesScale[(consts.dwellMinutesScale.length - 1) / 2]
-        check('CR 🔴 新規利用者に実際に効く W が目盛りのちょうど中央',
-            fresh.dwellMinutes === mid && fresh.dwellMinutes === consts.defaultDwellMinutes,
-            `効く W=${fresh.dwellMinutes} / 中央=${mid} / constants=${consts.defaultDwellMinutes}`)
+        const { calculateActivePoint } = await import('../src/render/sidebar.js')
+        await getOptions({})   // 旧値が残った状態で読み込む
+        // 到着が1件だけの番組を作り、W が効いた結果の数字を見る。
+        const now = Date.now()
+        const info = {
+            id: 'lv1', viewers: 100,
+            onAirTime: { beginAt: new Date(now - 60 * 60000).toISOString() },
+            viewerSamples: [[now - 30 * 60000, 0], [now, 100]],
+        }
+        const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
+        const expected = estimateConcurrentViewers(info, now, consts.defaultDwellMinutes)
+        const actual = calculateActivePoint(info)
+        check('CR 🔴 保存領域に古い W が残っていても、効く W は固定値のまま',
+            Math.abs(actual - expected) < 0.5,
+            `効いた結果=${actual.toFixed(1)} / W=${consts.defaultDwellMinutes} での期待=${expected.toFixed(1)}`
+            + `（保存領域には dwellMinutes=${store.dwellMinutes} が残っている）`)
+        check('CR 🔴 古い残骸を書き戻さない（optionKeys の関所を通る）',
+            store.dwellMinutes === 35, '関所が消していたら、逆に触ってはいけないものを触っている')
     } finally {
         if (savedChrome) Object.defineProperty(globalThis, 'chrome', savedChrome)
         else delete globalThis.chrome

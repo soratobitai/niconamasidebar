@@ -1,9 +1,9 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
+import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
 import { consumeAutoNextHopMark } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnNicoPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
@@ -39,9 +39,6 @@ let defaultOptions = {
     kickDisplayMode: 'mixed',  // 'mixed' | 'tabs'
     kickActiveTab: 'nicolive', // タブ分離時にどのタブを選んでいたか（'mixed' | 'nicolive' | 'kick'）
     // 🔴 **既定値を直書きしないこと。** constants.js の default* が唯一の定義。
-    //    直書きすると、あちらを変えた時にここが取り残される（実際 dwellMinutes が
-    //    17 になった後も 10 のままで、新規利用者だけ W=10 で動いていた）。
-    dwellMinutes: defaultDwellMinutes,          // W（平均滞在時間・分）
     cardSize: defaultCardSize,                  // 番組カードの大きさ（'small' | 'medium' | 'large'）
     sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT, // サイドバーの置き方（'push' = 寄せる / 'overlay' = 重ねる）
     showViewerCount: defaultShowViewerCount,    // 同時視聴者数をサムネ左上に出すか（β版・既定OFF）
@@ -492,14 +489,6 @@ chrome.storage.onChanged.addListener(function (changes) {
             if (updateManager) updateManager.updateProgramCount(count);
         }
     }
-    if (changes.dwellMinutes) {
-        options.dwellMinutes = changes.dwellMinutes.newValue;
-        setDwellMinutes(options.dwellMinutes);
-        // ⚠️ **`sortPrograms` だけでは直らない。** 順位が読む `active-point` 属性は
-        //    描画時に書かれた値なので、W を変えても属性は古いまま。属性ごと書き直す。
-        //    以前はここでリスト更新を走らせていたが、スライダーになった今は取得が重すぎる。
-        rerankInPlace();
-    }
     if (changes.sidebarPlacement) {
         options.sidebarPlacement = changes.sidebarPlacement.newValue;
         applySidebarPlacement(options.sidebarPlacement);
@@ -653,13 +642,7 @@ const rerankInPlace = () => {
 
 const reflectOptions = () => {
     // 第3引数: Kick 連携が有効になった直後にリストを取り直す（次の定期更新を待たない）。
-    // 第4引数: 「人気順の基準」が動いた時。**取得はせず**その場で順位を計算し直す。
-    setupOptionsHandler(options, sortPrograms, () => { updateSidebar(); }, (minutes) => {
-        setDwellMinutes(minutes);
-        rerankInPlace();
-    });
-    // 推定同接の W（平均滞在時間）。Kick のオプションページで変更される。
-    setDwellMinutes(options.dwellMinutes);
+    setupOptionsHandler(options, sortPrograms, () => { updateSidebar(); });
     // 🔴 最初の描画より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize);
     // サイドバーの置き方（寄せる／重ねる）。**印を付けるだけ。**寄せ幅の計算は setRootWidth。

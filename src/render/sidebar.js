@@ -485,21 +485,10 @@ export function makeProgramElement(data, loadingImageURL) {
  */
 export function calculateActivePoint(data) {
     if (!data) return 0
-    return estimateConcurrentViewers(data, Date.now(), dwellMinutes)
-}
-
-// W（平均滞在時間・分）。推定同接の唯一の調整つまみ。
-// 🔴 効き方は2通りある（momentum.js の estimateConcurrentViewers 参照）。
-//    「ニコ生と Kick の釣り合い」だけだと思って触らないこと。
-let dwellMinutes = defaultDwellMinutes
-
-/**
- * W を差し替える。オプション読み込み時と変更時に main.js から呼ぶ。
- * @param {number|string} value 分
- */
-export function setDwellMinutes(value) {
-    const v = Number(value)
-    dwellMinutes = Number.isFinite(v) && v > 0 ? v : defaultDwellMinutes
+    // 🔴 **W は固定**（2026-08-12・doc/09 項目CU）。設定から差し替える経路は廃止した。
+    //    同接を画面に出す以上、あれは「推定値」であって好みで動かすつまみではない。
+    //    ⚠️ ここに可変の状態を戻さないこと。戻すと、保存値を持つ環境だけ数字が変わる。
+    return estimateConcurrentViewers(data, Date.now(), defaultDwellMinutes)
 }
 
 /**
@@ -741,10 +730,12 @@ export function setupServiceTabHandlers(onCountChange, onTabChange) {
 /**
  * 表示中の全カードの順位属性を計算し直す。**取得はしない。**
  *
- * 「人気順の基準」(W) を動かした時に使う。`active-point` は描画時に書かれた値なので、
- * W を変えただけでは古いまま＝並べ替えても何も変わらない。かといってリストを取り直すと
- * **スライダーを動かすたびに数秒の取得が飛ぶ**ことになる。
- * 保存済みの番組データから計算し直せば、取得なしでその場で反映できる。
+ * 別のタブで貯まった視聴点数を反映する時に使う（`startWatchHistorySync` から）。
+ * `active-point` も視聴点数も**描画時に書かれた値**なので、並べ替えるだけでは古いまま＝
+ * 直ったように見えて直っていない。保存済みの番組データから属性ごと書き直す。
+ *
+ * ⚠️ かつては「人気順の基準」（W のスライダー）を動かした時にも使っていた。
+ *    その設定は 2026-08-12 に廃止（doc/09 項目CU）。呼び出し元が1つ減っただけで役目は同じ。
  *
  * @param {HTMLElement} container `#liveProgramContainer`
  * @param {Array<object>} infos 番組データ（ニコ生＋Kick。id は 'lv123' / 'k123' のどちらでも可）
@@ -1467,41 +1458,37 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         表示順序
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>おすすめ</b>: よく見る番組順。データが貯まるまでは人気順。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>よく見る順</b>: よく見る配信者ほど上。データが貯まるまでは人気順。</span></span>
                                     </div>
                                     <!-- ⚠️ **値を変えないこと。** 保存済みの設定に対応するラジオが無くなると、
                                          その利用者は設定を一切保存できなくなる（doc/09 項目BQ と同じ罠）。
-                                         'recommend' は 2026-08-10 追加。既定は 'newest' のまま。 -->
+                                         'recommend' は 2026-08-10 追加。既定は 'newest' のまま。
+                                         ⚠️ 2026-08-12 に**表示だけ**「おすすめ」→「よく見る順」に変えた（doc/09 項目CU）。
+                                            値 'recommend' はそのまま。ラベルと値を一緒に変えないこと。 -->
                                     <div class="opt-segment">
                                         <input type="radio" id="programsSort1" name="programsSort" value="newest"><label for="programsSort1">新着順</label>
                                         <input type="radio" id="programsSort2" name="programsSort" value="active"><label for="programsSort2">人気順</label>
-                                        <input type="radio" id="programsSort3" name="programsSort" value="recommend"><label for="programsSort3">おすすめ</label>
+                                        <input type="radio" id="programsSort3" name="programsSort" value="recommend"><label for="programsSort3">よく見る順</label>
                                     </div>
                                 </div>
-                                <!-- ⚠️ この HTML はテンプレートリテラルの中。バックティックを書かないこと（文字列がそこで終わる）。
-                                     人気順にしか効かない設定なので、表示順序の直後に置き、
-                                     **人気順を選んでいる時だけ**出す（新着順では active-point を見ないため）。
-                                     ⚠️ **Kick 連携の有無に関わらず効く。**中身は推定同接の W（平均滞在時間）で、
-                                        Kick を使っていなくてもニコ生内部の順位を動かす（doc/09 項目BL-5）。
-                                        以前は Kick セクション内に「ニコ生とのバランス」として置いていたが、
-                                        連携しない利用者が触れないのに効いている状態だったので独立させた。 -->
-                                <div class="opt-section opt-active-only" hidden>
+                                <!-- 同時視聴者数（β版・2026-08-12・doc/09 項目CR）。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
-                                        人気順の基準
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">人気順は<b>同時視聴者数</b>で並べます。ニコ生は同時視聴者数を公表していないので推定しています。<br><br>右にするほど<b>長く続いている番組</b>が上に来て、左にするほど<b>始まったばかりの番組</b>が上に来やすくなります。<br><br>Kick と統合表示している場合は、右にするほどニコ生の番組が上に来ます。</span></span>
+                                        同時視聴者数<span class="opt-beta-badge">β版</span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
                                     </div>
-                                    <!-- 数値は出さない。中身は「平均滞在時間（分）」というモデルの仮定値で、
-                                         具体的な数字を見せても利用者が判断できる情報にならない。
-                                         スライダーが持つのは目盛りの**添字**で、実際の分は
-                                         constants.js の dwellMinutesScale から引く。 -->
-                                    <div class="opt-range">
-                                        <div class="opt-range-labels">
-                                            <span class="opt-range-end">新着寄り</span>
-                                            <span class="opt-range-end">継続寄り</span>
-                                        </div>
-                                        <input type="range" id="dwellMinutes" name="dwellMinutes" min="0" max="7" step="1" value="3" aria-label="人気順の基準">
+                                    <div class="opt-segment">
+                                        <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
+                                        <input type="radio" id="showViewerCountOn" name="showViewerCount" value="on"><label for="showViewerCountOn">ON</label>
                                     </div>
                                 </div>
+                                <!-- 🔴 **「人気順の基準」（W のスライダー）は 2026-08-12 に廃止した**（doc/09 項目CU）。
+                                     同接を画面に出すと決めた時点で筋が通らなくなったため:
+                                       表示している数字が**実際の同接の推定**なら、正解は1つで好みで動かすものではない
+                                       好みで動かす**つまみ**なら、それを「同時視聴者数」として画面に出してはいけない
+                                     W は defaultDwellMinutes（17分＝旧スライダーのちょうど中央）に固定した。
+                                     ⚠️ **保存値を読む経路も一緒に消してある。** 残すと既存の環境だけ古い W で動く。 -->
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         自動更新
@@ -1559,18 +1546,6 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div class="opt-segment">
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
                                         <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
-                                    </div>
-                                </div>
-                                <!-- 同時視聴者数（β版・2026-08-12・doc/09 項目CR）。
-                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        同時視聴者数<span class="opt-beta-badge">β版</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。「人気順の基準」を動かすとこの数字も変わります。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
-                                    </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
-                                        <input type="radio" id="showViewerCountOn" name="showViewerCount" value="on"><label for="showViewerCountOn">ON</label>
                                     </div>
                                 </div>
                                 <!-- カードの大きさ。**動くサムネの下**（利用者指定・2026-08-10。以前は自動更新の上だった）。

@@ -23,7 +23,7 @@
 
 import './styles/main.css'
 import './styles/kickPage.css'
-import { watchTargetIdOf, buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, setDwellMinutes, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
+import { watchTargetIdOf, buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
@@ -42,7 +42,7 @@ import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHis
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
-import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount, endedByAutoNextValidMs } from './config/constants.js'
+import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultCardSize, defaultShowViewerCount, endedByAutoNextValidMs } from './config/constants.js'
 
 const SIDEBAR_ROOT_ID = 'niconamasidebar-kick-root'
 
@@ -61,7 +61,6 @@ const defaultOptions = {
     kickDisplayMode: 'mixed',
     kickActiveTab: 'nicolive', // 'mixed'（統合）| 'nicolive' | 'kick'
     // 🔴 **既定値を直書きしないこと**（main.js と同じ理由）。constants.js の default* が唯一の定義。
-    dwellMinutes: defaultDwellMinutes,
     cardSize: defaultCardSize,
     sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT,
     showViewerCount: defaultShowViewerCount,
@@ -534,12 +533,6 @@ function wireControls(root) {
         options,
         (c) => sortPrograms(c, options.programsSort),
         () => { refreshPrograms() },
-        // 「人気順の基準」。**取得はせず**その場で順位を計算し直す。
-        // Kick は保存領域に入れていないので、直近の取得結果を足す。
-        (minutes) => {
-            setDwellMinutes(minutes)
-            rerankInPlace()
-        },
     )
     setupServiceTabHandlers((count) => {
         const el = document.getElementById('program_count')
@@ -953,7 +946,6 @@ function teardown() {
 async function init() {
     if (!extensionAlive()) return
     options = await getOptionsFromStorage(defaultOptions)
-    setDwellMinutes(options.dwellMinutes)
     // 🔴 insertSidebar より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize)
     applySidebarPlacement(options.sidebarPlacement)
@@ -1033,10 +1025,6 @@ async function init() {
                 options.programsSort = changes.programsSort.newValue
                 const container = document.getElementById('liveProgramContainer')
                 if (container) sortPrograms(container, options.programsSort)
-            }
-            if (changes.dwellMinutes) {
-                options.dwellMinutes = changes.dwellMinutes.newValue
-                setDwellMinutes(options.dwellMinutes)
             }
             if (changes.updateProgramsInterval) {
                 options.updateProgramsInterval = changes.updateProgramsInterval.newValue
