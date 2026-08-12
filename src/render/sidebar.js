@@ -1561,6 +1561,18 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
                                     </div>
                                 </div>
+                                <!-- 同時視聴者数（β版・2026-08-12・doc/09 項目CR）。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                <div class="opt-section">
+                                    <div class="opt-label opt-title-with-help">
+                                        同時視聴者数<span class="opt-beta-badge">β版</span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。「人気順の基準」を動かすとこの数字も変わります。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
+                                        <input type="radio" id="showViewerCountOn" name="showViewerCount" value="on"><label for="showViewerCountOn">ON</label>
+                                    </div>
+                                </div>
                                 <!-- カードの大きさ。**動くサムネの下**（利用者指定・2026-08-10。以前は自動更新の上だった）。
                                      ⚠️ value は constants.js の cardSizes のキーと同じにすること。
                                         知らない値は既定（medium）に落ちるので、間違えても壊れはしないが効かない。

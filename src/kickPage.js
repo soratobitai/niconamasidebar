@@ -39,8 +39,9 @@ import { observeKickProgramEnd } from './services/kickStatus.js'
 import { consumeAutoNextHopMark } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
-import { applySidebarPlacement, isOverlayPlacement } from './ui/placement.js'
-import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs } from './config/constants.js'
+import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
+import { applyShowViewerCount } from './ui/viewerCount.js'
+import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
 
 const SIDEBAR_ROOT_ID = 'niconamasidebar-kick-root'
 
@@ -58,9 +59,11 @@ const defaultOptions = {
     animatedThumbnail: 'off',
     kickDisplayMode: 'mixed',
     kickActiveTab: 'nicolive', // 'mixed'（統合）| 'nicolive' | 'kick'
-    dwellMinutes: 10,
-    cardSize: 'medium',
-    sidebarPlacement: 'push',
+    // 🔴 **既定値を直書きしないこと**（main.js と同じ理由）。constants.js の default* が唯一の定義。
+    dwellMinutes: defaultDwellMinutes,
+    cardSize: defaultCardSize,
+    sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT,
+    showViewerCount: defaultShowViewerCount,
 }
 
 let options = { ...defaultOptions }
@@ -913,6 +916,8 @@ async function init() {
     // 🔴 insertSidebar より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize)
     applySidebarPlacement(options.sidebarPlacement)
+    // 同時視聴者数を出すか（β版）。印を付けるだけで、カードは作り直さない。
+    applyShowViewerCount(options.showViewerCount)
 
 
     // 動くサムネ。**kick.com では画像を SW 経由で取る。**
@@ -1013,6 +1018,11 @@ async function init() {
                 applySidebarPlacement(options.sidebarPlacement)
                 // 🔴 寄せ幅が変わる。当て直さないとページが寄ったまま／寄らないままになる。
                 applyHostStyles()
+            }
+            if (changes.showViewerCount) {
+                options.showViewerCount = changes.showViewerCount.newValue
+                // 印の付け替えだけ。取得も再描画もしない（見た目の出し分けなので）。
+                applyShowViewerCount(options.showViewerCount)
             }
             if (changes.cardSize) {
                 options.cardSize = changes.cardSize.newValue

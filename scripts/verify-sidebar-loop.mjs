@@ -3620,9 +3620,12 @@ async function cardSize() {
         defaultCardSize === 'medium'
         && cardSizes.medium.columnFactor === 1 && cardSizes.medium.contentScale === 1,
         `既定 ${defaultCardSize} / ${JSON.stringify(cardSizes.medium)}`)
+    // ⚠️ **既定値がリテラルで書いてある前提にしないこと**（2026-08-12 に共有定数へ寄せた・項目CR）。
+    //    見たいのは「両ページの既定が選択肢に実在する」ことなので、識別子なら解決してから見る。
     for (const [name, txt] of [['ニコ生', mn], ['kick.com', kpc]]) {
-        const d = (txt.match(/cardSize:\s*'([^']+)'/) || [])[1]
-        check(`BS ${name}ページの既定値が選択肢に実在する`, radioVals.includes(d), `既定 '${d}'`)
+        const raw = ((txt.match(/^\s{4}cardSize:\s*([^,\n]+),/m) || [])[1] || '').trim()
+        const d = raw === 'defaultCardSize' ? defaultCardSize : raw.replace(/^['"]|['"]$/g, '')
+        check(`BS ${name}ページの既定値が選択肢に実在する`, radioVals.includes(d), `既定 '${d}'（記述: ${raw}）`)
     }
 
     // --- 両ページが反映しているか ---
@@ -3780,6 +3783,163 @@ async function autoNextTarget() {
  *   ・答えが得られなければ動かない
  *   ・自分で開いたページを奪わない
  */
+/**
+ * CR. 同時視聴者数の表示（β版）と、既定値の一元化。
+ *
+ * 2つを1つの群にしてあるのは、後者が前者を作る途中で見つかった同じ型の欠陥だから。
+ * `main.js` / `kickPage.js` が `dwellMinutes: 10` を直書きしており、`constants.js` を
+ * 17 に変えた後も取り残されていた（＝**新規利用者に効く W は 17 ではなく 10**）。
+ * 10 は今の目盛りの中に在るので移行も素通りし、無言で残っていた。
+ */
+async function viewerCountGroup() {
+    console.log('=== CR 同時視聴者数の表示（β版）／既定値の一元化 ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const stripCss = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ')
+    const mainJs = stripComments(rd('main.js'))
+    const kickJs = stripComments(rd('kickPage.js'))
+    const shell = rd('render/sidebar.js')
+    const optH = stripComments(rd('handlers/optionsHandler.js'))
+    const mainCss = stripCss(rd('styles/main.css'))
+    const vc = stripComments(rd('ui/viewerCount.js'))
+
+    // --- ① 判定は1箇所（両ページで写し漏れない） ---
+    const { normalizeShowViewerCount, isViewerCountVisible, applyShowViewerCount, SHOW_VIEWERS_CLASS } =
+        await import('../src/ui/viewerCount.js')
+    check('CR 既定は OFF（β版・更新しただけで見た目が変わらない）',
+        normalizeShowViewerCount(undefined) === 'off')
+    check('CR 🔴 知らない値は OFF に倒す（勝手に出さない）',
+        ['zzz', null, '', 'ON', 1, {}].every((v) => normalizeShowViewerCount(v) === 'off'))
+    check('CR on だけが on', isViewerCountVisible('on') === true && isViewerCountVisible('off') === false)
+    check('CR 🔴 印を付けるのは <html>（kick のサイドバーは body の外に居る）',
+        /document\.documentElement\.classList\.toggle/.test(vc) && !/document\.body\b/.test(vc))
+
+    // 🔴 **印の向き。** 「出す時に付ける」でなければならない。逆にすると、この配線が動かなかった時に
+    //    既定OFFのはずの数字が出る。実際に呼んで確かめる（偽 DOM は本物と同じ呼び方で）。
+    const savedDoc = Object.getOwnPropertyDescriptor(globalThis, 'document')
+    const classes = new Set()
+    globalThis.document = {
+        documentElement: {
+            classList: {
+                toggle: (n, force) => {
+                    // 第2引数を無視する偽物にしないこと（本物は force で付け外しが決まる）
+                    if (force === undefined) { classes.has(n) ? classes.delete(n) : classes.add(n); return classes.has(n) }
+                    if (force) classes.add(n); else classes.delete(n)
+                    return !!force
+                },
+            },
+        },
+    }
+    let offHas, onHas, badHas
+    try {
+        applyShowViewerCount('off'); offHas = classes.has(SHOW_VIEWERS_CLASS)
+        applyShowViewerCount('on'); onHas = classes.has(SHOW_VIEWERS_CLASS)
+        applyShowViewerCount('zzz'); badHas = classes.has(SHOW_VIEWERS_CLASS)
+    } finally {
+        if (savedDoc) Object.defineProperty(globalThis, 'document', savedDoc)
+        else delete globalThis.document
+    }
+    check('CR 🔴 出す時だけ印が付く（壊れたら「出ない」側へ倒れる）',
+        offHas === false && onHas === true && badHas === false,
+        `off=${offHas} / on=${onHas} / 壊れた値=${badHas}`)
+
+    // --- ② 両ページの配線（写し漏れ対策・doc/09 項目BN と同じ縛り） ---
+    check('CR 🔴 ニコ生ページが共有の反映を使う', /applyShowViewerCount\(/.test(mainJs))
+    check('CR 🔴 kick.com ページが共有の反映を使う', /applyShowViewerCount\(/.test(kickJs))
+    check('CR 両ページが設定変更に反応する',
+        /changes\.showViewerCount/.test(mainJs) && /changes\.showViewerCount/.test(kickJs))
+    // 初期化と設定変更の**両方**で呼ぶこと。onChanged だけだと、開いた直後は OFF のまま出ない。
+    check('CR 🔴 初期化でも反映する（開いた直後から効く）',
+        (mainJs.match(/applyShowViewerCount\(/g) || []).length >= 2
+        && (kickJs.match(/applyShowViewerCount\(/g) || []).length >= 2,
+        `ニコ生 ${(mainJs.match(/applyShowViewerCount\(/g) || []).length} 回 / kick ${(kickJs.match(/applyShowViewerCount\(/g) || []).length} 回`)
+
+    // --- ③ 設定 UI ---
+    check('CR 設定に「同時視聴者数」がある', /name="showViewerCount"/.test(shell))
+    check('CR 選択肢は off / on の2つ',
+        (shell.match(/name="showViewerCount"/g) || []).length === 2
+        && /id="showViewerCountOff" name="showViewerCount" value="off"/.test(shell)
+        && /id="showViewerCountOn" name="showViewerCount" value="on"/.test(shell))
+    check('CR β版の印が付いている', /同時視聴者数<span class="opt-beta-badge">β版<\/span>/.test(shell))
+    check('CR 保存する',
+        /input\[name="showViewerCount"\]:checked/.test(optH)
+        && /options\.showViewerCount = showViewerCountElement\.value/.test(optH))
+    check('CR 開いた時に選択状態を復元する', /updateCheckedState\('showViewerCount'/.test(optH))
+    // 🔴 後から足した設定を必須ガードへ入れると、古い DOM のタブで**全設定が保存できなくなる**。
+    const guard = (optH.match(/if \(![\s\S]{0,300}?\) \{\s*return;/) || [''])[0]
+    check('CR （空振り防止）保存の必須ガードを拾えている', /autoOpenElement/.test(guard), guard.slice(0, 80))
+    check('CR 🔴 保存の必須ガードには入れない', !/showViewerCount/.test(guard))
+
+    // --- ④ 出し分けは CSS の1箇所だけ（カードを作り直さない＝切り替えが即時に効く） ---
+    check('CR 🔴 CSS の既定は非表示',
+        /\.viewer_overlay\s*\{[^}]*display:\s*none/.test(mainCss))
+    check('CR 印が付いた時だけ出す',
+        new RegExp('html\\.' + SHOW_VIEWERS_CLASS + '[^{]*\\.viewer_overlay\\s*\\{[^}]*display:\\s*block').test(mainCss),
+        `印: ${SHOW_VIEWERS_CLASS}`)
+    // 描画側が設定を見に行くと、出し分けが2箇所になって片方だけ直す事故が起きる。
+    check('CR 🔴 描画側は設定を見ない（判定は CSS と viewerCount.js だけ）',
+        !/isViewerCountVisible|showViewerCount\s*===|options\.showViewerCount/.test(stripComments(shell)),
+        'sidebar.js に出てよいのはフォームの name="showViewerCount" だけ')
+
+    // --- ⑤ 既定値の一元化（W が 10 のまま取り残されていた件） ---
+    const consts = await import('../src/config/constants.js')
+    const defaultConsts = Object.keys(consts).filter((k) => /^default[A-Z]/.test(k))
+    check('CR （空振り防止）constants の default* を拾えている',
+        defaultConsts.length >= 3, defaultConsts.join(', '))
+    const pairsOf = (txt) => {
+        const m = txt.match(/defaultOptions = \{([\s\S]*?)\n\}/)
+        const out = {}
+        if (m) for (const x of m[1].matchAll(/^\s{4}([A-Za-z0-9_]+):\s*([^,\n]+),/gm)) out[x[1]] = x[2].trim()
+        return out
+    }
+    for (const [name, file] of [['ニコ生', 'main.js'], ['kick.com', 'kickPage.js']]) {
+        const pairs = pairsOf(stripComments(rd(file)))
+        check(`CR （空振り防止）${name}ページの既定値を拾えている`,
+            Object.keys(pairs).length >= 10, `${Object.keys(pairs).length} 個`)
+        const bad = []
+        for (const c of defaultConsts) {
+            const key = c[7].toLowerCase() + c.slice(8)   // defaultDwellMinutes → dwellMinutes
+            if (!(key in pairs)) continue                 // その設定を持たないページ
+            const raw = pairs[key]
+            // 共有定数を読んでいるか、値そのものが一致していれば合格。
+            const ok = raw === c || raw === String(consts[c]) || raw === `'${consts[c]}'` || raw === `"${consts[c]}"`
+            if (!ok) bad.push(`${key}=${raw}（${c}=${JSON.stringify(consts[c])}）`)
+        }
+        check(`CR 🔴 ${name}ページの既定値が constants と食い違わない`, bad.length === 0,
+            bad.join(' / ') || 'なし')
+    }
+
+    // 🔴 **仕上げは「実際に効く値」で見る。** 直書きが消えても、移行が寄せ直せば元の木阿弥。
+    //    getOptions を通した結果が目盛りのちょうど中央であることまで確かめる。
+    const savedChrome = Object.getOwnPropertyDescriptor(globalThis, 'chrome')
+    const store = {}
+    globalThis.chrome = {
+        runtime: { id: 'verify', lastError: null },
+        storage: {
+            local: {
+                get: (a, b) => { const cb = typeof a === 'function' ? a : b; cb({ ...store }) },
+                set: (o, cb) => { Object.assign(store, o); if (cb) cb() },
+            },
+            onChanged: { addListener() { } },
+        },
+    }
+    try {
+        const { getOptions } = await import('../src/services/storage.js')
+        const pairs = pairsOf(stripComments(rd('main.js')))
+        // ページが書いている既定をそのまま解決して渡す（検査側で 17 と決め打ちしない）
+        const raw = pairs.dwellMinutes
+        const seed = raw in consts ? consts[raw] : Number(raw)
+        const fresh = await getOptions({ dwellMinutes: seed })
+        const mid = consts.dwellMinutesScale[(consts.dwellMinutesScale.length - 1) / 2]
+        check('CR 🔴 新規利用者に実際に効く W が目盛りのちょうど中央',
+            fresh.dwellMinutes === mid && fresh.dwellMinutes === consts.defaultDwellMinutes,
+            `効く W=${fresh.dwellMinutes} / 中央=${mid} / constants=${consts.defaultDwellMinutes}`)
+    } finally {
+        if (savedChrome) Object.defineProperty(globalThis, 'chrome', savedChrome)
+        else delete globalThis.chrome
+    }
+}
+
 async function sidebarPlacementGroup() {
     console.log('=== CE サイドバーの置き方（寄せる／重ねる） ===')
     const { readFileSync } = await import('fs')
@@ -3809,8 +3969,15 @@ async function sidebarPlacementGroup() {
     // 🔴 写し漏れ対策（doc/09 項目BN と同じ縛り）
     check('CE 🔴 ニコ生ページが共有の判定を使う', /applySidebarPlacement\(/.test(mainJs))
     check('CE 🔴 kick.com ページが共有の判定を使う', /applySidebarPlacement\(/.test(kickJs))
-    check('CE 両ページに既定値がある',
-        /sidebarPlacement:\s*'push'/.test(mainJs) && /sidebarPlacement:\s*'push'/.test(kickJs))
+    // ⚠️ **値の直書きを前提にしないこと。** 2026-08-12 に既定値を共有定数へ寄せた（項目CR）。
+    //    ここで見たいのは「両ページが既定を持っていて、それが『寄せる』になる」ことであって、
+    //    'push' と書いてあることではない。共有定数か 'push' のどちらでも通す。
+    check('CE 両ページに既定値があり、それが「寄せる」になる',
+        ['main.js', 'kickPage.js'].every((f) => {
+            const m = stripComments(rd(f)).match(/defaultOptions = \{([\s\S]*?)\n\}/)
+            const v = m && ((m[1].match(/^\s{4}sidebarPlacement:\s*([^,\n]+),/m) || [])[1] || '').trim()
+            return v === 'SIDEBAR_PLACEMENT_DEFAULT' || v === "'push'"
+        }))
     check('CE 両ページが設定変更に反応する',
         /changes\.sidebarPlacement/.test(mainJs) && /changes\.sidebarPlacement/.test(kickJs))
     check('CE 🔴 印だけ付けて終わりにしない（寄せ幅を当て直す）',
@@ -5746,6 +5913,7 @@ if (real) {
     await gridColumnFixGroup()
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()
+    await viewerCountGroup()
     await kickPlaceholderIconGroup()
     await kickSessionNoticeGroup()
     await nicoUnreachableGroup()

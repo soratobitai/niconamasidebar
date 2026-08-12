@@ -1,13 +1,14 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs } from './config/constants.js'
+import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
 import { buildSidebarShell, setAnimThumbnailFeed, setDwellMinutes, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
 import { consumeAutoNextHopMark } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnNicoPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
-import { applySidebarPlacement } from './ui/placement.js'
+import { applySidebarPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
+import { applyShowViewerCount } from './ui/viewerCount.js'
 import { adjustWatchPageChild, setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
 import { LoadingManager } from './managers/LoadingManager.js'
@@ -37,9 +38,13 @@ let defaultOptions = {
     // 保存するのは表示方法と、推定同接の W だけ。どちらも拡張のオプションページで変更する。
     kickDisplayMode: 'mixed',  // 'mixed' | 'tabs'
     kickActiveTab: 'nicolive', // タブ分離時にどのタブを選んでいたか（'mixed' | 'nicolive' | 'kick'）
-    dwellMinutes: 10,          // W（平均滞在時間・分）
-    cardSize: 'medium',        // 番組カードの大きさ（'small' | 'medium' | 'large'）
-    sidebarPlacement: 'push',  // サイドバーの置き方（'push' = ページを寄せる / 'overlay' = 上に重ねる）
+    // 🔴 **既定値を直書きしないこと。** constants.js の default* が唯一の定義。
+    //    直書きすると、あちらを変えた時にここが取り残される（実際 dwellMinutes が
+    //    17 になった後も 10 のままで、新規利用者だけ W=10 で動いていた）。
+    dwellMinutes: defaultDwellMinutes,          // W（平均滞在時間・分）
+    cardSize: defaultCardSize,                  // 番組カードの大きさ（'small' | 'medium' | 'large'）
+    sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT, // サイドバーの置き方（'push' = 寄せる / 'overlay' = 重ねる）
+    showViewerCount: defaultShowViewerCount,    // 同時視聴者数をサムネ左上に出すか（β版・既定OFF）
 };
 let options = {};
 let elems = {};
@@ -501,6 +506,11 @@ chrome.storage.onChanged.addListener(function (changes) {
         // 🔴 印を付け替えただけでは #root の幅が古いまま。寄せ幅を計算し直させる。
         if (sidebarControl) sidebarControl.setRootWidth();
     }
+    if (changes.showViewerCount) {
+        options.showViewerCount = changes.showViewerCount.newValue;
+        // 印の付け替えだけ。取得も再描画もしない（見た目の出し分けなので）。
+        applyShowViewerCount(options.showViewerCount);
+    }
     if (changes.cardSize) {
         options.cardSize = changes.cardSize.newValue;
         setCardSize(options.cardSize);
@@ -654,6 +664,8 @@ const reflectOptions = () => {
     setCardSize(options.cardSize);
     // サイドバーの置き方（寄せる／重ねる）。**印を付けるだけ。**寄せ幅の計算は setRootWidth。
     applySidebarPlacement(options.sidebarPlacement);
+    // 同時視聴者数を出すか（β版）。印を付けるだけで、カードは作り直さない。
+    applyShowViewerCount(options.showViewerCount);
     // タブのクリック配線（1回だけ効く。2回目以降は内部で弾く）
     setupServiceTabHandlers((count) => {
         if (updateManager) updateManager.updateProgramCount(count);

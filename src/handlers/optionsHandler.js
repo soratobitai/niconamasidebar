@@ -41,6 +41,7 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted, onDwel
             const kickDisplayModeElement = document.querySelector('input[name="kickDisplayMode"]:checked');
             const cardSizeElement = document.querySelector('input[name="cardSize"]:checked');
             const sidebarPlacementElement = document.querySelector('input[name="sidebarPlacement"]:checked');
+            const showViewerCountElement = document.querySelector('input[name="showViewerCount"]:checked');
 
             if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
                 return;
@@ -60,6 +61,9 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted, onDwel
             // カードの大きさ。**必須ガードに入れない**（後から足した設定なので、古い DOM でも保存を止めない）。
             if (cardSizeElement) options.cardSize = cardSizeElement.value;
             if (sidebarPlacementElement) options.sidebarPlacement = sidebarPlacementElement.value;
+            // 同時視聴者数（β版）。**必須ガードに入れない**（後から足した設定なので、古い DOM でも保存を止めない）。
+            // 画面への反映は各ページの storage.onChanged が applyShowViewerCount で行う。
+            if (showViewerCountElement) options.showViewerCount = showViewerCountElement.value;
             // ⚠️ 人気順の基準（dwellMinutes）はここで読まない。スライダーなので
             //    専用の input リスナーが options に入れている（フォームの change では拾えない）。
 
@@ -89,6 +93,7 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted, onDwel
     updateCheckedState('kickDisplayMode', options.kickDisplayMode);
     updateCheckedState('cardSize', options.cardSize);
     updateCheckedState('sidebarPlacement', options.sidebarPlacement);
+    updateCheckedState('showViewerCount', options.showViewerCount);
     setupDwellSlider(options, sortPrograms, onDwellChanged);
 
     // フォームに変更があったら保存する

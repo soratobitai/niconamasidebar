@@ -439,6 +439,11 @@ body.nicosidebar-light,
       他拡張がサムネに出すホバーボタンも 2 なので同列。小さな角の表示なので、
       重なっても実害が小さいほうへ倒している。 */
 .program_container .program_thumbnail .viewer_overlay {
+    /* 🔴 **既定は非表示**（β版・設定「同時視聴者数」が ON の時だけ出す）。
+       印は <html> の `nns-show-viewers`（ui/viewerCount.js が唯一の書き手）。
+       ⚠️ **向きを逆にしないこと。** 「隠す時に印を付ける」にすると、配線が動かなかった時に
+          既定OFFのはずの数字が出る。出す時に付ける形なら、壊れても出ないで済む。 */
+    display: none;
     position: absolute;
     top: 4px;
     left: 4px;
@@ -451,6 +456,11 @@ body.nicosidebar-light,
     background: rgba(0, 0, 0, 0.62);
     border-radius: 3px;
     white-space: nowrap;
+}
+
+/* 設定「同時視聴者数」が ON の時だけ出す。印は <html> に付く（両ページ共通）。 */
+html.nns-show-viewers .program_container .program_thumbnail .viewer_overlay {
+    display: block;
 }
 
 /* 動くサムネ（ホバー中のオーバーレイ・2レイヤーでクロスフェード） */
