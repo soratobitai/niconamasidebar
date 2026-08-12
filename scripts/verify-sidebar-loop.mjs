@@ -1974,6 +1974,182 @@ async function programEndConfirmation() {
 }
 
 /**
+ * CS: 自動移動で離れた番組を、飛び先で即座にリストから外す（2026-08-12）。
+ *
+ * 【なぜ要るか】終了検知は「一覧APIに載っていない番組を詳細APIに聞く」形なので、
+ * 一覧APIがまだ載せている間は**疑いにすらならない**。実測（2026-08-12）では、
+ * 番組が ended になった時点で一覧APIはまだ載せており、消えるのはその後（0〜30秒）。
+ * 自動移動が一覧を取りに行くのは終了の約15〜20秒後で、**窓が重なる**。
+ *
+ * 🔴 **これは推測での削除ではない。** 自動移動はその番組の終了を自分で見ており、
+ *    それが移動のきっかけである。ページを移ると記憶が消えるので持ち越すだけ。
+ */
+async function endedByAutoNextGroup() {
+    const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
+    console.log('=== CS 自動移動で離れた番組を飛び先で外す ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const st = stripComments(rd('services/status.js'))
+    const anm = stripComments(rd('managers/AutoNextManager.js'))
+    const umSrc = stripComments(rd('managers/UpdateManager.js'))
+    const kickJs = stripComments(rd('kickPage.js'))
+
+    // --- ① 印の読み書き（実コードを動かす） ---
+    const savedChrome = globalThis.chrome
+    const store = {}
+    // 🔴 **storage の読みを「次のタイマーまで返らない」形にしてある。**
+    //    即座に解決するスタブだと、`await this._endedSeeded` を消しても種蒔きがたまたま
+    //    間に合ってしまい、**順序を壊しても振る舞いの検査が通る**（実際そうなっていた）。
+    //    本物の chrome.storage は必ず1往復するので、こちらのほうが実態に近い。
+    globalThis.chrome = {
+        runtime: { id: 'test-extension-id', lastError: null, getURL: (p) => p },
+        storage: {
+            local: {
+                get: (k) => new Promise((res) => setTimeout(() => res(k in store ? { [k]: store[k] } : {}), 5)),
+                set: (o) => { Object.assign(store, o) },
+                remove: (k) => { delete store[k] },
+            },
+            onChanged: { addListener() { } },
+        },
+    }
+    const savedSession = globalThis.sessionStorage
+    globalThis.sessionStorage = { setItem() { }, getItem: () => null, removeItem() { } }
+    let seededOk = false
+    try {
+        const { markAutoNextHop, takeEndedByAutoNext } = await import('../src/services/status.js')
+
+        markAutoNextHop('nico:lv900', 'nico:lv800')
+        check('CS 印は hop とは別のキーに置く（hop は別用途で1回で消費される）',
+            !!store.autoNextEnded && store.autoNextEnded.id === 'lv800',
+            JSON.stringify(store.autoNextEnded))
+        check('CS 受け取れる', (await takeEndedByAutoNext()) === 'lv800')
+        check('CS 🔴 読んだら消える（あとで自分で開き直した時に効かせない）',
+            (await takeEndedByAutoNext()) === '' && !('autoNextEnded' in store))
+
+        // Kick から離れた場合は印を置かない（Kick は自分のリストで終了を判定できる）
+        markAutoNextHop('nico:lv901', 'kick:someone')
+        check('CS 🔴 Kick から離れた時は印を置かない（lv しか扱わない）',
+            !('autoNextEnded' in store), JSON.stringify(store.autoNextEnded))
+
+        // 期限切れは無視する
+        store.autoNextEnded = { id: 'lv700', at: Date.now() - 10 * 60 * 1000 }
+        check('CS 期限切れの印は使わない', (await takeEndedByAutoNext()) === '')
+
+        // 壊れた値で番組を消さない
+        for (const bad of [{ id: 'lv1' }, { id: 123, at: Date.now() }, { at: Date.now() }, null, 'lv1']) {
+            store.autoNextEnded = bad
+            if ((await takeEndedByAutoNext()) !== '') { seededOk = true; break }
+        }
+        check('CS 壊れた印では消さない', !seededOk)
+
+        // --- ② 実際に外れるか（本物の updateSidebar を回す） ---
+        store.autoNextEnded = { id: 'lv801', at: Date.now() }
+        const NOW = Date.now()
+        const h = buildRenderHarness({ programsSort: 'newest' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        const ids = () => h.dom.ids().join(',')
+        const prog = (n, ageMin) => apiProgram({ id: `lv${n}`, beginAtMs: NOW - ageMin * 60000 })
+        const row = (n) => ({ id: String(n), title: `t${n}`, community_name: `c${n}`, thumbnail_url: '', provider_type: 'community' })
+
+        // 🔴 **一覧APIも notifybox もまだ「放送中」として返している状態を作る。**
+        //    これが実測した窓そのもので、従来はここでカードが残っていた。
+        h.state.followPrograms = [prog(800, 30), prog(801, 20), prog(802, 10)]
+        h.state.notifyRows = [row(802), row(801), row(800)]
+        h.state.endedIds = new Set()   // 詳細APIも「放送中」と答える
+        h.state.calls.detail = 0
+        await run()
+        check('CS 🔴 一覧も notifybox も返し続けていても、離れた番組は出ない',
+            ids() === '802,800', ids() + '（lv801 が消えていること）')
+        check('CS 🔴 そのために詳細APIを叩いていない（聞くまでもなく知っている）',
+            h.state.calls.detail === 0, `詳細API ${h.state.calls.detail} 回`)
+
+        // 印が無ければ従来どおり（放送中の番組を消さない）
+        const h2 = buildRenderHarness({ programsSort: 'newest' })
+        const w2 = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h2)
+        h2.state.followPrograms = [prog(810, 30), prog(811, 20)]
+        h2.state.notifyRows = [row(811), row(810)]
+        h2.state.endedIds = new Set()
+        const s2 = await w2.um.updateSidebar(); if (s2) w2.loadingManager.finishSession(s2)
+        check('CS 印が無ければ1件も消えない（従来どおり）',
+            h2.dom.ids().join(',') === '811,810', h2.dom.ids().join(','))
+        h2.restore()
+        h.restore()
+    } finally {
+        globalThis.chrome = savedChrome
+        if (savedSession === undefined) delete globalThis.sessionStorage
+        else globalThis.sessionStorage = savedSession
+    }
+
+    // --- ③ 呼び忘れ・写し漏れの防止 ---
+    // ⚠️ **正規表現で引数を数えないこと。** 実引数が `watchTargetIdOf(nextHref)` のように
+    //    入れ子の括弧を含むので、`[^)]*` 系はどう書いても嘘になる。括弧の深さを数える。
+    const callArgs = (src, fnName) => {
+        const out = []
+        const needle = fnName + '('
+        for (let i = src.indexOf(needle); i >= 0; i = src.indexOf(needle, i + 1)) {
+            let depth = 0, commas = 0
+            for (let j = i + needle.length - 1; j < src.length; j++) {
+                const c = src[j]
+                if (c === '(') depth++
+                else if (c === ')') { depth--; if (depth === 0) { out.push(commas + 1); break } }
+                else if (c === ',' && depth === 1) commas++
+            }
+        }
+        return out
+    }
+    const hopCalls = callArgs(anm, 'markAutoNextHop')
+    check('CS （空振り防止）呼び出しを拾えている', hopCalls.length === 2, `${hopCalls.length} 箇所`)
+    check('CS 🔴 飛び先と「離れた番組」を1回の呼び出しで書く（片方だけ忘れられない）',
+        hopCalls.length === 2 && hopCalls.every((n) => n === 2),
+        `引数の数: ${hopCalls.join(' / ')}。1つの呼び出しが残るとその経路だけカードが残る`)
+    check('CS 🔴 種蒔きを待ってから終了判断する（初回に間に合わせる）',
+        /_dropEndedPrograms\([^)]*\)\s*\{\s*await this\._endedSeeded/.test(umSrc),
+        'await が無いと、自動移動の直後という肝心の1回目で間に合わない')
+    // ⚠️ **文字数で窓を切らないこと**（doc/09 項目CI）。中身が1行増えただけで嘘のNGが出る。
+    //    波括弧を数えて本体を取り出し、「丸ごと try で包まれているか」を性質として見る。
+    const bodyOf = (src, sig) => {
+        const i = src.indexOf(sig)
+        if (i < 0) return ''
+        const open = src.indexOf('{', i)
+        if (open < 0) return ''
+        let depth = 0
+        for (let j = open; j < src.length; j++) {
+            if (src[j] === '{') depth++
+            else if (src[j] === '}') { depth--; if (depth === 0) return src.slice(open + 1, j) }
+        }
+        return ''
+    }
+    // ⚠️ 定義で探すこと。`_seedEndedFromAutoNext()` だけだと**コンストラクタの呼び出し側**に
+    //    先に当たり、まったく別の波括弧を本体として取り出してしまう（実際に踏んだ）。
+    const seedBody = bodyOf(umSrc, 'async _seedEndedFromAutoNext()')
+    check('CS （空振り防止）種蒔きの本体を取り出せている', seedBody.trim().length > 20,
+        `${seedBody.trim().length} 文字`)
+    check('CS 🔴 種蒔きは throw しない（約束を持ち回るため）',
+        /^\s*try\s*\{/.test(seedBody) && /\}\s*catch/.test(seedBody),
+        '本体まるごとを try で包むこと。reject すると確認の入口で例外になる')
+    check('CS 🔴 kick.com ページも同じ印を読む（片方だけにしない）',
+        /takeEndedByAutoNext\(\)/.test(kickJs) && /dropEndedByAutoNext\(/.test(kickJs))
+    // ⚠️ **ファイル全体で位置を比べないこと。** `startTimer()` は関数の定義が先に出てくるので、
+    //    素直に indexOf すると常に「呼び出しより前」になって合格してしまう。init の中だけで見る。
+    const initBody = kickJs.slice(kickJs.indexOf('async function init()'))
+    const iTake = initBody.indexOf('endedByAutoNextId = await takeEndedByAutoNext()')
+    const iTimer = initBody.indexOf('\n    startTimer()')
+    check('CS （空振り防止）init の中で両方を見つけられている', iTake >= 0 && iTimer >= 0,
+        `受け取り ${iTake} / 取得開始 ${iTimer}`)
+    check('CS 🔴 kick.com は取得を始める前に読む',
+        iTake >= 0 && iTimer >= 0 && iTake < iTimer,
+        '後だと1回目の取得に間に合わない')
+    check('CS kick.com 側は期限を切ってある（notifybox の鳴る罠が無いため）',
+        /endedByAutoNextUntil/.test(kickJs) && /Date\.now\(\) > endedByAutoNextUntil/.test(kickJs))
+    // 誤って消した時の受け皿（ニコ生側）が生きていること
+    check('CS 誤りの受け皿は残っている（notifybox に戻れば印を落として警告）',
+        /_endedConfirmed\.delete\(id\)/.test(umSrc) && /warnNotifyboxResurrection\(/.test(umSrc))
+    check('CS 印の期限は hop の印と同じ定数を使う（別々に持たない）',
+        /Date\.now\(\) - mark\.at > AUTO_NEXT_HOP_VALID_MS/.test(st))
+}
+
+/**
  * BI-3: 番組終了の再検知で、リストを何度も取り直さないこと。
  *
  * 🔴 **終了ガイドが出ている間、検知は20秒ごとに再発火する。**
@@ -5881,6 +6057,7 @@ if (real) {
     await danmakuRanking()
     console.log('')
     await programEndConfirmation()
+    await endedByAutoNextGroup()
     await endedRecheckDoesNotRefetch()
     console.log('')
     await r1NoSpin()

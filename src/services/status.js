@@ -85,16 +85,77 @@ const AUTO_NEXT_HOP_VALID_MS = 3 * 60 * 1000 // 印の有効期限（移動は10
 const AUTO_NEXT_HOP_STORE_KEY = 'autoNextHop'
 
 /**
- * 移動する直前に印を置く（AutoNextManager から呼ぶ）。
- * @param {string} [targetId] 飛び先の識別子（`watchTargetIdOf` の形）。オリジンをまたぐ時に使う
+ * 自動移動で**離れる**番組の印（doc/09 項目CS・2026-08-12）。
+ *
+ * 【なぜ要るか】終了検知は「一覧APIに載っていない番組を詳細APIに聞く」形なので、
+ * **一覧APIがまだその番組を載せている間は疑いにすらならない。**
+ * 2026-08-12 の実測: 番組が `ended` になった時点で一覧APIはまだ載せており、
+ * 消えるのはその後（15秒刻みで測って2件とも1周ぶん＝0〜30秒）。
+ * 自動移動が一覧を取りに行くのは「終了 → 10秒カウント → 遷移 → 300ms」で**約15〜20秒後**。
+ * **窓が重なっているので、終わった番組のカードが次の定期更新まで残ることがある。**
+ *
+ * 🔴 **推測ではない。** 自動移動は「その番組が終わった」のを自分で見ており、それが移動の
+ *    きっかけである。持ち越していなかったのは、ページを移ると記憶が消えるからでしかない。
+ *    ここで持ち越せば、ニコ生側の反映が何秒かかろうと関係なくなる。
+ *
+ * ⚠️ **hop の印（`autoNextHop`）に相乗りさせないこと。** あちらは
+ *    `consumeAutoNextHopMark` が**1回で使い切って消す**（視聴回数を数えるために早い段階で
+ *    呼ばれる）。同じ器に入れると、リスト側が読む前に消える。
  */
-function markAutoNextHop(targetId) {
+const AUTO_NEXT_ENDED_STORE_KEY = 'autoNextEnded'
+
+/**
+ * `nico:lv123` → `lv123`。それ以外は空文字。
+ *
+ * ⚠️ **ニコ生だけを対象にする。** Kick は「今回のリストに居ない＝終了」で判定でき、
+ *    詳細APIに聞く仕組み自体が無い（doc/09 項目BX）。
+ */
+function nicoProgramIdOf(targetId) {
+	const m = /^nico:(lv\d+)$/.exec(String(targetId || ''))
+	return m ? m[1] : ''
+}
+
+/**
+ * 移動する直前に印を置く（AutoNextManager から呼ぶ）。
+ *
+ * 🔴 **2つの印を1回の呼び出しで書く。** 呼び出し側は2箇所（カウントダウン満了・サムネクリック）
+ *    あり、別々の関数にすると片方だけ足し忘れる。書き込みも1回の `set` にまとめてある
+ *    （直後に `location.assign` するので、往復は少ないほうがよい）。
+ *
+ * @param {string} [targetId] 飛び先の識別子（`watchTargetIdOf` の形）。オリジンをまたぐ時に使う
+ * @param {string} [endedTargetId] **今いる（＝終わった）**番組の識別子。飛び先でリストから外すのに使う
+ */
+function markAutoNextHop(targetId, endedTargetId) {
 	try { sessionStorage.setItem(AUTO_NEXT_HOP_KEY, String(Date.now())) } catch (_e) {}
+	const at = Date.now()
+	const endedId = nicoProgramIdOf(endedTargetId)
 	try {
 		chrome.storage.local.set({
-			[AUTO_NEXT_HOP_STORE_KEY]: { at: Date.now(), to: String(targetId || '') },
+			[AUTO_NEXT_HOP_STORE_KEY]: { at, to: String(targetId || '') },
+			...(endedId ? { [AUTO_NEXT_ENDED_STORE_KEY]: { at, id: endedId } } : {}),
 		})
 	} catch (_e) { /* 拡張が無効化されていれば置けないだけ */ }
+}
+
+/**
+ * 「自動移動で離れた番組」を1回だけ受け取る（飛び先のページが起動時に呼ぶ）。
+ *
+ * 🔴 **読んだら消す。** 残すと、あとで利用者が自分でその番組を開き直した時にも効いてしまう。
+ * ⚠️ 期限切れ（`AUTO_NEXT_HOP_VALID_MS`）は無視する。放置された古い印で番組を隠さない。
+ *
+ * @returns {Promise<string>} `lv123` 形式。無ければ空文字
+ */
+async function takeEndedByAutoNext() {
+	try {
+		const got = await chrome.storage.local.get(AUTO_NEXT_ENDED_STORE_KEY)
+		const mark = got && got[AUTO_NEXT_ENDED_STORE_KEY]
+		if (!mark || typeof mark !== 'object') return ''
+		try { chrome.storage.local.remove(AUTO_NEXT_ENDED_STORE_KEY) } catch (_e) {}
+		if (!Number.isFinite(mark.at) || Date.now() - mark.at > AUTO_NEXT_HOP_VALID_MS) return ''
+		return /^lv\d+$/.test(String(mark.id)) ? String(mark.id) : ''
+	} catch (_e) {
+		return ''
+	}
 }
 
 /**
@@ -196,6 +257,6 @@ function observeProgramEnd(onEnded) {
 	}
 }
 
-export { observeProgramEnd, markAutoNextHop, consumeAutoNextHopMark }
+export { observeProgramEnd, markAutoNextHop, consumeAutoNextHopMark, takeEndedByAutoNext }
 
 

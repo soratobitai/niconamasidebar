@@ -6,8 +6,9 @@ import { makeProgramElement, applyRankAttributes, updateThumbnailsFromStorage, f
 import { setProgramContainerWidth } from '../ui/layout.js';
 import { sortPrograms } from '../utils/sorting.js';
 import { orderComparator } from '../utils/programOrder.js';
-import { updateThumbnailInterval, kickThumbnailInterval, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle, minLoadingDurationMs, fallbackUpdateIntervalSec } from '../config/constants.js';
+import { updateThumbnailInterval, kickThumbnailInterval, newProgramFastPollMs, manualThumbWaitMaxMs, reorderFlipDurationMs, endCheckMaxPerCycle, minLoadingDurationMs, fallbackUpdateIntervalSec, endedByAutoNextValidMs } from '../config/constants.js';
 import { checkExtensionAlive } from '../utils/extensionAlive.js';
+import { takeEndedByAutoNext } from '../services/status.js';
 
 /**
  * 終了と**確認して**消した番組が notifybox に戻ってきた時に1回だけ警告する（鳴る罠）。
@@ -69,6 +70,22 @@ export class UpdateManager {
         //    ここに入った番組は聞き直さず、フォローAPIが手放すまで消したままにする。
         //    notifybox に戻ってきたら警告を鳴らして印を落とす（＝食い違いに気付ける）。
         this._endedConfirmed = new Set();
+        // 🔴 **自動移動で離れた番組は、詳細APIに聞かなくても終了と分かっている**（doc/09 項目CS）。
+        //    移動のきっかけがその番組の終了を見たことなので、推測ではない。
+        //
+        // 🔴 **`_endedConfirmed` に混ぜないこと。** あちらには「notifybox に戻ってきたら印を落として
+        //    警告する」鳴る罠があり、**詳細APIの答えと notifybox の食い違いを捕まえる**ためのもの。
+        //    ところがこの印が効いてほしいのは、まさに**一覧APIも notifybox もまだ返している窓**
+        //    なので、混ぜると置いた瞬間に罠が落として誤警告まで出る（実装して検査で気付いた）。
+        //
+        // ⚠️ **期限を切ること。** 鳴る罠の外に置く＝取り違えた時に戻る道が無くなるので、
+        //    時間で自分から戻れるようにする。kick.com 側と同じ考え方・同じ長さ。
+        this._endedByAutoNext = '';
+        this._endedByAutoNextUntil = 0;
+        // ⚠️ **`_dropEndedPrograms` より先に必ず終わらせること。** 初回の取得は
+        //    ページ読み込みの 300ms 後に走るので、素直に await しないと間に合わない。
+        //    約束を1つ持ち回り、確認の入口で待つ形にしてある（毎周期 storage を読まない）。
+        this._endedSeeded = this._seedEndedFromAutoNext();
         // 取得中の番組（完了を待たずに次へ進むので、同じ番組を二重に走らせないための印）
         this._thumbInFlight = new Set();   // id -> 次に更新してよい時刻(epoch ms)。ドリフトはここで表現する
         // _updateOneThumbnailAndWait の安全ガードタイマー（破棄時に一括clearするため追跡）。
@@ -725,11 +742,36 @@ export class UpdateManager {
      * @param {Array<any>|false} notifyList notifybox の生応答（失敗時 false）
      * @returns {Promise<Array<object>>} 終了と**確認できた**番組を除いたリスト
      */
+    /**
+     * 自動移動で離れた番組を覚える。**起動時に1回だけ。**
+     * 🔴 **絶対に throw しないこと。** 約束を持ち回るので、失敗すると確認の入口で例外になる。
+     */
+    async _seedEndedFromAutoNext() {
+        try {
+            const id = await takeEndedByAutoNext();
+            if (id) {
+                this._endedByAutoNext = id;
+                this._endedByAutoNextUntil = Date.now() + endedByAutoNextValidMs;
+            }
+        } catch (_e) { /* 読めなければ従来どおり詳細APIに聞く */ }
+    }
+
+    /** 自動移動で離れた番組か（期限内のみ）。 */
+    _isEndedByAutoNext(id) {
+        return !!id && id === this._endedByAutoNext && Date.now() <= this._endedByAutoNextUntil;
+    }
+
     async _dropEndedPrograms(programs, notifyList) {
-        // 消したままにする（＝既に詳細APIで終了と確認できている番組を落とす）。
+        // 🔴 **種蒔きを待ってから判断する。** ここより後だと、初回の周期だけ間に合わない
+        //    （＝自動移動の直後という、いちばん効いてほしい場面で効かない）。
+        await this._endedSeeded;
+
+        // 消したままにする（＝終了と分かっている番組を落とす）。理由は2つあり、扱いが違う:
+        //   `_endedConfirmed`   … 詳細APIが ended と答えた。鳴る罠の対象
+        //   `_endedByAutoNext`  … 自動移動が終了を見て離れた。期限つき・鳴る罠の対象外
         const dropConfirmed = (list) => list.filter((p) => {
             const id = p && p.id ? String(p.id) : '';
-            return !(id && this._endedConfirmed.has(id));
+            return !(id && (this._endedConfirmed.has(id) || this._isEndedByAutoNext(id)));
         });
 
         // notifybox の取得に失敗した周期は**新たな疑いを立てない**（通信断で全部消えるのが最悪の壊れ方）。
@@ -755,7 +797,8 @@ export class UpdateManager {
         const suspects = [];
         for (const p of programs) {
             const id = p && p.id ? String(p.id) : '';
-            if (!id || live.has(id) || this._endedConfirmed.has(id)) continue;
+            // 自動移動で離れた番組は聞くまでもない（聞いても一覧より詳細のほうが遅いことがある）
+            if (!id || live.has(id) || this._endedConfirmed.has(id) || this._isEndedByAutoNext(id)) continue;
             suspects.push(id);
         }
 

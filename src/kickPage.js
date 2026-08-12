@@ -36,12 +36,12 @@ import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { AppState } from './core/AppState.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { observeKickProgramEnd } from './services/kickStatus.js'
-import { consumeAutoNextHopMark } from './services/status.js'
+import { consumeAutoNextHopMark, takeEndedByAutoNext } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
-import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
+import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultDwellMinutes, defaultCardSize, defaultShowViewerCount, endedByAutoNextValidMs } from './config/constants.js'
 
 const SIDEBAR_ROOT_ID = 'niconamasidebar-kick-root'
 
@@ -556,6 +556,22 @@ function wireControls(root) {
  *    CORS を許可していない。SW ならホスト権限（optional）でログインcookieごと叩ける。
  *    写像は `mapApiProgramToInfo` を共有しているので、ニコ生側と同じ形になる。
  */
+/**
+ * 自動移動でニコ生から飛んできた時に、離れた（＝終了した）番組をリストから外す。
+ *
+ * 🔴 **ニコ生ページ側と対**（あちらは `UpdateManager._endedConfirmed`）。片方だけだと
+ *    ニコ生 → kick.com の移動でだけカードが残る（doc/09 項目BN の型）。
+ * ⚠️ **期限を切ってあること。** ここには notifybox の「鳴る罠」（消した番組が戻ってきたら
+ *    印を落とす）が無いので、万一取り違えても自分で戻れるようにする。
+ */
+let endedByAutoNextId = ''
+let endedByAutoNextUntil = 0
+
+function dropEndedByAutoNext(programs) {
+    if (!endedByAutoNextId || Date.now() > endedByAutoNextUntil) return programs
+    return programs.filter((p) => !(p && String(p.id) === endedByAutoNextId))
+}
+
 async function fetchNicoPrograms() {
     // 🔴 **「失敗」と「0件」を区別して返すこと。** 両方 `[]` にすると、取得に失敗しただけの周期で
     //    ニコ生のカードが**全部消えて次の周期で戻る**（＝リストが点滅する）。
@@ -626,7 +642,10 @@ async function refreshProgramsInner(container) {
     //    片方だけ落ちた周期でそのサービスのカードが全消えし、次の周期で戻る＝点滅する。
     //    連携OFF（そもそも取りに行かない）と取得失敗を混同しないよう、ok で分ける。
     const kickPrograms = kickRes.ok ? kickRes.programs : lastKickPrograms
-    const nicoPrograms = nicoRes.ok ? nicoRes.programs : lastNicoPrograms
+    // 🔴 **自動移動でニコ生から飛んできた場合、離れた番組は終了している**（doc/09 項目CS）。
+    //    フォローAPIはしばらくその番組を返し続けるので、外さないとカードが残る。
+    //    ⚠️ ニコ生ページ側は `_endedConfirmed` に載せて同じことをしている。**片方だけにしないこと。**
+    const nicoPrograms = dropEndedByAutoNext(nicoRes.ok ? nicoRes.programs : lastNicoPrograms)
 
     // 両方ダメ＝未ログイン・権限なしの可能性。ニコ生ページと同じ場所に案内を出す。
     // ⚠️ **「片方でも失敗」に緩めないこと。** `#api_error` の中身はニコ生のログインリンクなので、
@@ -947,6 +966,12 @@ async function init() {
     //    あちらは「印と違うチャンネルなら数える」なので、印が空のまま回ると
     //    **自動移動で飛んできた先を数えてしまう**。await を挟むと間に合わない。
     lastCountedOwnerKey = currentOwnerKeyOnKickPage()
+
+    // 🔴 **取得を始める前に受け取ること。** ニコ生から自動移動で飛んできた場合、離れた番組は
+    //    終了している（doc/09 項目CS）。startTimer の最初の取得より後だと、いちばん効いてほしい
+    //    1回目に間に合わない。ニコ生ページ側が種蒔きを await しているのと同じ理由。
+    endedByAutoNextId = await takeEndedByAutoNext()
+    if (endedByAutoNextId) endedByAutoNextUntil = Date.now() + endedByAutoNextValidMs
 
     startReconciler()
     startTimer()

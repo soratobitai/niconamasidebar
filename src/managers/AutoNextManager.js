@@ -205,7 +205,7 @@ export class AutoNextManager {
             this.hideModal();
             // 🔴 **飛ぶ前に印を置く。** 飛んだ先が既に終了していた時、そこで自動移動を続けるための印。
             //    印が無いと、飛んだ先は終了ガイドが出ないので誰も気付かず止まる（doc/09 項目BI-2）。
-            markAutoNextHop(watchTargetIdOf(nextHref));
+            markAutoNextHop(watchTargetIdOf(nextHref), startedAtId);
             try { location.assign(nextHref); } catch (_e) {}
         };
 
@@ -235,7 +235,7 @@ export class AutoNextManager {
                 this.hideModal();
                 if (!this.appState.autoNext.canceled && !movedAway()) {
                     // 飛んだ先が既に終了していても自動移動を続けるための印（goNow と同じ理由）
-                    markAutoNextHop(watchTargetIdOf(nextHref));
+                    markAutoNextHop(watchTargetIdOf(nextHref), startedAtId);
                     try { location.assign(nextHref); } catch (_e) {}
                 }
             }

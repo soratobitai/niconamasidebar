@@ -1,6 +1,6 @@
 {
   "name": "niconamasidebar",
-  "version": "1.17.0",
+  "version": "1.17.1",
   "description": "ニコ生の番組視聴ページにサイドバーを設置します。",
   "author": "MynicoTools",
   "type": "module",
