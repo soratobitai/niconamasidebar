@@ -1982,6 +1982,89 @@ async function programEndConfirmation() {
 }
 
 /**
+ * CV: 汚染画像を動くサムネへ渡さない（2026-08-12・利用者報告の警告が発端）。
+ *
+ * 症状: 「⚠️ 動くサムネ: CORS汚染で解析不可」がコンソールに出て、そのページでは以後コマ化が止まる。
+ *
+ * 原因: kick.com の画像中継（imageProxy）が失敗した時、**素のURLで読み直して表示を守る**道がある。
+ * そこで読んだ画像には `crossOrigin` が付いていない＝汚染画像なのに、`feeding`（機能がONか）
+ * だけを見て②へ渡していた。②は共有 canvas に描くので、**1回で canvas ごと永久に汚れる。**
+ *
+ * 🔴 **`feeding`（ONか）と「その読み方が安全か」は別の話。** ここを混ぜたのが欠陥だった。
+ */
+async function taintedFrameNotFed() {
+    console.log('=== CV 汚染画像を動くサムネへ渡さない ===')
+    const { installMockDom } = await import('./mock-dom.mjs')
+    const sb = await import('../src/render/sidebar.js')
+
+    const dom = installMockDom()
+    const saved = { fail: globalThis.__mockImageFail }
+    try {
+        const container = dom.getById('liveProgramContainer')
+        const card = sb.makeProgramElement({
+            id: 'lv1', title: 't', providerType: 'user',
+            contentOwner: { id: 'u1', name: 'n', icon: 'https://icon/1.png' },
+            liveScreenshotThumbnailUrls: { middle: 'https://dlive.nicovideo.jp/live/1/screenshot/1.jpg' },
+            thumbnailUrl: 'https://dlive.nicovideo.jp/live/1/screenshot/1.jpg',
+            isMemberOnly: false, onAirTime: { beginAt: new Date().toISOString() },
+        }, { loadingImageURL: 'l.gif', watchPageBaseUrl: 'https://live.nicovideo.jp/watch/' })
+        container.appendChild(card)
+
+        const infos = [{
+            id: 'lv1', providerType: 'user',
+            liveScreenshotThumbnailUrls: { middle: 'https://dlive.nicovideo.jp/live/1/screenshot/1.jpg' },
+        }]
+
+        const run = (proxyFetch) => new Promise((resolve) => {
+            const fed = []
+            sb.setAnimThumbnailFeed({
+                isEnabled: () => true,
+                ingest: (id, img) => { fed.push({ id, crossOrigin: img.crossOrigin, src: img.src }); return Promise.resolve(null) },
+            })
+            sb.setThumbnailImageProxy(proxyFetch === null ? null : {
+                shouldUse: () => true,
+                fetch: proxyFetch,
+            })
+            sb.updateThumbnailsFromStorage(infos, { force: true, onSettled: () => resolve(fed) })
+        })
+
+        // ① 中継が data URL を返せた → 汚染しないので給餌してよい
+        const okFed = await run(async () => 'data:image/jpeg;base64,AAAA')
+        check('CV 中継が成功したら給餌する（コマ化が止まらない）',
+            okFed.length === 1 && okFed[0].src.startsWith('data:'),
+            JSON.stringify(okFed))
+
+        // ② 🔴 中継が null を返した → 素のURLへ倒れる。**渡してはいけない**
+        const nullFed = await run(async () => null)
+        check('CV 🔴 中継が空を返した時は給餌しない（素のURLは canvas を汚す）',
+            nullFed.length === 0, JSON.stringify(nullFed))
+
+        // ③ 🔴 中継が失敗（reject）した時も同じ
+        const rejFed = await run(async () => { throw new Error('sw down') })
+        check('CV 🔴 中継が失敗した時も給餌しない',
+            rejFed.length === 0, JSON.stringify(rejFed))
+
+        // ④ 中継そのものが無い（ニコ生ページ）→ crossOrigin で読むので給餌してよい
+        const directFed = await run(null)
+        check('CV 中継が無い時は crossOrigin で読んで給餌する（ニコ生ページ）',
+            directFed.length === 1 && directFed[0].crossOrigin === 'anonymous',
+            JSON.stringify(directFed))
+    } finally {
+        sb.setAnimThumbnailFeed(null)
+        sb.setThumbnailImageProxy(null)
+        globalThis.__mockImageFail = saved.fail
+        dom.restore()
+    }
+
+    // 汚れた canvas を抱え込まないこと（原因が直っても例外が出続けるのを防ぐ）
+    const { readFileSync } = await import('fs')
+    const at = stripComments(readFileSync(new URL('../src/render/animatedThumbnail.js', import.meta.url), 'utf8'))
+    check('CV 🔴 汚染したら共有 canvas を捨てる',
+        /catch[\s\S]{0,200}?sigCanvas = null[\s\S]{0,80}?sigCtx = null/.test(at),
+        '使い回しの canvas は一度汚れると永久に汚れたまま')
+}
+
+/**
  * CT: 来場者数を live2 から取る（2026-08-12）。
  *
  * 実測（利用者の実機・15秒ごと）: 一覧APIは live2 より **30〜45秒遅く**、しかも
@@ -6218,6 +6301,7 @@ if (real) {
     await programEndConfirmation()
     await endedByAutoNextGroup()
     await liveStatisticsGroup()
+    await taintedFrameNotFed()
     await endedRecheckDoesNotRefetch()
     console.log('')
     await r1NoSpin()

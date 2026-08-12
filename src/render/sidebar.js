@@ -1234,9 +1234,15 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             const viaProxy = feeding && !!imageProxy && imageProxy.shouldUse(urlForAttempt)
             const pre = new Image()
             if (feeding && !viaProxy) pre.crossOrigin = 'anonymous'
+            // 🔴 **給餌してよいのは「canvas を汚さない読み方で取れた画像」だけ**（doc/09 項目CV）。
+            //    中継（imageProxy）が失敗した時に素のURLで読み直す道があり、そこで読んだ画像は
+            //    **crossOrigin が付いていない＝汚染画像**。それを②へ渡すと `getImageData` が例外になり、
+            //    ②は共有 canvas ごと汚れて**そのページの動くサムネが以後ずっと止まる**。
+            //    ⚠️ `feeding` は「機能がONか」でしかない。**読み方が安全かは別に持つこと。**
+            let feedable = feeding
             pre.onload = () => {
                 pendingImages--
-                if (feeding) {
+                if (feedable) {
                     // 再取得なしでフレーム化し、**そのコマをそのまま静止サムネにも出す**
                     // （②側でON/汚染を再判定し、渡せない時は null が返る＝URL表示へ）。
                     //
@@ -1275,9 +1281,12 @@ export function updateThumbnailsFromStorage(programInfos, options = {}) {
             }
             if (viaProxy) {
                 // 失敗しても表示は守る: 素のURLで読み直す（その場合コマ化はできないが絵は出る）。
+                // 🔴 **素のURLへ倒したら給餌をやめること。** 中継が返した data URL は同一オリジン扱いで
+                //    canvas を汚さないが、素のURLは汚す。ここで倒し忘れると②が壊れる（項目CV）。
+                const fallbackPlain = () => { feedable = false; pre.src = urlForAttempt }
                 imageProxy.fetch(urlForAttempt).then(
-                    (dataUrl) => { pre.src = dataUrl || urlForAttempt },
-                    () => { pre.src = urlForAttempt },
+                    (dataUrl) => { if (dataUrl) pre.src = dataUrl; else fallbackPlain() },
+                    fallbackPlain,
                 )
             } else {
                 pre.src = urlForAttempt
