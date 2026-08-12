@@ -1467,7 +1467,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         表示順序
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>おすすめ</b>: よく見る配信者ほど上に来ます。<br><br>おすすめは、あなたが番組を開いた回数を配信者ごとに数えたものです。回数が同じ番組どうしは人気順で並びます。<br>この記録は端末の中だけに保存され、どこにも送信しません。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>おすすめ</b>: よく見る番組順。データが貯まるまでは人気順。</span></span>
                                     </div>
                                     <!-- ⚠️ **値を変えないこと。** 保存済みの設定に対応するラジオが無くなると、
                                          その利用者は設定を一切保存できなくなる（doc/09 項目BQ と同じ罠）。

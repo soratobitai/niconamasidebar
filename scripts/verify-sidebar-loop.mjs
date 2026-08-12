@@ -837,10 +837,34 @@ async function windowedConcurrent() {
     check('CO ⑨ 古い点を捨てる', /viewerSampleMaxAgeMs/.test(st) && viewerSampleMaxAgeMs > 0)
     check('CO ⑨ 件数の歯止めがある', /viewerSampleMaxCount/.test(st) && viewerSampleMaxCount > 0)
     // 目盛りの最大より短いと、いちばん右にした時に履歴が足りなくなる。
-    const { dwellMinutesScale } = await import('../src/config/constants.js')
+    const { dwellMinutesScale, defaultDwellMinutes } = await import('../src/config/constants.js')
     check('CO 🔴 ⑨ 履歴の保持は目盛りの最大より長い',
         viewerSampleMaxAgeMs >= Math.max(...dwellMinutesScale) * 60000,
         `保持=${viewerSampleMaxAgeMs / 60000}分 / 目盛り最大=${Math.max(...dwellMinutesScale)}分`)
+
+    // --- CN 目盛りそのものの形（2026-08-11・利用者要望「ちょうど真ん中を作る」） ---
+    // 🔴 偶数個だと中央の目盛りが存在せず、既定値がつまみの中央に来ない。
+    check('CN 🔴 目盛りは奇数個（ちょうど真ん中が存在する）',
+        dwellMinutesScale.length % 2 === 1, `${dwellMinutesScale.length} 段`)
+    check('CN 🔴 ちょうど真ん中が既定値',
+        dwellMinutesScale[(dwellMinutesScale.length - 1) / 2] === defaultDwellMinutes,
+        `中央=${dwellMinutesScale[(dwellMinutesScale.length - 1) / 2]} / 既定=${defaultDwellMinutes}`)
+    // ⚠️ 既定値が目盛りに無いと、既存ユーザーの値が最寄りへ丸められる（上の中央判定でも落ちるが、
+    //    中央を動かした時にどちらが原因か分かるよう別に見る）。
+    check('CN 既定値が目盛りに実在する', dwellMinutesScale.includes(defaultDwellMinutes))
+    check('CN 目盛りは昇順で重複が無い',
+        dwellMinutesScale.every((v, i) => i === 0 || v > dwellMinutesScale[i - 1]),
+        dwellMinutesScale.join(','))
+    // 対数的な効き方に合わせた等比。等間隔にするとスライダーの右半分が死ぬ。
+    const ratios = dwellMinutesScale.slice(1).map((v, i) => v / dwellMinutesScale[i])
+    check('CN 刻みが等比に近い（右半分が死んでいない）',
+        Math.min(...ratios) > 1.05 && Math.max(...ratios) < 1.45,
+        `比 ${Math.min(...ratios).toFixed(2)}〜${Math.max(...ratios).toFixed(2)}`)
+    // 🔴 目盛りを差し替えたら移行の印も上げること。上げないと既存ユーザーが古い値のまま残る。
+    const markKey = (st.match(/DWELL_SCALE_MIGRATED_KEY = '([^']+)'/) || [])[1]
+    const { optionKeys } = await import('../src/config/constants.js')
+    check('CN 🔴 移行の印が optionKeys に載っている（載せないと毎回移行が走る）',
+        !!markKey && optionKeys.includes(markKey), `印=${markKey} / optionKeys=${optionKeys.includes(markKey)}`)
     // 🔴 渡された info にも書き戻さないと、画面側に履歴が届かず従来式のままになる。
     check('CO 🔴 ⑨ storage が渡された info にも履歴を書き戻す',
         /info\.viewerSamples = appendViewerSample\(/.test(st),
@@ -3032,8 +3056,11 @@ async function optionsPersistScope() {
 
         // 設定そのものはちゃんと保存されている（巻き込み防止で保存が死んでいないか）
         check('CP 設定は保存されている', store.dwellMinutes === 19, `dwellMinutes=${store.dwellMinutes}`)
+        // ⚠️ 印の名前を直書きしない。目盛りを差し替えるたびに版が上がるので、実装から読む。
+        const markKey = (stripComments(rd('services/storage.js'))
+            .match(/DWELL_SCALE_MIGRATED_KEY = '([^']+)'/) || [])[1]
         check('CP 移行済みの印も保存されている（消えると毎回移行が走る）',
-            store.dwellScaleV3 === true, `dwellScaleV3=${store.dwellScaleV3}`)
+            !!markKey && store[markKey] === true, `${markKey}=${store[markKey]}`)
         check('CP UI状態（開閉・幅）は設定として書かない',
             !('isOpenSidebar' in store) && !('sidebarWidth' in store),
             `${Object.keys(store).join(', ')}`)

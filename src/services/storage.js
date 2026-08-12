@@ -2,8 +2,11 @@ import { maxSaveProgramInfos, dwellMinutesScale, defaultDwellMinutes, viewerSamp
 import { handleError } from '../utils/error.js'
 import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
 
-/** 目盛り校正の移行が済んだ印。**消さないこと**（消すと毎回移行が走る）。 */
-const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV3'
+/**
+ * 目盛り校正の移行が済んだ印。**消さないこと**（消すと毎回移行が走る）。
+ * ⚠️ 目盛りを差し替えるたびに**版を上げる**。`config/constants.js` の `optionKeys` にも同じ文字列が要る。
+ */
+const DWELL_SCALE_MIGRATED_KEY = 'dwellScaleV4'
 
 /**
  * 設定として保存してよいキーだけを取り出す。**storage へ書く手前の唯一の関所。**
@@ -88,14 +91,16 @@ function migrateOptions(options) {
     // ⚠️ **OFF ではなく 120秒へ寄せる。** 黙って取得が止まるほうが利用者にとって驚きが大きい。
     if (String(options.updateProgramsInterval) === '180') options.updateProgramsInterval = '120'
 
-    // 「人気順の基準」の目盛りを校正し直した（2026-08-10・doc/09 項目CN）。
+    // 「人気順の基準」の目盛りを校正し直した（doc/09 項目CN。2026-08-11 に4度目）。
     //
-    // 経緯: 旧 [3,5,8,10,14,20,30,45] → 一度 [10,17,27,40,58,80,110,150] へ広げたが、
-    // 実機比較で**17分あたりが正解**と分かり、17分を中心に幅を狭めた（最終形）。
+    // 🔴 **目盛りを差し替えたら、印のバージョンも上げること。** 上げないと、既に
+    //    移行済みの利用者は**新しい目盛りに載っていない値のまま**になる。実害は小さいが
+    //    （スライダーは最寄りへ寄せて表示する）、つまみの位置と実際に効いている値がずれる。
+    //    現在の印: `dwellScaleV4`。⚠️ `optionKeys` にも同じ文字列を載せること。
     //
-    // 🔴 **古い保存値は新しい目盛りの外に居る。** 45分も40分も、今の範囲(11〜29)には無い。
-    //    範囲外はすべて**新しい既定へ寄せる**。中途半端に端へ丸めると、利用者が意図しない
-    //    設定のまま使い続けることになる（今の目盛りでは端＝かなり極端な指定）。
+    // 🔴 **古い保存値は新しい目盛りの外に居ることがある。** 範囲外はすべて**新しい既定へ寄せる**。
+    //    中途半端に端へ丸めると、利用者が意図しない設定のまま使い続けることになる。
+    //    範囲内なら最寄りへ寄せる（利用者の選択の意図を保つ）。
     // ⚠️ **1回だけ動かすこと。** 印が無いと、利用者が端を選ぶたびに既定へ戻され続ける。
     if (!options[DWELL_SCALE_MIGRATED_KEY]) {
         const m = Number(options.dwellMinutes)
