@@ -1982,6 +1982,413 @@ async function programEndConfirmation() {
 }
 
 /**
+ * CY: 番組カードの設定をひとまとめにする（2026-08-12・利用者指定）。
+ *
+ * 🔴 **まとめ直しで壊れるのは「保存」。** name / value が動くと、保存済みの設定に対応する
+ *    ラジオが無くなり、その利用者は**設定を一切保存できなくなる**（項目BQ の罠）。
+ *    見た目の話に見えて、いちばん危ないのはそこ。
+ */
+async function cardSettingsGroup() {
+    console.log('=== CY 番組カードの設定（サブ項目化）===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const css = rd('styles/main.css').replace(/\/\*[\s\S]*?\*\//g, ' ')
+
+    // グループの中身だけを取り出す（波括弧ではなく div の対応で数える）
+    const start = sb.indexOf('<div class="opt-section opt-group">')
+    check('CY （空振り防止）グループの枠がある', start >= 0)
+    let depth = 0, end = -1
+    for (let i = start; i >= 0 && i < sb.length;) {
+        const open = sb.indexOf('<div', i)
+        const close = sb.indexOf('</div>', i)
+        if (close < 0) break
+        if (open >= 0 && open < close) { depth++; i = open + 4 } else {
+            depth--; i = close + 6
+            if (depth === 0) { end = i; break }
+        }
+    }
+    const group = start >= 0 && end > start ? sb.slice(start, end) : ''
+    check('CY （空振り防止）グループの中身を取り出せている', group.length > 500, `${group.length} 文字`)
+
+    // --- ① 4つが中に居て、外に残っていない ---
+    const members = [
+        ['カードの大きさ', 'name="cardSize"'],
+        ['動くサムネ', 'name="animatedThumbnail"'],
+        ['同時視聴者数', 'name="showViewerCount"'],
+        ['経過時間', 'name="showElapsedTime"'],
+    ]
+    for (const [name, needle] of members) {
+        check(`CY ${name}がグループの中にある`, group.includes(needle))
+        const outside = sb.split(group).join('')
+        check(`CY ${name}がグループの外に残っていない`, !outside.includes(needle))
+    }
+    // まとめる対象でないものを巻き込んでいないか
+    for (const [name, needle] of [['表示順序', 'name="programsSort"'], ['自動更新', 'name="updateProgramsInterval"'],
+        ['サイドバーの置き方', 'name="sidebarPlacement"'], ['テーマ', 'name="sidebarTheme"']]) {
+        check(`CY 🔴 ${name}を巻き込んでいない`, !group.includes(needle))
+    }
+
+    // --- ② 🔴 name / value を動かしていない ---
+    const values = {
+        cardSize: ['small', 'medium', 'large'],
+        animatedThumbnail: ['off', 'on'],
+        showViewerCount: ['off', 'on'],
+        showElapsedTime: ['off', 'on'],
+    }
+    const bad = []
+    for (const [name, want] of Object.entries(values)) {
+        const got = [...group.matchAll(new RegExp('name="' + name + '" value="([^"]+)"', 'g'))].map((m) => m[1])
+        if (got.join(',') !== want.join(',')) bad.push(`${name}: ${got.join(',')} ≠ ${want.join(',')}`)
+    }
+    check('CY 🔴 name と value が従来どおり（変えると設定が保存できなくなる）',
+        bad.length === 0, bad.join(' / ') || 'なし')
+
+    // --- ③ 階層が見える形か ---
+    check('CY サブ項目は opt-subsection', (group.match(/class="opt-subsection"/g) || []).length === 4,
+        `${(group.match(/class="opt-subsection"/g) || []).length} 個`)
+    check('CY サブ項目の見出しは opt-sublabel',
+        (group.match(/class="opt-sublabel/g) || []).length === 4)
+    check('CY グループの見出しは opt-label（サブ項目と別扱い）',
+        /<div class="opt-label">番組カードの設定<\/div>/.test(group))
+    // 🔴 ヘルプ付きは opt-title-with-help を保つこと。吹き出しはこれを基準に出る。
+    const helpSubs = (group.match(/class="opt-sublabel opt-title-with-help"/g) || []).length
+    check('CY 🔴 ヘルプ付きのサブ項目は opt-title-with-help を保っている',
+        helpSubs === (group.match(/class="help-wrap"/g) || []).length,
+        `見出し ${helpSubs} / ヘルプ ${(group.match(/class="help-wrap"/g) || []).length}`)
+
+    // --- ④ CSS ---
+    check('CY サブ項目は一段下げてある',
+        /\.opt-group \.opt-subsection\s*\{[^}]*padding-left/.test(css))
+    // 🔴 **「小さく細く薄く」の3つとも見る**（利用者指定・2026-08-12「サブらしく差を付けて」）。
+    //    どれか1つだけだと、直したつもりで見た目が変わらないことがある。
+    const sizeOf = (sel) => {
+        const esc = sel.split('.').join('\\.')
+        const m = css.match(new RegExp(esc + '\\s*\\{([^}]*)\\}'))
+        return m ? Number((m[1].match(/font-size:\s*([\d.]+)em/) || [])[1]) : NaN
+    }
+    const subSize = sizeOf('#optionContainer .opt-sublabel')
+    const labelSize = sizeOf('#optionContainer .opt-label')
+    check('CY （空振り防止）見出しの大きさを両方読めている',
+        Number.isFinite(subSize) && Number.isFinite(labelSize), `sub=${subSize} / label=${labelSize}`)
+    check('CY 🔴 サブ項目の見出しは枠の見出しより小さい',
+        subSize < labelSize, `sub=${subSize}em / label=${labelSize}em`)
+    check('CY 🔴 太字にしない（階層は大きさと太さで付ける）',
+        /\.opt-sublabel\s*\{[^}]*font-weight:\s*normal/.test(css)
+        && /\.opt-label\s*\{[^}]*font-weight:\s*bold/.test(css))
+    // 🔴 **薄くして差を付けない**（2026-08-12・利用者「薄すぎます」）。読みにくくしてまで
+    //    付ける差ではない。階層は大きさ・左の線・字下げで足りている。
+    check('CY 🔴 サブ項目の文字を薄くしていない',
+        !/\.opt-sublabel\s*\{[^}]*opacity:/.test(css),
+        'opacity で薄くすると読めなくなる')
+    // 🔴 ラベル左・ボタン右（利用者指定）。**狭い時は折り返すこと**（幅は 180px まで縮む）。
+    check('CY 🔴 サブ項目はラベル左・ボタン右の1行',
+        /\.opt-group \.opt-subsection\s*\{[^}]*display:\s*flex/.test(css)
+        && /\.opt-group \.opt-subsection\s*\{[^}]*align-items:\s*center/.test(css))
+    check('CY 🔴 狭くなったら折り返す（ボタンが潰れない）',
+        /\.opt-group \.opt-subsection\s*\{[^}]*flex-wrap:\s*wrap/.test(css)
+        && /\.opt-subsection \.opt-segment\s*\{[^}]*flex:\s*1 1 \d+px/.test(css))
+    // 🔴 横並びにすると、ヘルプの吹き出しの基準がラベル（＝狭い）になってしまう。行に移す。
+    check('CY 🔴 ヘルプの吹き出しは行の幅に合わせる',
+        /\.opt-group \.opt-subsection\s*\{[^}]*position:\s*relative/.test(css)
+        && /\.opt-subsection \.opt-title-with-help\s*\{[^}]*position:\s*static/.test(css),
+        'ラベル基準だと吹き出しが縦に間延びする')
+    check('CY 🔴 サブ項目はボタンも小さい（見出しだけ小さくても「サブ」に見えない）',
+        /\.opt-subsection \.opt-segment label\s*\{[^}]*font-size/.test(css)
+        && /\.opt-subsection \.opt-segment\s*\{[^}]*padding/.test(css))
+
+    // 置き場所（利用者指定・2026-08-12: 自動移動の下）
+    const orderOf = (needle) => sb.indexOf(needle)
+    check('CY 🔴 グループは自動移動の下・サイドバーの置き方の上',
+        orderOf('name="autoNextProgram"') < orderOf('opt-section opt-group')
+        && orderOf('opt-section opt-group') < orderOf('name="sidebarPlacement"'),
+        '自動移動→番組カードの設定→サイドバーの置き方 の順')
+}
+
+/**
+ * CX: サムネ右下の経過時間（2026-08-12・利用者要望）。
+ *
+ * 🔴 失敗の仕方は「出っぱなし」と「止まったまま」の2つ。どちらも黙って起きる。
+ */
+async function elapsedTimeGroup() {
+    console.log('=== CX サムネ右下の経過時間 ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const src = (f) => stripComments(rd(f))
+    const {
+        normalizeShowElapsedTime, isElapsedTimeVisible, applyShowElapsedTime,
+        formatElapsed, SHOW_ELAPSED_CLASS,
+    } = await import('../src/ui/elapsedTime.js')
+
+    // --- ① 設定値の解釈 ---
+    check('CX 既定は OFF（更新しただけで見た目が変わらない）',
+        normalizeShowElapsedTime(undefined) === 'off')
+    check('CX 🔴 知らない値は OFF に倒す',
+        ['zzz', null, '', 'ON', 1, {}].every((v) => normalizeShowElapsedTime(v) === 'off'))
+    check('CX on だけが on',
+        isElapsedTimeVisible('on') === true && isElapsedTimeVisible('off') === false)
+
+    // --- ② 文字列（分より細かくしない・未来は出さない） ---
+    const NOW = 1700000000000
+    const ago = (min) => NOW - min * 60000
+    check('CX 1時間未満は「N分」', formatElapsed(ago(23), NOW) === '23分', formatElapsed(ago(23), NOW))
+    check('CX 1時間以上は「N時間M分」',
+        formatElapsed(ago(83), NOW) === '1時間23分', formatElapsed(ago(83), NOW))
+    check('CX ちょうど1時間', formatElapsed(ago(60), NOW) === '1時間0分', formatElapsed(ago(60), NOW))
+    check('CX 長時間放送も出せる', formatElapsed(ago(1563), NOW) === '26時間3分', formatElapsed(ago(1563), NOW))
+    check('CX 始まった直後は 0分', formatElapsed(NOW - 5000, NOW) === '0分', formatElapsed(NOW - 5000, NOW))
+    check('CX 🔴 開始が未来なら空（マイナスを出さない）',
+        formatElapsed(NOW + 60000, NOW) === '', formatElapsed(NOW + 60000, NOW))
+    check('CX 🔴 壊れた開始時刻では出さない',
+        [undefined, null, 0, -1, NaN, 'x', {}].every((b) => formatElapsed(b, NOW) === ''))
+
+    // --- ③ 印の向き（実際に呼ぶ） ---
+    const savedDoc = Object.getOwnPropertyDescriptor(globalThis, 'document')
+    const classes = new Set()
+    globalThis.document = {
+        documentElement: {
+            classList: {
+                toggle: (n, force) => {
+                    if (force === undefined) { classes.has(n) ? classes.delete(n) : classes.add(n); return classes.has(n) }
+                    if (force) classes.add(n); else classes.delete(n)
+                    return !!force
+                },
+            },
+        },
+    }
+    let offHas, onHas, badHas
+    try {
+        applyShowElapsedTime('off'); offHas = classes.has(SHOW_ELAPSED_CLASS)
+        applyShowElapsedTime('on'); onHas = classes.has(SHOW_ELAPSED_CLASS)
+        applyShowElapsedTime('zzz'); badHas = classes.has(SHOW_ELAPSED_CLASS)
+    } finally {
+        if (savedDoc) Object.defineProperty(globalThis, 'document', savedDoc)
+        else delete globalThis.document
+    }
+    check('CX 🔴 出す時だけ印が付く（壊れたら「出ない」側へ倒れる）',
+        offHas === false && onHas === true && badHas === false,
+        `off=${offHas} / on=${onHas} / 壊れた値=${badHas}`)
+    check('CX 🔴 印を付けるのは <html>',
+        /document\.documentElement\.classList\.toggle/.test(src('ui/elapsedTime.js'))
+        && !/document\.body\b/.test(src('ui/elapsedTime.js')))
+
+    // --- ③-2 🔴 生成した直後のカードに入っているか（実物を作る） ---
+    //    `applyRankAttributes` はカード生成の**先頭**で走るので、あとから append する
+    //    バッジには何も書けない。生成時に自分で埋めないと、ticker（30秒）か次のリスト更新
+    //    （最大120秒）まで空欄のまま出る。2026-08-12 に実際そうなって報告された。
+    {
+        const { installMockDom } = await import('./mock-dom.mjs')
+        const dom = installMockDom()
+        try {
+            const { makeProgramElement } = await import('../src/render/sidebar.js')
+            const card = makeProgramElement({
+                id: 'lv1', title: 't', providerType: 'user',
+                contentOwner: { id: 'u1', name: 'n', icon: 'https://icon/1.png' },
+                thumbnailUrl: 'https://dlive.nicovideo.jp/live/1/screenshot/1.jpg',
+                isMemberOnly: false,
+                onAirTime: { beginAt: new Date(Date.now() - 23 * 60000).toISOString() },
+            }, { loadingImageURL: 'l.gif', watchPageBaseUrl: 'https://live.nicovideo.jp/watch/' })
+            const slot = card.querySelector('.elapsed_overlay')
+            check('CX （空振り防止）生成したカードに枠がある', !!slot)
+            check('CX 🔴 生成した直後から入っている（空欄のまま出さない）',
+                !!slot && slot.textContent === '23分', slot ? JSON.stringify(slot.textContent) : 'なし')
+        } finally {
+            dom.restore()
+        }
+    }
+    // --- ④ 両ページの配線（写し漏れ対策・doc/09 項目BN の型） ---
+    const mainJs = src('main.js')
+    const kickJs = src('kickPage.js')
+    for (const [name, t] of [['ニコ生', mainJs], ['kick.com', kickJs]]) {
+        check(`CX 🔴 ${name}ページが共有の反映を使う`, /applyShowElapsedTime\(/.test(t))
+        check(`CX 🔴 ${name}ページが初期化と設定変更の両方で反映する`,
+            (t.match(/applyShowElapsedTime\(/g) || []).length >= 2,
+            `${(t.match(/applyShowElapsedTime\(/g) || []).length} 回`)
+        check(`CX 🔴 ${name}ページが ticker を始める（止まったままにしない）`,
+            /startElapsedTicker\(\)/.test(t))
+    }
+
+    // --- ⑤ 書き手は1つ／ticker は取得しない ---
+    const sb = src('render/sidebar.js')
+    check('CX 🔴 経過時間を書くのは1箇所だけ',
+        (sb.match(/function writeElapsedLabel\(/g) || []).length === 1
+        && (sb.match(/\.elapsed_overlay'\)/g) || []).length === 1,
+        '書き手が増えると、描画と ticker で食い違う')
+    const tickerBody = (sb.match(/export function startElapsedTicker\(\)[\s\S]*?\n\}/) || [''])[0]
+    check('CX （空振り防止）ticker の本体を取り出せている', tickerBody.length > 100, `${tickerBody.length} 文字`)
+    check('CX 🔴 ticker は取得も保存もしない（DOM の文字列だけ）',
+        !/fetch\(|chrome\./.test(tickerBody))
+    check('CX ticker は二重に張らない',
+        /if \(elapsedTimer !== null\) return/.test(tickerBody))
+
+    // --- ⑥ 設定 UI ---
+    const shell = rd('render/sidebar.js')
+    const optH = src('handlers/optionsHandler.js')
+    check('CX 設定に「経過時間」がある', /name="showElapsedTime"/.test(shell))
+    check('CX 選択肢は off / on の2つ',
+        (shell.match(/name="showElapsedTime"/g) || []).length === 2
+        && /id="showElapsedTimeOff" name="showElapsedTime" value="off"/.test(shell))
+    check('CX 保存する',
+        /input\[name="showElapsedTime"\]:checked/.test(optH)
+        && /options\.showElapsedTime = showElapsedTimeElement\.value/.test(optH))
+    check('CX 開いた時に選択状態を復元する', /updateCheckedState\('showElapsedTime'/.test(optH))
+    const guard = (optH.match(/if \(![\s\S]{0,300}?\) \{\s*return;/) || [''])[0]
+    check('CX 🔴 保存の必須ガードには入れない', !/showElapsedTime/.test(guard))
+    const { optionKeys } = await import('../src/config/constants.js')
+    check('CX optionKeys に載っている（載せないとこの設定だけ保存されない）',
+        optionKeys.includes('showElapsedTime'))
+
+    // --- ⑦ CSS ---
+    const css = rd('styles/main.css').replace(/\/\*[\s\S]*?\*\//g, ' ')
+    check('CX 🔴 CSS の既定は非表示',
+        /\.elapsed_overlay\s*\{[^}]*display:\s*none/.test(css))
+    check('CX 印が付いた時だけ出す',
+        new RegExp('html\\.' + SHOW_ELAPSED_CLASS + '[^{]*\\.elapsed_overlay\\s*\\{[^}]*display:\\s*block').test(css))
+    check('CX 🔴 サムネのリンクを塞がない（pointer-events: none）',
+        /\.elapsed_overlay\s*\{[^}]*pointer-events:\s*none/.test(css))
+    check('CX 中身が空なら枠も出さない',
+        /\.elapsed_overlay:empty\s*\{[^}]*display:\s*none/.test(css))
+    check('CX 同接（左上）と場所がぶつからない',
+        /\.elapsed_overlay\s*\{[^}]*right:\s*4px[\s\S]*?bottom:\s*4px/.test(css))
+}
+
+/**
+ * CW: 「よく見る順の履歴」のリセット（2026-08-12・利用者要望）。
+ *
+ * 🔴 **取り消せない操作。** 失敗の仕方は2通りあって、どちらも黙って起きる:
+ *    ①押し間違いで全部消える ②消えたのに並びが古いまま（＝消えていないように見える）
+ */
+async function watchPointsResetGroup() {
+    console.log('=== CW よく見る順の記録のリセット ===')
+    const { readFileSync } = await import('fs')
+    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
+    const sb = rd('render/sidebar.js')
+    const oh = stripComments(rd('handlers/optionsHandler.js'))
+    const wh = stripComments(rd('services/watchHistory.js'))
+
+    // --- ① UI ---
+    check('CW 設定にリセットのボタンがある', /id="reset_watch_points"/.test(sb))
+    // 🔴 置き場所は「表示順序」の枠の中（利用者指定）。独立したセクションにしない。
+    const sortSection = (sb.match(/表示順序[\s\S]*?name="programsSort" value="recommend"[\s\S]*?<\/div>\s*<\/div>/) || [''])[0]
+    check('CW （空振り防止）表示順序の枠を取り出せている',
+        /value="recommend"/.test(sortSection), sortSection.length + ' 文字')
+    check('CW 🔴 リセットは表示順序の枠の中にある',
+        /id="reset_watch_points"/.test(sortSection))
+    // 🔴 **CSS で display を当てたら [hidden] の打ち消しも要る。**
+    //    UA の `[hidden] { display: none }` はクラス指定より弱いので、クラス側の display が勝ち、
+    //    **JS が hidden を立てても消えない。** 2026-08-12 に実際にそうなった（利用者報告
+    //    「新着や人気順の時も消えません」）。同じ罠の注意書きは main.css の #kick_notice にもある。
+    //    ⚠️ 新しいクラスでも自動で効くよう、**HTML から hidden 付きのクラスを集めて**総当たりする。
+    const cssAll = cssRules(rd('styles/main.css'))
+    const hiddenClasses = [...new Set(
+        [...sb.matchAll(/class="([^"]*)"\s+hidden/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean),
+    )]
+    check('CW （空振り防止）hidden で出し入れするクラスを拾えている',
+        hiddenClasses.length >= 2, hiddenClasses.join(', '))
+    const missingHiddenRule = hiddenClasses.filter((cls) => {
+        const setsDisplay = cssAll.some((r) => r.sel.includes('.' + cls)
+            && !r.sel.includes('[hidden]') && /(^|[;\s])display\s*:/.test(r.body))
+        if (!setsDisplay) return false
+        return !cssAll.some((r) => r.sel.includes('.' + cls + '[hidden]') && /display\s*:\s*none/.test(r.body))
+    })
+    check('CW 🔴 display を当てたクラスには [hidden] の打ち消しがある',
+        missingHiddenRule.length === 0,
+        missingHiddenRule.map((c) => '.' + c).join(' / ') || 'なし')
+
+    check('CW 🔴 よく見る順を選んだ時だけ出す',
+        /class="opt-recommend-only" hidden/.test(sb)
+        && /programsSort === 'recommend'/.test(oh)
+        && /querySelectorAll\('\.opt-recommend-only'\)/.test(oh))
+    check('CW 🔴 切り替えた時にも出し分けを更新する（保存だけして放置しない）',
+        /name === 'programsSort'[\s\S]{0,300}?syncRecommendOnlySections\(\)/.test(oh))
+    check('CW 🔴 type="button"（既定の submit だとフォームが送信されてしまう）',
+        /<button type="button" id="reset_watch_points"/.test(sb))
+    const { optionKeys } = await import('../src/config/constants.js')
+    check('CW 🔴 optionKeys に足していない',
+        !optionKeys.some((k) => /watch|reset/i.test(k)), optionKeys.join(','))
+
+    // --- ② 実際に動かす（2段階・消える・0件の扱い） ---
+    const { installMockDom } = await import('./mock-dom.mjs')
+    const dom = installMockDom()
+    const savedChrome = globalThis.chrome
+    const store = { watchCounts: { 'nico:1': { points: 5, lastAt: 1 }, 'nico:2': { points: 3, lastAt: 2 } } }
+    let removed = 0
+    const listeners = []
+    globalThis.chrome = {
+        runtime: { id: 'test-extension-id', lastError: null, getURL: (p) => p },
+        storage: {
+            local: {
+                get: async (k) => (k in store ? { [k]: store[k] } : {}),
+                set: (o, cb) => { Object.assign(store, o); if (cb) cb() },
+                remove: async (k) => {
+                    removed++
+                    const old = store[k]; delete store[k]
+                    // 本物は削除でも onChanged を起こす（newValue は undefined）
+                    for (const fn of listeners) fn({ [k]: { oldValue: old } }, 'local')
+                },
+            },
+            onChanged: { addListener: (fn) => listeners.push(fn) },
+        },
+    }
+    try {
+        const { recordWatch, getWatchPoints, startWatchHistorySync, watchHistorySize } =
+            await import('../src/services/watchHistory.js')
+        const { setupOptionsHandler } = await import('../src/handlers/optionsHandler.js')
+
+        // ⚠️ **まっさらを前提にしないこと。** watchHistory はモジュール内に状態を持ち、
+        //    `loadWatchHistory` は `loaded` フラグで2回目以降を素通りする。前の検査群が
+        //    読み込み済みなので、ここで storage を差し替えても反映されない（実際に踏んだ）。
+        //    自分で分かっている値を足して、その値で判定する。
+        await recordWatch('cw:1', 5)
+        await recordWatch('cw:2', 3)
+        const before = watchHistorySize()
+        check('CW （空振り防止）前提: 記録が入っている',
+            getWatchPoints('cw:1') === 5 && before >= 2, `cw:1=${getWatchPoints('cw:1')} / ${before}人`)
+
+        // 消えた後に並べ替え直す経路（別タブと同じ道）が生きているか
+        let reranked = 0
+        startWatchHistorySync(() => { reranked++ })
+
+        // 設定パネルの DOM を用意して配線する
+        const panel = dom.root
+        const btn = document.createElement('button')
+        btn.id = 'reset_watch_points'
+        panel.appendChild(btn)
+        setupOptionsHandler({}, () => { }, () => { })
+
+        // 1回目: 確認へ変わるだけ。**消えない**
+        btn.fire('click')
+        await new Promise((r) => setTimeout(r, 0))
+        check('CW 🔴 1回目では消えない（押し間違いで全部消えない）',
+            removed === 0 && watchHistorySize() === before, `remove ${removed}回 / ${watchHistorySize()}人`)
+        check('CW 1回目は何人ぶん消えるかを出す（文言はボタン自身）',
+            new RegExp(before + '人ぶん').test(String(btn.textContent)), String(btn.textContent))
+        check('CW 確認中だけ目立たせる（小さく置いている以上、気付ける手がかりが要る）',
+            btn.classList.contains('is-armed'), String(btn.className))
+
+        // 2回目: 消える
+        btn.fire('click')
+        await new Promise((r) => setTimeout(r, 0))
+        check('CW 2回目で消える',
+            removed === 1 && watchHistorySize() === 0 && getWatchPoints('cw:1') === 0,
+            `remove ${removed}回 / ${watchHistorySize()}人`)
+        check('CW 🔴 消した後に並べ替え直す（storage.onChanged 経由・自分のタブでも走る）',
+            reranked >= 1, `${reranked} 回`)
+    } finally {
+        globalThis.chrome = savedChrome
+        dom.restore()
+    }
+
+    // --- ③ 道を2本にしない ---
+    check('CW 🔴 リセットから直接 rerank を呼ばない（別タブと同じ道に一本化）',
+        !/clearWatchHistory\(\)[\s\S]{0,200}?rerank/i.test(oh),
+        '2本あると片方だけ直す事故が起きる')
+    check('CW 履歴を消す実装は1つだけ',
+        (wh.match(/export async function clearWatchHistory/g) || []).length === 1
+        && !/storage\.local\.remove\('watchCounts'\)/.test(oh))
+}
+
+/**
  * CV: 汚染画像を動くサムネへ渡さない（2026-08-12・利用者報告の警告が発端）。
  *
  * 症状: 「⚠️ 動くサムネ: CORS汚染で解析不可」がコンソールに出て、そのページでは以後コマ化が止まる。
@@ -6302,6 +6709,9 @@ if (real) {
     await endedByAutoNextGroup()
     await liveStatisticsGroup()
     await taintedFrameNotFed()
+    await watchPointsResetGroup()
+    await elapsedTimeGroup()
+    await cardSettingsGroup()
     await endedRecheckDoesNotRefetch()
     console.log('')
     await r1NoSpin()

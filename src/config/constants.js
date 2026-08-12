@@ -177,6 +177,13 @@ export const defaultDwellMinutes = 17;
 //    （`ui/viewerCount.js`）。
 export const defaultShowViewerCount = 'off';
 
+// 経過時間の表示（2026-08-12・doc/09 項目CX）。サムネの右下に「放送開始から何分か」を出す。
+// 🔴 **既定は OFF。** 更新しただけで既存利用者の見た目が変わらないようにする（同接の表示と同じ）。
+export const defaultShowElapsedTime = 'off';
+// 経過時間を書き換える間隔。**分より細かく出さない**ので、これ以上短くしても見た目は変わらない。
+// ⚠️ 長くすると「1分ずれたまま」の時間が延びる。30秒なら最大で30秒ぶんしかずれない。
+export const elapsedTickMs = 30000;
+
 // chrome.storage.local のうち「設定」であるキー。**保存はこの一覧に載っているものだけ。**
 //
 // 🔴 **一覧に無いキーを設定として書き戻さないこと**（2026-08-11・利用者報告「おすすめ順の
@@ -206,6 +213,7 @@ export const optionKeys = [
     'cardSize',
     'sidebarPlacement',
     'showViewerCount',
+    'showElapsedTime',
     // ⚠️ `dwellMinutes` と `dwellScaleV4` は 2026-08-12 に**外した**（doc/09 項目CU）。
     //    「人気順の基準」を廃止して W を固定値にしたので、保存する意味が無くなった。
     //    🔴 **戻さないこと。** 一覧に載せると保存が復活し、その環境だけ古い W で動く。

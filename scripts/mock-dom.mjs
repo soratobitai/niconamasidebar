@@ -300,6 +300,17 @@ export function installMockDom() {
         createElement,
         createDocumentFragment,
         getElementById: getById,
+        // ⚠️ 本物にあるものは用意しておくこと。無いと**実装ではなく偽DOMのせいで**落ちる。
+        //    `updateCheckedState` がラジオを集めるのに使う。
+        getElementsByName: (name) => {
+            const out = []
+            const walk = (el) => {
+                if (el.attrs && el.attrs.name === name) out.push(el)
+                for (const c of el.children) walk(c)
+            }
+            walk(root)
+            return out
+        },
         querySelector: (sel) => select([root], sel, false),
         querySelectorAll: (sel) => select([root], sel, true),
         getElementsByClassName: (cls) => root.getElementsByClassName(cls),

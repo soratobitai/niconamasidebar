@@ -23,7 +23,7 @@
 
 import './styles/main.css'
 import './styles/kickPage.css'
-import { watchTargetIdOf, buildSidebarShell, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
+import { watchTargetIdOf, buildSidebarShell, startElapsedTicker, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
@@ -42,7 +42,8 @@ import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHis
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
-import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultCardSize, defaultShowViewerCount, endedByAutoNextValidMs } from './config/constants.js'
+import { applyShowElapsedTime } from './ui/elapsedTime.js'
+import { sidebarMinWidth, kickContentGap, updateThumbnailInterval, kickThumbnailInterval, reorderFlipDurationMs, minLoadingDurationMs, kickEndCheckIntervalMs, kickRaidGraceMs, defaultCardSize, defaultShowViewerCount, defaultShowElapsedTime, endedByAutoNextValidMs } from './config/constants.js'
 
 const SIDEBAR_ROOT_ID = 'niconamasidebar-kick-root'
 
@@ -64,6 +65,7 @@ const defaultOptions = {
     cardSize: defaultCardSize,
     sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT,
     showViewerCount: defaultShowViewerCount,
+    showElapsedTime: defaultShowElapsedTime,
 }
 
 let options = { ...defaultOptions }
@@ -951,6 +953,8 @@ async function init() {
     applySidebarPlacement(options.sidebarPlacement)
     // 同時視聴者数を出すか（β版）。印を付けるだけで、カードは作り直さない。
     applyShowViewerCount(options.showViewerCount)
+    // 経過時間を出すか。同上。
+    applyShowElapsedTime(options.showElapsedTime)
 
 
     // 動くサムネ。**kick.com では画像を SW 経由で取る。**
@@ -989,6 +993,8 @@ async function init() {
 
     startReconciler()
     startTimer()
+    // 経過時間の書き換え（doc/09 項目CX）。取得はしない・DOM の文字列だけ。
+    startElapsedTicker()
 
     // 自動移動。**印の確認を待ってから**始めること。
     // 監視は開いた直後に1回聞きに行くので、先に始めると
@@ -1058,6 +1064,10 @@ async function init() {
                 options.showViewerCount = changes.showViewerCount.newValue
                 // 印の付け替えだけ。取得も再描画もしない（見た目の出し分けなので）。
                 applyShowViewerCount(options.showViewerCount)
+            }
+            if (changes.showElapsedTime) {
+                options.showElapsedTime = changes.showElapsedTime.newValue
+                applyShowElapsedTime(options.showElapsedTime)
             }
             if (changes.cardSize) {
                 options.cardSize = changes.cardSize.newValue

@@ -230,7 +230,22 @@ export function stopDwellPoints() {
     dwellTimer = null
 }
 
-/** 履歴を全部消す（設定からの導線用）。 */
+/** 履歴に載っている配信者の数。リセットの確認文で「何人ぶん消えるか」を出すのに使う。 */
+export function watchHistorySize() {
+    return counts.size
+}
+
+/**
+ * 履歴を全部消す（設定「よく見る順の履歴」のリセット）。
+ *
+ * 🔴 **消した後の並べ替えをここから呼ばないこと。** `chrome.storage.local.remove` は
+ *    **自分のタブを含む全コンテキスト**で `storage.onChanged` を起こす（削除は
+ *    `newValue` が undefined で通知される）。`startWatchHistorySync` が既にそれを受けて
+ *    メモリを空にし、並べ替え直しまでやる。ここで別に呼ぶと、
+ *    **自分のタブだけ2回走る**うえ「同じことをする道が2本」になる。
+ * ⚠️ 拡張が無効化されている時は storage を触れないので通知も起きない。
+ *    その場合はメモリだけ空にして黙って戻る（次に開けば storage 側は残っている）。
+ */
 export async function clearWatchHistory() {
     counts = new Map()
     if (!storageAlive()) return

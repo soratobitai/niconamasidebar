@@ -1,4 +1,5 @@
 import { saveOptions as saveOptionsToStorage } from '../services/storage.js';
+import { clearWatchHistory, watchHistorySize } from '../services/watchHistory.js';
 
 /**
  * オプション設定の反映とイベントハンドリング
@@ -41,6 +42,7 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted) {
             const cardSizeElement = document.querySelector('input[name="cardSize"]:checked');
             const sidebarPlacementElement = document.querySelector('input[name="sidebarPlacement"]:checked');
             const showViewerCountElement = document.querySelector('input[name="showViewerCount"]:checked');
+            const showElapsedTimeElement = document.querySelector('input[name="showElapsedTime"]:checked');
 
             if (!autoOpenElement || !updateProgramsIntervalElement || !programsSortElement || !autoNextProgramElement) {
                 return;
@@ -63,6 +65,8 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted) {
             // 同時視聴者数（β版）。**必須ガードに入れない**（後から足した設定なので、古い DOM でも保存を止めない）。
             // 画面への反映は各ページの storage.onChanged が applyShowViewerCount で行う。
             if (showViewerCountElement) options.showViewerCount = showViewerCountElement.value;
+            // 経過時間。**必須ガードに入れない**（後から足した設定なので、古い DOM でも保存を止めない）。
+            if (showElapsedTimeElement) options.showElapsedTime = showElapsedTimeElement.value;
             // （「人気順の基準」は 2026-08-12 に廃止した。doc/09 項目CU）
             // ⚠️ かつてここに書いてあった注記: スライダーなので
             //    専用の input リスナーが options に入れている（フォームの change では拾えない）。
@@ -84,6 +88,17 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted) {
     updateCheckedState('cardSize', options.cardSize);
     updateCheckedState('sidebarPlacement', options.sidebarPlacement);
     updateCheckedState('showViewerCount', options.showViewerCount);
+    updateCheckedState('showElapsedTime', options.showElapsedTime);
+
+    /**
+     * 「よく見る順」を選んでいる時だけ出す部分（履歴のリセット）。
+     * ⚠️ **人気順では出さない。** 履歴は人気順の並びに一切効かないので、出すと関係が誤解される
+     *    （旧「人気順の基準」は人気順にも効いたので `active || recommend` だった。ここは違う）。
+     */
+    const syncRecommendOnlySections = () => {
+        const on = options.programsSort === 'recommend';
+        for (const el of document.querySelectorAll('.opt-recommend-only')) el.hidden = !on;
+    };
 
     // フォームに変更があったら保存する
     const optionForm = document.getElementById('optionForm');
@@ -92,6 +107,8 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted) {
             if (event.target.name === 'programsSort') {
                 // ソート方式変更時は既存データでソート（APIリクエストなし、ローディングなし）
                 saveOptions();
+                // 🔴 保存だけして表示を放置しないこと。切り替えても出たままになる。
+                syncRecommendOnlySections();
                 // 既存のDOMをソート（統一関数を使用）
                 const container = document.getElementById('liveProgramContainer');
                 if (container) {
@@ -103,7 +120,71 @@ export function setupOptionsHandler(options, sortPrograms, onKickGranted) {
         });
     }
 
+    syncRecommendOnlySections();
     setupKickLink(onKickGranted);
+    setupWatchPointsReset();
+}
+
+/**
+ * 「よく見る順の履歴」のリセット（doc/09 項目CW）。
+ *
+ * 🔴 **2段階にすること。** 取り消せない操作で、押し間違いの救済が無い。
+ *    1回目は文言を確認へ変えるだけ。何もせず放っておくと戻る。
+ *
+ * 🔴 **消した後の並べ替えをここから呼ばないこと。** `clearWatchHistory` が storage を消すと
+ *    `storage.onChanged` が**自分のタブでも**起き、`startWatchHistorySync` が受けて
+ *    メモリを空にし、並べ替え直しまでやる（別タブと同じ道）。ここで別に呼ぶと2回走るうえ、
+ *    「同じことをする道が2本」になって片方だけ直す事故が起きる。
+ *
+ * ⚠️ **設定ではなく操作。** `optionKeys` にも `saveOptions` にも関わらない。
+ */
+const RESET_CONFIRM_MS = 6000;
+function setupWatchPointsReset() {
+    const btn = document.getElementById('reset_watch_points');
+    if (!btn) return;
+
+    // 状態は**ボタン自身の文言**で出す（小さく目立たなく置くため、別枠を持たない）。
+    const IDLE = '履歴をリセット';
+    let armed = false;
+    let revertTimer = null;
+    const setLabel = (text, isArmed) => {
+        btn.textContent = text;
+        // 確認中だけ目立たせる。小さく置いている以上、押し間違いにその場で気付ける手がかりが要る。
+        if (btn.classList) btn.classList.toggle('is-armed', !!isArmed);
+    };
+    const disarm = () => {
+        armed = false;
+        if (revertTimer) { clearTimeout(revertTimer); revertTimer = null; }
+        setLabel(IDLE, false);
+    };
+    const revertLater = () => {
+        if (revertTimer) clearTimeout(revertTimer);
+        revertTimer = setTimeout(disarm, RESET_CONFIRM_MS);
+    };
+
+    btn.addEventListener('click', async () => {
+        if (!armed) {
+            // 何人ぶん消えるかを出す。0件なら押す意味が無いので、そう伝えて終わる。
+            const n = watchHistorySize();
+            if (n === 0) {
+                setLabel('履歴はまだありません', false);
+                revertLater();
+                return;
+            }
+            armed = true;
+            setLabel(`本当に消す（${n}人ぶん）`, true);
+            revertLater();
+            return;
+        }
+        armed = false;
+        try {
+            await clearWatchHistory();
+            setLabel('消しました', false);
+        } catch (_e) {
+            setLabel('消せませんでした', false);
+        }
+        revertLater();
+    });
 }
 
 /**

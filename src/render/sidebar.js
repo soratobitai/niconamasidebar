@@ -1,6 +1,7 @@
-import { thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes, autoUpdateOffValue, fallbackUpdateIntervalSec } from '../config/constants.js'
+import { elapsedTickMs, thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxMs, thumbnailCrossfadeMs, watchPageBaseUrl, animIngestWaitMaxMs, defaultDwellMinutes, autoUpdateOffValue, fallbackUpdateIntervalSec } from '../config/constants.js'
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { getWatchPoints, ownerKeyOf } from '../services/watchHistory.js'
+import { formatElapsed } from '../ui/elapsedTime.js'
 import { totalEngagement, commentWeight, commentRatio, estimateConcurrentViewers } from '../utils/momentum.js'
 
 /**
@@ -448,6 +449,21 @@ export function makeProgramElement(data, loadingImageURL) {
     viewerOverlay.textContent = formatViewers(calculateActivePoint(data))
     thumbnailDiv.appendChild(viewerOverlay)
 
+    // 放送開始からの経過時間をサムネの右下に重ねる（doc/09 項目CX）。
+    // ⚠️ 中身は applyRankAttributes が書く（同接と同じ扱い＝書き手を増やさない）。
+    // 🔴 **生成時はここで一度埋めること。** `applyRankAttributes` はこの関数の**先頭**で
+    //    走っており、その時点ではまだこの span が親に付いていないので何も書けない。
+    //    埋めないと ticker（30秒）か次のリスト更新（最大120秒）まで空欄のままになる
+    //    ―― 実際にそうなって「表示されるまで時間がかかる」と報告された（2026-08-12）。
+    //    すぐ上の視聴点数バッジに同じ注意書きがあるのに、同じ失敗をした。
+    const elapsedOverlay = document.createElement('span')
+    elapsedOverlay.className = 'elapsed_overlay'
+    elapsedOverlay.textContent = formatElapsed(
+        data && data.onAirTime && data.onAirTime.beginAt ? Date.parse(data.onAirTime.beginAt) : NaN,
+        Date.now(),
+    )
+    thumbnailDiv.appendChild(elapsedOverlay)
+
     container.appendChild(thumbnailDiv)
 
     // タイトルセクション
@@ -782,6 +798,43 @@ function formatViewers(v) {
     return n > 0 ? n.toLocaleString('ja-JP') : '—'
 }
 
+/**
+ * サムネ右下の経過時間を1枚ぶん書く。**書き手はここだけ**（描画時と ticker の両方が通る）。
+ * @param {HTMLElement} el カードのコンテナ
+ * @param {number} beginMs 放送開始（エポックms）
+ * @param {number} now 現在時刻(ms)
+ */
+function writeElapsedLabel(el, beginMs, now) {
+    const slot = el && el.querySelector ? el.querySelector('.elapsed_overlay') : null
+    if (!slot) return
+    slot.textContent = formatElapsed(beginMs, now)
+}
+
+/**
+ * 経過時間を定期的に書き換える。**両ページが1回だけ呼ぶ。**
+ *
+ * 【なぜ要るか】リストの取得は既定120秒間隔で、そのままだと最大2分ずれた時間が出る。
+ * 分単位でしか出さないので 30秒 ごとに書き直せば、ずれは最大30秒に収まる。
+ *
+ * 🔴 **取得はしない。** DOM の `data-begin-at` を読んで文字列を書くだけ。
+ *    ⚠️ だから拡張が無効化された後も止めていない（doc/09 項目BK が問題にしたのは
+ *       「取得が止まらない」こと。ここは通信も storage も触らず、ページと一緒に消える）。
+ * ⚠️ **設定が OFF の間も回す。** 判定は CSS 側（`nns-show-elapsed`）が持っており、
+ *    ここで見に行くと「設定を読む経路」が増える。書くのは文字列だけなので止める価値が無い。
+ */
+let elapsedTimer = null
+export function startElapsedTicker() {
+    if (elapsedTimer !== null) return
+    elapsedTimer = setInterval(() => {
+        const container = document.getElementById('liveProgramContainer')
+        if (!container) return
+        const now = Date.now()
+        for (const card of container.children) {
+            writeElapsedLabel(card, Number(card.getAttribute('data-begin-at')), now)
+        }
+    }, elapsedTickMs)
+}
+
 export function applyRankAttributes(el, data) {
     if (!el) return
     // どのサービスの番組か。タブ分離モードの表示切り替え（CSS）とラベル表示が読む。
@@ -797,6 +850,9 @@ export function applyRankAttributes(el, data) {
     //    開始時刻なら両サービスが同じ意味で持っている。
     const beginMs = data && data.onAirTime && data.onAirTime.beginAt ? Date.parse(data.onAirTime.beginAt) : NaN
     el.setAttribute('data-begin-at', Number.isFinite(beginMs) ? String(beginMs) : '0')
+    // サムネ右下の経過時間（doc/09 項目CX）。**読むのは上の data-begin-at と同じ値**。
+    // ⚠️ ここは取得のたびにしか走らない（既定120秒）。その間の進みは startElapsedTicker が埋める。
+    writeElapsedLabel(el, beginMs, Date.now())
     // ⚠️ 以下3つは**順位計算に使っていない**。弾幕補正の効き方を実機で見るための覗き窓。
     //    順位が推定同接へ移行した今、消してよい候補（doc/09 項目BE の後日談）。
     // おすすめ順の材料。**書き手はここだけ**（他の順位属性と同じ扱い）。
@@ -1467,7 +1523,7 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                 <div class="opt-section">
                                     <div class="opt-label opt-title-with-help">
                                         表示順序
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>よく見る順</b>: よく見る配信者ほど上。データが貯まるまでは人気順。</span></span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip"><b>新着順</b>: 放送開始が新しい順。<br><b>人気順</b>: 同時視聴者数の多い順。<br><b>よく見る順</b>: よく見る配信者ほど上。履歴が貯まるまでは人気順。</span></span>
                                     </div>
                                     <!-- ⚠️ **値を変えないこと。** 保存済みの設定に対応するラジオが無くなると、
                                          その利用者は設定を一切保存できなくなる（doc/09 項目BQ と同じ罠）。
@@ -1479,17 +1535,17 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="programsSort2" name="programsSort" value="active"><label for="programsSort2">人気順</label>
                                         <input type="radio" id="programsSort3" name="programsSort" value="recommend"><label for="programsSort3">よく見る順</label>
                                     </div>
-                                </div>
-                                <!-- 同時視聴者数（β版・2026-08-12・doc/09 項目CR）。
-                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
-                                        同時視聴者数<span class="opt-beta-badge">β版</span>
-                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
-                                    </div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
-                                        <input type="radio" id="showViewerCountOn" name="showViewerCount" value="on"><label for="showViewerCountOn">ON</label>
+                                    <!-- よく見る順の履歴をリセットする（doc/09 項目CW）。
+                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。
+                                         🔴 **設定ではなく「操作」。** optionKeys に足さないこと（保存するものが無い）。
+                                         🔴 **type="button" にすること。** 既定の submit だとフォームが送信され、
+                                            設定パネルが閉じる／ページが再読み込みされる。
+                                         ⚠️ 取り消せないので**2段階**（1回目は文言が確認へ変わるだけ）。
+                                            状態は**ボタン自身の文言**で出す（小さく目立たなく置くため、別枠を持たない）。
+                                         ⚠️ 出すのは「よく見る順」を選んでいる時だけ（opt-recommend-only）。 -->
+                                    <div class="opt-recommend-only" hidden>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">よく見る順で使う視聴履歴を全部消します。<b>元に戻せません。</b><br><br>どの配信者をどれだけ見たかを端末の中に保存しているだけで、どこにも送信していません。</span></span>
+                                        <button type="button" id="reset_watch_points" class="opt-inline-reset">履歴をリセット</button>
                                     </div>
                                 </div>
                                 <!-- 🔴 **「人気順の基準」（W のスライダー）は 2026-08-12 に廃止した**（doc/09 項目CU）。
@@ -1547,8 +1603,27 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="autoNextProgramOn" name="autoNextProgram" value="on"><label for="autoNextProgramOn">ON</label>
                                     </div>
                                 </div>
-                                <div class="opt-section">
-                                    <div class="opt-label opt-title-with-help">
+                                <!-- 番組カードの見た目にかかる設定を1つの枠にまとめる（利用者指定・2026-08-12・doc/09 項目CY）。
+                                     ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。
+                                     ⚠️ **サブ項目も opt-title-with-help を保つこと。** ヘルプの吹き出しは
+                                        いちばん近い positioned 祖先に合わせて出るので、外すと別の幅で出てはみ出す。
+                                     🔴 **name と value は動かさない。** 保存済みの設定に対応するラジオが無くなると、
+                                        その利用者は設定を一切保存できなくなる（doc/09 項目BQ）。
+                                     ⚠️ カードの大きさに「?」を付けないのは利用者判断（2026-08-10）。設定名と小/中/大で伝わる。
+                                        value は constants.js の cardSizes のキーと同じにすること。 -->
+                                <div class="opt-section opt-group">
+                                    <div class="opt-label">番組カードの設定</div>
+                                <div class="opt-subsection">
+                                    <!-- 「?」は付けない（利用者判断・2026-08-10）。設定名と小/中/大で伝わる。 -->
+                                    <div class="opt-sublabel">カードの大きさ</div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
+                                        <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
+                                        <input type="radio" id="cardSizeLarge" name="cardSize" value="large"><label for="cardSizeLarge">大</label>
+                                    </div>
+                                </div>
+                                <div class="opt-subsection">
+                                    <div class="opt-sublabel opt-title-with-help">
                                         動くサムネ<span class="opt-beta-badge">β版</span>
                                         <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネにマウスを乗せると直近数枚のライブサムネをアニメーション表示します。<br><br>コマが貯まるまで数分かかることがあります。</span></span>
                                     </div>
@@ -1556,6 +1631,27 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         <input type="radio" id="animatedThumbnailOff" name="animatedThumbnail" value="off"><label for="animatedThumbnailOff">OFF</label>
                                         <input type="radio" id="animatedThumbnailOn" name="animatedThumbnail" value="on"><label for="animatedThumbnailOn">ON</label>
                                     </div>
+                                </div>
+                                <div class="opt-subsection">
+                                    <div class="opt-sublabel opt-title-with-help">
+                                        同時視聴者数<span class="opt-beta-badge">β版</span>
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの左上に同時視聴者数を出します。<br><br>ニコ生は公表されていないので<b>推定値</b>です。放送開始から数分は「—」になります。<br><br>Kick は実測値です。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="showViewerCountOff" name="showViewerCount" value="off"><label for="showViewerCountOff">OFF</label>
+                                        <input type="radio" id="showViewerCountOn" name="showViewerCount" value="on"><label for="showViewerCountOn">ON</label>
+                                    </div>
+                                </div>
+                                <div class="opt-subsection">
+                                    <div class="opt-sublabel opt-title-with-help">
+                                        経過時間
+                                        <span class="help-wrap"><span class="help-icon" aria-label="ヘルプ" tabindex="0">?</span><span class="help-tooltip" role="tooltip">サムネの右下に、放送が始まってからの時間を出します。<br><br>分より細かくは出しません。</span></span>
+                                    </div>
+                                    <div class="opt-segment">
+                                        <input type="radio" id="showElapsedTimeOff" name="showElapsedTime" value="off"><label for="showElapsedTimeOff">OFF</label>
+                                        <input type="radio" id="showElapsedTimeOn" name="showElapsedTime" value="on"><label for="showElapsedTimeOn">ON</label>
+                                    </div>
+                                </div>
                                 </div>
                                 <!-- カードの大きさ。**動くサムネの下**（利用者指定・2026-08-10。以前は自動更新の上だった）。
                                      ⚠️ value は constants.js の cardSizes のキーと同じにすること。
@@ -1571,15 +1667,6 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                     <div class="opt-segment">
                                         <input type="radio" id="sidebarPlacementPush" name="sidebarPlacement" value="push"><label for="sidebarPlacementPush">画面分割</label>
                                         <input type="radio" id="sidebarPlacementOverlay" name="sidebarPlacement" value="overlay"><label for="sidebarPlacementOverlay">重ねる</label>
-                                    </div>
-                                </div>
-                                <div class="opt-section">
-                                    <!-- 「?」は付けない（利用者判断・2026-08-10）。設定名と小/中/大で伝わる。 -->
-                                    <div class="opt-label">カードの大きさ</div>
-                                    <div class="opt-segment">
-                                        <input type="radio" id="cardSizeSmall" name="cardSize" value="small"><label for="cardSizeSmall">小</label>
-                                        <input type="radio" id="cardSizeMedium" name="cardSize" value="medium"><label for="cardSizeMedium">中</label>
-                                        <input type="radio" id="cardSizeLarge" name="cardSize" value="large"><label for="cardSizeLarge">大</label>
                                     </div>
                                 </div>
                                 <div class="opt-section">

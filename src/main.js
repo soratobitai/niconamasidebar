@@ -1,14 +1,15 @@
 // CSSファイルをインポート（ViteでCSSファイルを出力するため）
 import './styles/main.css'
-import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultCardSize, defaultShowViewerCount } from './config/constants.js'
+import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultCardSize, defaultShowViewerCount, defaultShowElapsedTime } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed, startElapsedTicker, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
 import { consumeAutoNextHopMark } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnNicoPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { applySidebarPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
+import { applyShowElapsedTime } from './ui/elapsedTime.js'
 import { adjustWatchPageChild, setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
 import { LoadingManager } from './managers/LoadingManager.js'
@@ -42,6 +43,7 @@ let defaultOptions = {
     cardSize: defaultCardSize,                  // 番組カードの大きさ（'small' | 'medium' | 'large'）
     sidebarPlacement: SIDEBAR_PLACEMENT_DEFAULT, // サイドバーの置き方（'push' = 寄せる / 'overlay' = 重ねる）
     showViewerCount: defaultShowViewerCount,    // 同時視聴者数をサムネ左上に出すか（β版・既定OFF）
+    showElapsedTime: defaultShowElapsedTime,    // 経過時間をサムネ右下に出すか（既定OFF）
 };
 let options = {};
 let elems = {};
@@ -152,6 +154,8 @@ const setup = async () => {
     updateManager.startSidebarLoop();
     // サムネ更新の常設ループも同様に1回だけ開始する（番組ごとの期限はループ内で管理）。
     updateManager.startThumbnailLoop();
+    // 経過時間の書き換え（doc/09 項目CX）。取得はしない・DOM の文字列だけ。
+    startElapsedTicker();
 
     // サイドバーの開閉/幅の状態。ドラッグ中は onMouseMove が sidebarWidth.value を即時更新する。
     // 列数計算(setProgramContainerWidth)は開閉アニメの「途中幅」ではなく、この「意図した幅」を使う
@@ -500,6 +504,10 @@ chrome.storage.onChanged.addListener(function (changes) {
         // 印の付け替えだけ。取得も再描画もしない（見た目の出し分けなので）。
         applyShowViewerCount(options.showViewerCount);
     }
+    if (changes.showElapsedTime) {
+        options.showElapsedTime = changes.showElapsedTime.newValue;
+        applyShowElapsedTime(options.showElapsedTime);
+    }
     if (changes.cardSize) {
         options.cardSize = changes.cardSize.newValue;
         setCardSize(options.cardSize);
@@ -649,6 +657,8 @@ const reflectOptions = () => {
     applySidebarPlacement(options.sidebarPlacement);
     // 同時視聴者数を出すか（β版）。印を付けるだけで、カードは作り直さない。
     applyShowViewerCount(options.showViewerCount);
+    // 経過時間を出すか。同上。
+    applyShowElapsedTime(options.showElapsedTime);
     // タブのクリック配線（1回だけ効く。2回目以降は内部で弾く）
     setupServiceTabHandlers((count) => {
         if (updateManager) updateManager.updateProgramCount(count);

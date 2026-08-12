@@ -463,6 +463,34 @@ html.nns-show-viewers .program_container .program_thumbnail .viewer_overlay {
     display: block;
 }
 
+/* 放送開始からの経過時間（doc/09 項目CX）。同接と対で、こちらは右下。
+   🔴 既定は非表示。設定が ON の時だけ出す（向きは viewer_overlay と同じ理由）。
+   ⚠️ pointer-events:none は必須。サムネは <a> の中なので覆うと押せなくなる。 */
+.program_container .program_thumbnail .elapsed_overlay {
+    display: none;
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    z-index: 2;
+    pointer-events: none;
+    padding: 0 5px;
+    font-size: calc(10px * var(--nns-card-scale));
+    line-height: 1.6;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.62);
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+html.nns-show-elapsed .program_container .program_thumbnail .elapsed_overlay {
+    display: block;
+}
+
+/* 中身が空（開始時刻が無い・開始が未来）の時は枠だけ残さない。 */
+.program_container .program_thumbnail .elapsed_overlay:empty {
+    display: none;
+}
+
 /* 動くサムネ（ホバー中のオーバーレイ・2レイヤーでクロスフェード） */
 .program_container .program_thumbnail .anim_thumb_overlay {
     position: absolute;
@@ -604,6 +632,75 @@ html.nns-show-viewers .program_container .program_thumbnail .viewer_overlay {
     margin-bottom: 10px;
 }
 
+/* 番組カードの見た目にかかる設定をまとめた枠（doc/09 項目CY）。
+   中身はサブ項目（.opt-subsection）で、見出しより一段下げて見せる。 */
+#optionContainer .opt-group .opt-subsection {
+    /* ラベルを左、ボタンを右に置く（利用者指定・2026-08-12）。
+       ⚠️ **狭くなったら折り返す。** サイドバーは幅をドラッグで変えられ、1列表示では 180px まで
+          縮む。折り返さないとボタンが潰れて読めなくなる。 */
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-top: 14px;
+    padding-left: 12px;
+    border-left: 2px solid var(--sb-line);
+    /* 🔴 ヘルプの吹き出しの基準をこの行にする。**ラベルを基準にしない。**
+       吹き出しは left:0 / width:100% なので、ラベル基準だとラベルの幅（＝狭い）で出て
+       縦に間延びする。行の幅に合わせるためここを positioned にする。 */
+    position: relative;
+}
+
+/* 上と対。ラベル側の relative を打ち消す（行のほうを基準にする）。 */
+#optionContainer .opt-subsection .opt-title-with-help {
+    position: static;
+}
+
+/* サブ項目の見出し。**枠の見出し（.opt-label）とはっきり差を付ける**（利用者指定・2026-08-12）。
+   .opt-label は 1.12em・太字・不透明。こちらは小さく・細く・薄く。
+   🔴 同じ重さにしないこと。階層が読めず、まとめた意味が無くなる。
+   ⚠️ `position: relative` は .opt-title-with-help 側が持っている（ヘルプの吹き出しの基準）。 */
+#optionContainer .opt-sublabel {
+    /* 枠の見出し（1.12em・太字）との差は**大きさと太さ**で付ける。
+       ⚠️ **薄くしないこと。** opacity .7 まで落としたら「薄すぎる」と指摘された（2026-08-12）。
+          階層は字の大きさ・左の線・字下げで足りている。読みにくくしてまで付ける差ではない。 */
+    font-size: 0.9em;
+    font-weight: normal;
+    color: var(--sb-fg);
+    margin-bottom: 0;
+    flex: 0 0 auto;
+}
+
+/* ボタンは残り幅いっぱい。全部の行で**右端が揃う**ので、ラベルの長さが違っても乱れない。
+   ⚠️ 幅が足りなくなったら flex-wrap で次の行へ落ちる（basis を小さめに取ってある）。 */
+#optionContainer .opt-subsection .opt-segment {
+    flex: 1 1 130px;
+    min-width: 0;
+    /* 一回り小さく。見出しだけ小さくしても、ボタンが同じ大きさだと「サブ」に見えない。 */
+    gap: 4px;
+    padding: 3px;
+    border-radius: 7px;
+}
+
+#optionContainer .opt-subsection .opt-segment label {
+    padding: 6px 5px;
+    font-size: 0.88em;
+    border-radius: 5px;
+}
+
+/* β版バッジもサブ項目では小さく（親の font-size に追随しない指定があるため個別に） */
+#optionContainer .opt-sublabel .opt-beta-badge {
+    font-size: 0.82em;
+    padding: 1px 5px;
+}
+
+/* ヘルプの「?」も同様。サブ項目の中で浮かないようにする。 */
+#optionContainer .opt-sublabel .help-icon {
+    width: 15px;
+    height: 15px;
+    font-size: 10px;
+}
+
 /* セグメント型の選択UI（ラジオを隠してラベルをボタン化） */
 #optionContainer .opt-segment {
     display: flex;
@@ -697,6 +794,53 @@ html.nns-show-viewers .program_container .program_thumbnail .viewer_overlay {
     box-sizing: border-box;
     accent-color: var(--sb-accent);
     cursor: pointer;
+}
+
+/* 「よく見る順の記録」のリセット（doc/09 項目CW）。表示順序の枠の中に小さく置く。
+   🔴 **目立たせないこと**（利用者指定）。取り消せない操作だが、押す機会はまれで、
+      設定を見に来た人の視線を奪う理由が無い。強調は押した後（確認の文言）だけで足りる。
+   ⚠️ `.opt-segment` の下に右寄せで1行。値を持たないので optionForm の change では拾われない。 */
+#optionContainer .opt-recommend-only {
+    /* ⚠️ ヘルプの吹き出しは `left:0; width:100%` で**いちばん近い positioned 祖先**に合わせる。
+       ここを relative にしないと、吹き出しが別の箱の幅で出て右にはみ出す。 */
+    position: relative;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+/* 🔴 **`display` を書いたら、`[hidden]` の打ち消しも必ず書くこと。**
+   UA の `[hidden] { display: none }` はクラス指定より弱いので、上の `display: flex` が勝ち、
+   **JS が `hidden` を立てても消えない**（2026-08-12 に実際にそうなった。利用者報告
+   「新着や人気順の時も消えません」）。同じ罠は #kick_notice のコメントにも書いてある。 */
+#optionContainer .opt-recommend-only[hidden] {
+    display: none;
+}
+
+#optionContainer .opt-inline-reset {
+    font: inherit;
+    font-size: 0.78em;
+    padding: 2px 4px;
+    border: 0;
+    background: none;
+    color: inherit;
+    opacity: .55;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+#optionContainer .opt-inline-reset:hover {
+    opacity: .9;
+}
+
+/* 確認中（2段階の1回目を押した後）だけ目立たせる。押し間違いに気付けるように。 */
+#optionContainer .opt-inline-reset.is-armed {
+    opacity: 1;
+    font-weight: bold;
+    color: #d64545;
 }
 
 /* 外部（拡張のオプションページ）へ飛ばす行。今は Kick 連携だけが使う。

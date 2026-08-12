@@ -18,7 +18,10 @@ const tpl = src.slice(a, b)
 //    opt-label の開きから **div の入れ子を数えて**閉じを見つける、素直な走査にする。
 function readLabelBlocks(html) {
     const out = []
-    const open = /<div class="opt-label([^"]*)">/g
+    // ⚠️ **`opt-label` だけを見ないこと。** 2026-08-12 に4つの設定をサブ項目（`opt-sublabel`）へ
+    //    まとめた時、ここが拾えなくなって**3件が静かに消えた**（上のコメントと同じ失敗を再演した）。
+    //    下の「拾い残しが無いか」の突き合わせが本命の歯止めで、ここはその前段。
+    const open = /<div class="opt-(?:sub)?label([^"]*)">/g
     let m
     while ((m = open.exec(html)) !== null) {
         let depth = 1
@@ -34,6 +37,20 @@ function readLabelBlocks(html) {
     return out
 }
 
+/**
+ * 見出し（opt-label / opt-sublabel）を持たないヘルプを拾う。
+ *
+ * 「履歴をリセット」のように、**ボタンの隣に小さく置いた**ものがこれに当たる。
+ * 見出しが無いので、ボタンの文字を名前として使う。
+ */
+function html_helpRowsWithoutLabel(html) {
+    const out = []
+    const re = /<span class="help-wrap">[\s\S]*?<span class="help-tooltip" role="tooltip">([\s\S]*?)<\/span><\/span>\s*<button[^>]*>([^<]*)<\/button>/g
+    let m
+    while ((m = re.exec(html)) !== null) out.push({ tip: m[1], label: m[2].trim() })
+    return out
+}
+
 const blocks = readLabelBlocks(tpl)
 const parsed = blocks.map(({ body }) => {
     const beta = (body.match(/<span class="opt-beta-badge">([^<]*)<\/span>/) || [])[1] || ''
@@ -45,9 +62,23 @@ const parsed = blocks.map(({ body }) => {
 
 const tips = parsed.filter((x) => x.tip).map((x) => [null, x.label, x.beta, x.tip])
 
+// 見出しを持たないヘルプ（「履歴をリセット」のように、ボタンの隣に小さく置いたもの）。
+// 見出しの代わりにボタンの文字を名前にする。
+for (const m of html_helpRowsWithoutLabel(tpl)) tips.push([null, m.label, '', m.tip])
+
 if (!tips.length) { console.error('NG   ヘルプを1件も拾えない（空振り）'); process.exit(1) }
 // 空振り防止: 設定の総数が極端に少なければ走査が壊れている
 if (parsed.length < 8) { console.error(`NG   設定を ${parsed.length} 件しか拾えない（走査が壊れている）`); process.exit(1) }
+
+// 🔴 **これが本命の歯止め。** 実装にあるヘルプの数と、書き出した数を突き合わせる。
+//    走査の形が実装に追いつかなくなると**静かに減る**（2026-08-10 に「テーマ」、
+//    2026-08-12 にサブ項目3件で2度踏んだ）。数が合わなければ落として気付けるようにする。
+const inTemplate = (tpl.match(/<span class="help-tooltip" role="tooltip">/g) || []).length
+if (tips.length !== inTemplate) {
+    console.error(`NG   実装に ${inTemplate} 件のヘルプがあるのに ${tips.length} 件しか書き出せていない。`
+        + ' 走査（readLabelBlocks / html_helpRowsWithoutLabel）が実装の形に追いついていない。')
+    process.exit(1)
+}
 
 // HTML を読みやすい Markdown へ
 const toMd = (html) => html
