@@ -668,11 +668,18 @@ html.nns-show-elapsed .program_container .program_thumbnail .elapsed_overlay {
     font-weight: normal;
     color: var(--sb-fg);
     margin-bottom: 0;
-    flex: 0 0 auto;
+    /* 🔴 **見出しの列幅は4行とも同じにする**（利用者指定・2026-08-13）。
+       auto にすると見出しの長さぶんボタンの左端がずれ、右端だけが揃った不揃いな並びになる
+       （実測・サイドバー幅360px: ボタン枠が 222/188/177/257px と 80px ばらついていた）。
+       ⚠️ **いちばん長い見出しが入る値にすること。** 実測で「同時視聴者数 β版 ?」が 127px
+          （文字＋バッジ＋「?」＋間隔の合計）。足りないと見出しだけ2行になる。
+       ⚠️ 縮まない（flex-shrink: 0）。狭い時はボタン側が flex-wrap で下へ落ちる。 */
+    flex: 0 0 132px;
 }
 
-/* ボタンは残り幅いっぱい。全部の行で**右端が揃う**ので、ラベルの長さが違っても乱れない。
-   ⚠️ 幅が足りなくなったら flex-wrap で次の行へ落ちる（basis を小さめに取ってある）。 */
+/* ボタンは残り幅いっぱい。見出しの列幅が固定なので、**左端も右端も全行で揃う**。
+   ⚠️ 幅が足りなくなったら flex-wrap で次の行へ落ちる（basis を小さめに取ってある）。
+      132 + gap 10 + 130 = 272px 以上（＝サイドバー幅 304px 以上）で1行に収まる。 */
 #optionContainer .opt-subsection .opt-segment {
     flex: 1 1 130px;
     min-width: 0;

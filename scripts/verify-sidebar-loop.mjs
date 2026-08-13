@@ -2094,6 +2094,16 @@ async function cardSettingsGroup() {
     check('CY 🔴 狭くなったら折り返す（ボタンが潰れない）',
         /\.opt-group \.opt-subsection\s*\{[^}]*flex-wrap:\s*wrap/.test(css)
         && /\.opt-subsection \.opt-segment\s*\{[^}]*flex:\s*1 1 \d+px/.test(css))
+    // 🔴 **4行でボタンの幅を揃える**（利用者指定・2026-08-13）。見出しの列幅が auto だと、
+    //    見出しの長さぶんボタンの左端がずれ、右端だけ揃った不揃いな並びになる。
+    //    実測（Chrome・サイドバー幅360px）: ボタン枠が 222 / 188 / 177 / 257px と 80px ばらついていた。
+    //    列幅を固定すると4行とも 172px で揃う。
+    const subLabelBasis = Number((css.match(/\.opt-sublabel\s*\{[^}]*flex:\s*0 0 (\d+)px/) || [])[1])
+    check('CY 🔴 サブ項目のボタン幅が4行で揃う（見出しの列幅を固定してある）',
+        Number.isFinite(subLabelBasis), 'flex: 0 0 auto に戻すと左端がラベルの長さでずれる')
+    // ⚠️ 縮めると、いちばん長い見出し（同時視聴者数 β版 ?＝実測127px）が2行になる。
+    check('CY 🔴 見出しの列幅はいちばん長い見出しが1行で入る',
+        subLabelBasis >= 130, `${subLabelBasis}px（実測で必要なのは 127px）`)
     // 🔴 横並びにすると、ヘルプの吹き出しの基準がラベル（＝狭い）になってしまう。行に移す。
     check('CY 🔴 ヘルプの吹き出しは行の幅に合わせる',
         /\.opt-group \.opt-subsection\s*\{[^}]*position:\s*relative/.test(css)
