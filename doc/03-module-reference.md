@@ -231,7 +231,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 | `makeProgramElement(data, loadingImageURL)` ★ | 番組データ→カードDOM（`createElement`ベース、XSS配慮）。`div.program_container#{数字ID}` に `provider`(icon/provider_name) + `program_thumbnail`(img: `src`=ライブサムネ, `data-src`=静的サムネ, **error時フォールバック配線済み**) + `program_title`。`providerType` で user/channel を出し分け（user=`liveScreenshotThumbnailUrls.middle?cache=`, channel=`large1280x720ThumbnailUrl`）。**サムネが無い間の繋ぎは配信者アイコン**（→ 無ければ `loading.gif`）で、その時は `dataset.thumbLive='0'` を立てる |
 | `calculateActivePoint(data)` | **盛り上がり**（＝人気順のスコア）を返す。実体は `data.momentum`（直近の増分レートのEMA。計算は `utils/momentum.js`、更新は `storage.upsertProgramInfos`）。未計算なら `initialMomentum`（開始からの平均レート）で代用。⚠️ 旧式 `(viewers+1 + comments+1) / 経過分` に戻さないこと（doc/09 項目AY）。旧 `onAirTime.beginAt` から経過時間算出。ソート・active-point属性の元になる**現役関数**（✅ 誤った `@deprecated` JSDocは2026-07-11に修正） |
 | `_dropEndedByNotifybox(programs, notifyList)` (UpdateManager) | **notifybox から消えた番組を終了とみなして外す**（項目BF）。🔴 不在を根拠にするのは「取得成功」「応答が要求件数未満」「その番組が以前 notifybox に載っていた」の3条件が揃った時だけ。1つでも外すと**生きている番組が黙って消える** |
-| `applyRankAttributes(el, data)` | 人気順が読む属性を**まとめて**書く**唯一の書き手**（`active-point` / `data-total` / 覗き窓の `data-comment-weight`・`data-comment-ratio`）。🔴 **個別に書かないこと** — 以前は生成時とその場更新の2箇所で個別に書き、「片方だけ書くと同点時の並びが古い値で決まる」を⚠️コメントで守っていた（doc/09 項目BE） |
+| `applyRankAttributes(el, data)` | 並べ替えが読む属性を**まとめて**書く**唯一の書き手**（人気順の `active-point` と同点用の `data-begin-at`、よく見る順の `data-watch-count`。ほかに覗き窓の `data-total`・`data-comment-weight`・`data-comment-ratio` も書くが、**これらは誰も読まない**）。🔴 **個別に書かないこと** — 以前は生成時とその場更新の2箇所で個別に書き、「片方だけ書くと同点時の並びが古い値で決まる」を⚠️コメントで守っていた（doc/09 項目BE） |
 | （内部）`handleThumbnailError` | サムネ読み込み失敗時のフォールバック（`data-src`→loading.gif）。✅ 2026-07-11に `makeProgramElement` で各imgへ直接配線（旧 `attachThumbnailErrorHandlers` は未使用のため削除） |
 | `updateThumbnailsFromStorage(programInfos, {force,onComplete,onlyIds,onSettled})` ★★ | ⚠️ ライブサムネを持たない番組（チャンネル等）では `syncStaticThumb` が**唯一の表示経路**（`applyProgramInfoToCard` は `img.src` を触らないため）。「loading.gif の時だけ戻す」にすると絵が永久に出なくなる（項目AZ）。 localStorageの番組情報を元に各サムネを更新。既定は**コンテナ内の全 `.program_thumbnail_img`**（✅ 可視限定は撤去）。`onlyIds` 指定時はその id 集合の番組だけ更新（番組ごと自己連鎖サイクルで使う）。`computeNext` でURL決定（memberOnlyはスキップ）。**TTL**(`thumbnailTtlMs`)内かつ同キーは skip、失敗は**指数バックオフ**(`nextTryAt`)。`new Image()` でプリロード成功時のみ差し替え（フリッカ防止）。50件チャンク＋`requestAnimationFrame`。**`onSettled`** は全プリロードが settle したら1回だけ発火し、`_updateOneThumbnailAndWait` がこれを待って次サイクルを張る（＝作業時間ぶん自然にドリフトする） |
 | `sortProgramsByActivePoint(container)` | `active-point` 降順に並べ替え（人気順の実体）。比較器は `utils/programOrder.js` の `compareByActivePoint` |
@@ -301,7 +301,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 |------|------|
 | `commentRatio(info)` | **1人あたり何コメントか** `r = コメント累計 / (来場者累計 + 20)`。弾幕補正の唯一の入力。⚠️ **「Δコメント/Δ来場者」にしないこと** — 分母が頻繁に0になって発散する（項目BE） |
 | `commentWeight(info)` | コメントに掛ける重み `w = 0.5 / (1 + (r/3)^1.5)`。**基礎重み0.5（来場者を重く見る）×形（弾幕っぽさで減らす）の積**で、2つは役割が違う（項目BE-2）。**0 < w ≤ 1 で、0 には漸近するだけ**。🔴 **弾幕の「判定」ではない** — 全番組が同じ式を通り、`r` が小さければ `w≈1` で何も起きない（項目BE） |
-| `totalEngagement(info)` | 来場者＋**重み付き**コメントの累計。差分の元であり、同点時の第2キー（`data-total`）にも使う。⚠️ 補正で**整数とは限らない**（属性へ書く時は丸める）。⚠️ `viewers` は**累計の来場者数**で、同時視聴者数ではない（2026-07-31 に70件×6分で実測: 増26/減0） |
+| `totalEngagement(info)` | 来場者＋**重み付き**コメントの累計。差分の元。⚠️ **順位には使っていない**（同点時の第2キーは 2026-08-04 に `data-begin-at` へ移行）。今は覗き窓の `data-total` を書くだけ。⚠️ 補正で**整数とは限らない**（属性へ書く時は丸める）。⚠️ `viewers` は**累計の来場者数**で、同時視聴者数ではない（2026-07-31 に70件×6分で実測: 増26/減0） |
 | `initialMomentum(info, now)` | 前回値が無い時の初期値＝**開始からの平均レート**。若い番組ではこれが実質そのまま直近レートになる。長時間放送では平均から始まるので、直近値へ寄るまで実時間で数分かかる（EMA の暖機）。⚠️ 分母に**下限2分**（`initialMomentumMinWindowMin`）。入室ラッシュが勢いに化けて新着が初回で最上位に飛ぶのを防ぐ（項目BG）。🔴 **効くのは初回の1点だけ**で、落ち着いた後の順位は動かさない |
 | `nextMomentum(prev, next, now)` | 新しい取得値で更新。`instant = (max(0,Δ来場者) + w×max(0,Δコメント)) / 経過分` を `α = 1 - exp(-Δt/τ)` で混ぜる。⚠️ **減少はクリップ**（負の勢いを作らない。**来場者とコメントで別々に**＝旧実装と一致しない唯一の条件・項目BE）、**Δt<1秒は据え置き**（極小の分母で爆発させない） |
 
@@ -331,7 +331,7 @@ watch ページ上の「**番組終了ガイド**」を検知して自動移動�
 
 | 関数 | 説明 |
 |------|------|
-| `compareByActivePoint(a, b)` | 人気順（`active-point` 降順 → 同点は `data-total` 降順）。静かな番組は勢い0で並ぶため第2キーが要る（2026-07-31）。旧: tie-break 無し＝同点は現状順を保つ（`parseFloat` の NaN との比較が常に false になることと `sort` の安定性による） |
+| `compareByActivePoint(a, b)` | 人気順（`active-point` 降順 → 同点は `data-begin-at` 降順＝放送開始が新しい順）。静かな番組は勢い0で並ぶため第2キーが要る（2026-07-31）。🔴 第2キーは 2026-08-04 に `data-total` から差し替えた（累計はコメントを含み、Kick は常に 0 になって必ず下へ沈む）。旧: tie-break 無し＝同点は現状順を保つ（`parseFloat` の NaN との比較が常に false になることと `sort` の安定性による） |
 | `compareByApiIndex(a, b)` | 新着順（`data-api-index` 昇順＝放送開始が新しい順）。第2キーは lv番号降順だが、`data-api-index` はカード間で常に一意なので**実際には効いていない**（属性欠けの保険） |
 | `orderComparator(sortType)` | 設定値から比較器を選ぶ。`'active'` なら人気順、それ以外は新着順 |
 

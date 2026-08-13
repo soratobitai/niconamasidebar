@@ -568,7 +568,7 @@ TTLの基準が「最後に異なるフレームが出た時刻」なのは、�
 | 設定値 | 基準 |
 |---|---|
 | `newest`（既定） | **`beginAt`（放送開始時刻）の降順**。同時刻は lv番号の降順で決定的にする（`data-api-index` 昇順として実装） |
-| `active` | **盛り上がり**（`active-point`）降順 → 同点なら累計（`data-total`）降順 |
+| `active` | **盛り上がり**（`active-point`）降順 → 同点なら放送開始が新しい順（`data-begin-at`）降順 |
 
 **盛り上がり（active-point）**
 

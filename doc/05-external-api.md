@@ -198,7 +198,7 @@ div.program_container[id=<数値ID>, active-point=<盛り上がり>, data-total=
 | **配信者名 / provider** | 配信者の表示名（user はユーザー名 / channel はチャンネル名）。⚠️ ニコ生の**コミュニティ機能は廃止済み**で、API のキー名（`community_name` / `providerType:'community'`）だけがレガシーとして残っている。表示・命名を引きずられないこと | `contentOwner.name` → `.provider_name` |
 | **ライブサムネ** | 放送中の実映像サムネ。user=スクショ、channel=大サイズ画像 | user:`liveScreenshotThumbnailUrls.middle` / channel:`large1280x720ThumbnailUrl` |
 | **メンバー限定(isMemberOnly)** | 会員限定番組。サムネ更新対象外 | `computeNext` で `key:'member'` |
-| **盛り上がり / active-point** | 直近の「1分あたり（来場者の増分＋コメントの増分）」のEMA（τ=3分）。人気順ソートのキー。同点は累計 `data-total` 降順 | `utils/momentum.js` / `calculateActivePoint`、DOM属性 `active-point` |
+| **盛り上がり / active-point** | 直近の「1分あたり（来場者の増分＋コメントの増分）」のEMA（τ=3分）。人気順ソートのキー。同点は `data-begin-at` 降順（放送開始が新しい順） | `utils/momentum.js` / `calculateActivePoint`、DOM属性 `active-point` |
 | **番組終了ガイド** | 番組終了時にニコ生が出す案内UI。自動移動トリガ | `program-end-guide` 配下の構成で判定（§3-2） |
 | **自動移動（自動次番組）** | 終了後にサイドバー先頭の別番組へ10秒後に遷移 | `AutoNextManager` / `location.assign` |
 | **シアターモード** | プレイヤー拡大表示 | `_theater-button_` click で再計算 |

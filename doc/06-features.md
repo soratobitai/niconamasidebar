@@ -97,7 +97,7 @@
 ## 6. ソート（表示順序）
 - 実体: `utils/sorting.js` `sortPrograms`（比較器は `utils/programOrder.js`）。`active`=`active-point`降順（人気順）、`newest`=**`beginAt` 降順**（新着順。`data-api-index` 昇順として実装）。
 - 旧実装は lv番号(ID)降順でソートしていたが、**lv番号は予約/作成順で放送開始順とズレる**（予約枠など）ため新着順が崩れていた。→ `updateSidebar` の `_orderByBeginAtDesc` が **`beginAt` 降順**で並べ、その位置を各カードの `data-api-index` に書く。`newest` はそれを昇順に並べる。同時刻/欠落時のみ lv番号降順フォールバック。
-- 盛り上がり: 直近の増分レートのEMA（τ=3分・`utils/momentum.js`。計算は storage の upsert）。`applyRankAttributes` が `active-point` 属性（と同点用の `data-total`）へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
+- 盛り上がり: 直近の増分レートのEMA（τ=3分・`utils/momentum.js`。計算は storage の upsert）。`applyRankAttributes` が `active-point` 属性（と同点用の `data-begin-at`）へ書き込み、`sortPrograms` の `active` がそれを降順に並べる。
 - 弾幕補正: 増分は `Δ来場者 + w × Δコメント`。`w` は「1人あたりコメント数」だけで決まる連続関数で、少人数が大量投稿する番組ほどコメントが効かなくなる。🔴 **弾幕を判定して下げているのではなく、全番組が同じ式を通っている**（[09 項目BE](./09-gotchas-and-techdebt.md)）。定数は実測前の暫定値。
 - 変更時: `optionsHandler` が `programsSort` 変更を検知 → APIを叩かず即DOMソート。
 - 対応設定: **`programsSort`**（既定 `'newest'`）。
