@@ -136,7 +136,7 @@
 
 **番組カードDOM構造**（`makeProgramElement`）:
 ```
-div.program_container[id=<数値ID>, active-point=<盛り上がり>, data-total=<累計>]
+div.program_container[id=<数値ID>, active-point=<推定同接>, data-begin-at=<放送開始>]
  ├ div.provider
  │   ├ a[href=user_page_url, target=_blank] > img[src=icon_url]
  │   └ div.provider_name[title]

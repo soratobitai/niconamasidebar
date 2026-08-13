@@ -674,9 +674,11 @@ async function recommendOrder() {
         'ラベルと値を一緒に変えないこと。値を変えると保存済みの設定が無効になる')
     check('CM 既存の値を変えていない（保存済みの設定が無効にならない）',
         /name="programsSort" value="newest"/.test(sb) && /name="programsSort" value="active"/.test(sb))
+    // ⚠️ **数えるのは「書き手」であって、名前の出現数ではない**（2026-08-13 に踏んだ）。
+    //    生の出現数を数えていたので、説明コメントで属性名に触れただけで落ちた。
     check('CM カードが回数を持つ（書き手は applyRankAttributes だけ）',
         /setAttribute\('data-watch-count'/.test(sb)
-        && (sb.match(/data-watch-count/g) || []).length === 1)
+        && (sb.match(/setAttribute\('data-watch-count'/g) || []).length === 1)
     // 🔴 **視聴点数は画面に出さない**（1.20.3 で撤去・doc/09 項目CM-2）。
     //    「7pt」は実機で数え方を見るためのテスト表示で、**自作用語がそのまま出ていた**もの。
     //    値は並べ替え専用として残っている（上の data-watch-count）。出し直すなら設定にすること。
@@ -920,49 +922,18 @@ async function windowedConcurrent() {
 
 async function seededRateReplacement() {
     console.log('=== CL 新着の推定同接が、実測が取れ次第すぐ正しい値へ寄ること ===')
-    const { nextViewerRate, initialViewerRate, estimateConcurrentViewers } =
-        await import('../src/utils/momentum.js')
-    const { initialMomentumMinWindowMin, defaultDwellMinutes } = await import('../src/config/constants.js')
+    const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
+    const { defaultDwellMinutes } = await import('../src/config/constants.js')
 
     const T0 = 1000000000000
     const at = (min) => T0 + min * 60000
     const prog = (viewers) => ({ providerType: 'user', viewers, onAirTime: { beginAt: new Date(T0).toISOString() } })
-
-    // --- ① 初回は仮置きで、そう名乗ること ---
-    const first = nextViewerRate(null, prog(300), at(5))
-    check('CL ① 初回は仮置き（累計来場 ÷ 経過分）',
-        Math.abs(first.rate - 300 / 5) < 1e-9, `rate=${first.rate}`)
-    check('CL 🔴 ① 仮置きだと名乗る（この印が落ちると元の動きへ戻る）',
-        first.seeded === true)
-    check('CL ① 分母には下限がある（開始直後に発散させない）',
-        Math.abs(initialViewerRate(prog(300), at(0.5)) - 300 / initialMomentumMinWindowMin) < 1e-9)
-
-    // --- 🔴 ② 実測が取れたら、仮置きは混ぜずに置き換える（本題） ---
-    const seeded = { viewerRate: first.rate, viewers: 300, _fetchedAt: at(5), viewerRateSeeded: true }
-    const second = nextViewerRate(seeded, prog(324), at(7)) // 2分で24人＝12人/分
-    check('CL 🔴 ② 仮置きは実測でまるごと置き換える（均さない）',
-        Math.abs(second.rate - 12) < 1e-9, `rate=${second.rate}（均すと 36 前後になる）`)
-    check('CL ② 置き換えたら、もう仮置きではない', second.seeded === false)
-
-    // --- ⚠️ ③ 増分 0 で置き換えない（静かな番組を最下位へ吹き飛ばさない） ---
-    const quiet = nextViewerRate(seeded, prog(300), at(7)) // 2分で 0人
-    check('CL ⚠️ ③ 増分が 0 の周期では置き換えない（0 に落とさない）',
-        quiet.rate > 0, `rate=${quiet.rate}`)
-    check('CL ③ 置き換えていないので仮置きの印は残る（次の機会を待つ）',
-        quiet.seeded === true)
-
-    // --- ④ 置き換わった後は普通の均し（急に飛ばない） ---
-    const measured = { viewerRate: 12, viewers: 324, _fetchedAt: at(7), viewerRateSeeded: false }
-    const fourth = nextViewerRate(measured, prog(444), at(9)) // 2分で120人＝60人/分 の急増
-    check('CL ④ 実測どうしは均す（1回で飛びつかない）',
-        fourth.rate > 12 && fourth.rate < 60, `rate=${fourth.rate}`)
 
     // --- ⑤⑥⑦ 推定同接そのもの ---
     // 🔴 **2026-08-11 に入口が変わった**（doc/09 項目CQ）。推定は `viewerRate` を読まなくなり、
     //    来場者の履歴（`viewerSamples`）だけから計算する1本の式になった。
     //    ⚠️ ここを「`viewerRate` を渡して確かめる」形に戻さないこと。**その値は今どこにも効かない**ので、
     //       検査は通るのに実物は別の計算をしている、といういちばん悪い形になる。
-    //    ①〜④（`nextViewerRate` 自体）は覗き窓として残っているので引き続き見る。
     const W = defaultDwellMinutes
     /** 一定レートで増える履歴を作る。`[時刻, その時点の累計]` の並び。 */
     const samplesAt = (perMin, fromMin, toMin, base = 0) => {
@@ -1028,12 +999,6 @@ async function seededRateReplacement() {
     check('CL 🔴 ⑥ 立ち上がりの山が抜けて真値の±5%へ入る', settledAt !== null && settledAt <= 4 * Wt,
         `落ち着いた時刻=${settledAt}分 / 真値=${TRUE} / 上限 ${4 * Wt}分（滞在時間の4倍）`)
 
-    // --- ⑦ 保存側が印を持ち回すこと（落とすと①〜⑥が全部無意味になる） ---
-    const { readFileSync } = await import('fs')
-    const st = stripComments(readFileSync(new URL('../src/services/storage.js', import.meta.url), 'utf8'))
-    check('CL 🔴 ⑦ storage が viewerRateSeeded を保存する',
-        /info\.viewerRateSeeded = rateInfo\.seeded/.test(st),
-        '落とすと毎回「仮置き」が消え、置き換えの判定ができなくなる')
 }
 
 async function webAccessibleResourcesScope() {
@@ -1514,79 +1479,15 @@ async function loopKeepsUpWithManyCards() {
 }
 
 /**
- * AY: 盛り上がり（人気順のスコア）＝直近の増分レートの指数移動平均。
+ * AY: 人気順の並べ替え規則（第1キー＝推定同接 / 同点は放送開始が新しい順）。
  *
- * 旧スコアは「開始からの平均」だったので、長時間放送は今どれだけ盛り上がっていても不利で、
- * 序盤だけ人が来た枠は貯金で上位に残り続けた。ここでは「新旧が同じ土俵に乗る」ことを固定する。
+ * 🔴 **2026-08-13 に「勢い（momentum）」の検査を丸ごと落とした。** 計算そのものを撤去したため
+ *    （doc/09 項目CM-2）。ここに残すのは**比較器の規則だけ**で、スコアの作り方は
+ *    項目CL（推定同接）と、下の AY(実描画経路) が見ている。
  */
-async function momentumScore() {
-    console.log('=== AY 盛り上がり（人気順のスコア） ===')
-    const { initialMomentum, nextMomentum } = await import(new URL('../src/utils/momentum.js', import.meta.url).href)
+async function activePointOrdering() {
+    console.log('=== AY 人気順の並べ替え規則 ===')
     const { compareByActivePoint } = await import(new URL('../src/utils/programOrder.js', import.meta.url).href)
-    const { momentumTauMs, initialMomentumMinWindowMin } = await import(new URL('../src/config/constants.js', import.meta.url).href)
-    const NOW = Date.now()
-    const prog = (v, c, ageMin) => ({ viewers: v, comments: c, onAirTime: { beginAt: new Date(NOW - ageMin * 60000).toISOString() } })
-    const near = (a, b) => Math.abs(a - b) < 1e-9
-
-    // --- 立ち上げ ---
-    // 弾幕補正(BE)が入る前は (100+20)/10分 = 12 ちょうどだった。コメントに重みが乗ったので
-    // **コメントを含む番組でぴったりの数値を書かない**（定数を変えるたびに嘘のNGが出る）。
-    // 「開始からの平均レート」であること自体は、重みが確実に1になるコメント0の番組で厳密に見る。
-    check('AY 初回は開始からの平均レート', near(initialMomentum(prog(120, 0, 10), NOW), 12), '120/10分 = 12')
-    // コメントは足されるが、来場者より軽い（2026-08-01 に 1:1 から変更・項目BE-2）。
-    // 🔴 **両側から挟む。** 上限だけだと「コメントを完全に捨てても合格」、
-    //    下限だけだと「1:1 に戻しても合格」になる。
-    check('AY 初回にコメントも足される。ただし来場者より軽い（1:1 に戻しても、捨てても落ちる）',
-        initialMomentum(prog(100, 20, 10), NOW) > 10 && initialMomentum(prog(100, 20, 10), NOW) < 12,
-        `(100 + w×20)/10分 = ${initialMomentum(prog(100, 20, 10), NOW).toFixed(3)}`
-        + '（コメントを捨てれば 10.0 ／ 1:1 なら 12.0）')
-    check('AY 開始時刻が不明でも落ちない', Number.isFinite(initialMomentum({ viewers: 3, comments: 0 }, NOW)))
-
-    // --- BG: 初回スコアの分母には下限がある（入室ラッシュが勢いに化けるのを防ぐ） ---
-    // 🔴 **効くのは初回の1点だけ。** 落ち着いた後の順位には影響しない（下の「下限を超えた番組」で固定）。
-    const W = initialMomentumMinWindowMin
-    // ⚠️ **期待値を `120 / W` と書かないこと。** 定数そのものと比較する形になり、W を何に変えても
-    //    通る＝空振り検査になる（**実際に一度そう書いて、下限を1へ戻しても落ちなかった**）。
-    //    ここは「1分で割った生の値の半分以下であること」という**定数から独立した絶対値**で見る。
-    check('BG 🔴 開始直後の入室ラッシュをそのまま勢いにしない（下限を1分に戻すと落ちる）',
-        initialMomentum(prog(120, 0, 0), NOW) <= 60 && initialMomentum(prog(120, 0, 0), NOW) > 0,
-        `開始0分・累計120人 → ${initialMomentum(prog(120, 0, 0), NOW).toFixed(1)}/分`
-        + `（下限1分なら120。現在の下限は${W}分）`)
-    check('BG 🔴 下限を超えた番組は素通し（＝落ち着いた後の順位を動かさない）',
-        near(initialMomentum(prog(120, 0, 10), NOW), 12), '開始10分・累計120人 → 12/分')
-    check('BG 下限の内と外で値が跳ばない（連続）',
-        near(initialMomentum(prog(120, 0, W), NOW), initialMomentum(prog(120, 0, W - 1e-9), NOW)))
-    check('BG 🔴 新着は「落ち着き先より上」から入る（下から登らせる補正にはしない）',
-        initialMomentum(prog(200, 0, 1), NOW) > 20,
-        `開始1分・累計200人（＝定常20/分の番組の入室ラッシュ）→ ${initialMomentum(prog(200, 0, 1), NOW).toFixed(0)}/分`
-        + ' ※落ち着き先の20より上から入ること。利用者の好み（項目BG）')
-    check('AY 前回値が無ければ初回扱い',
-        near(nextMomentum(null, prog(100, 20, 10), NOW), initialMomentum(prog(100, 20, 10), NOW)))
-
-    // --- 更新（EMA） ---
-    const a60 = 1 - Math.exp(-60000 / momentumTauMs)
-    const prev = { viewers: 100, comments: 20, momentum: 0, _fetchedAt: NOW - 60000 }
-    check('AY 直近の増分レートが指数移動平均で入る',
-        near(nextMomentum(prev, prog(160, 20, 11), NOW), 0 + (60 - 0) * a60), '60秒で+60 → 60/分 が α で混ざる')
-    check('AY 🔴 累計が減っても負の勢いにしない（取得元の揺れ対策）',
-        near(nextMomentum({ ...prev, momentum: 10 }, prog(50, 10, 11), NOW), 10 + (0 - 10) * a60))
-    check('AY 極小のΔtでは据え置く（勢いが爆発しない）',
-        nextMomentum({ viewers: 0, comments: 0, momentum: 7, _fetchedAt: NOW - 10 }, prog(500, 0, 5), NOW) === 7)
-    // notifybox 由来の種（来場者0）を前回値に使うと、0→実数の丸ごとが「急増」に化ける（項目AZ）
-    const seed = { viewers: 0, comments: 0, momentum: 0, _fetchedAt: NOW - 60000, _source: 'notifybox' }
-    check('AY 🔴 notifybox の種を「前回値」に使わない（新着が不当に1位へ飛ぶのを防ぐ）',
-        near(nextMomentum(seed, prog(600, 0, 10), NOW), initialMomentum(prog(600, 0, 10), NOW)),
-        `種から計算=${nextMomentum(seed, prog(600, 0, 10), NOW).toFixed(1)} / 開始からの平均=${initialMomentum(prog(600, 0, 10), NOW).toFixed(1)}（差分方式なら 600/分 に跳ねる）`)
-
-    // --- 更新間隔が変わっても手触りが揃うか（時間ベースのα） ---
-    // 30秒×6回 と 180秒×1回。どちらも「1分あたり10」で伸び続けた3分間なので、結果は一致するはず。
-    let m30 = 0
-    for (let i = 0; i < 6; i++) {
-        m30 = nextMomentum({ viewers: 0, comments: 0, momentum: m30, _fetchedAt: NOW - 30000 }, prog(5, 0, 1), NOW)
-    }
-    const m180 = nextMomentum({ viewers: 0, comments: 0, momentum: 0, _fetchedAt: NOW - 180000 }, prog(30, 0, 3), NOW)
-    check('AY 🔴 更新間隔が違っても同じ実時間なら同じ値になる（30秒×6 と 180秒×1）',
-        near(m30, m180), `30秒×6=${m30.toFixed(6)} / 180秒×1=${m180.toFixed(6)}`)
 
     // --- 同点時の第2キー ---
     // 🔴 **2026-08-04 に `data-total`（累計エンゲージメント）から `data-begin-at` へ変えた。**
@@ -1700,11 +1601,6 @@ async function momentumRanking() {
         Number.isFinite(parseFloat(h.dom.getById('900').getAttribute('data-begin-at')))
         && Number.isFinite(parseFloat(h.dom.getById('901').getAttribute('data-begin-at'))),
         `lv900=${h.dom.getById('900').getAttribute('data-begin-at')} / lv901=${h.dom.getById('901').getAttribute('data-begin-at')}`)
-    // data-total は順位に使っていないが、弾幕補正の効き方を実機で見るための覗き窓として残っている。
-    check('AY 覗き窓の data-total も引き続き書かれている',
-        h.dom.getById('900').getAttribute('data-total') === String(v900)
-        && h.dom.getById('901').getAttribute('data-total') === String(v901),
-        `lv900=${h.dom.getById('900').getAttribute('data-total')} / lv901=${h.dom.getById('901').getAttribute('data-total')}`)
 
     // ④ 数字が変わらない周期は順位も動かない（旧スコアは経過分の切り上がりだけで動いていた）
     const before = ids()
@@ -1715,154 +1611,75 @@ async function momentumRanking() {
 }
 
 /**
- * BE: 弾幕補正の「形」を固定する。
+ * BE: コメントは順位に**一切**影響しないこと（実描画経路）。
  *
- * 🔴 **ここで守りたいのは値そのものではなく性質。** 定数（半減比・鋭さ・下駄）は実機で
- * 数日かけて詰める前提の暫定値なので、**定数を動かしても落ちない検証**でなければ意味が無い。
- * 固定するのは「連続・単調・ゼロにならない・普通の番組を触らない」の4つ。
+ * 🔴 **かつては「弾幕補正で弾幕番組を沈める」検査だった。** 順位が推定同接へ移り（2026-08-04）、
+ *    2026-08-13 に補正の計算ごと撤去したので、守るべき性質が変わった。
+ *    今の不変条件は「補正が効くこと」ではなく**「コメントが順位へ入り込まないこと」**。
+ * ⚠️ 「弾幕より本物が上」だけを見る形に戻さないこと。**コメントを完全に無視していても通る**ので、
+ *    コメントが順位へ混ざり始めても気付けない。同じ番組でコメントだけ変えて確かめる。
  */
-async function commentWeightShape() {
-    console.log('=== BE 弾幕補正（コメントの重み）の形 ===')
-    const { commentWeight, commentRatio, totalEngagement, nextMomentum, initialMomentum } =
-        await import(new URL('../src/utils/momentum.js', import.meta.url).href)
-    const { commentWeightHalfRatio, commentWeightViewerFloor, momentumTauMs } =
-        await import(new URL('../src/config/constants.js', import.meta.url).href)
-    const NOW = Date.now()
-    const p = (v, c) => ({ viewers: v, comments: c })
-
-    check('BE 空の番組でも落ちない',
-        Number.isFinite(commentWeight(p(0, 0))) && Number.isFinite(commentWeight(null)))
-    check('BE 重みは常に 0 より大きく 1 以下',
-        [p(0, 0), p(1000, 0), p(10, 1e9), p(0, 1)].every((x) => commentWeight(x) > 0 && commentWeight(x) <= 1))
-
-    // 🔴 **来場者を重く見る（基礎重み）** — 2026-08-01 に 1:1 から変更。
-    //    弾幕でない普通の番組でも、コメントは来場者より軽く扱われる。
-    //    ⚠️ 期待値を commentBaseWeight から作らないこと（定数と比較する形＝空振りになる。項目BG）。
-    check('BE-2 🔴 弾幕でない番組でもコメントは来場者より軽い（基礎重み。1:1 に戻すと落ちる）',
-        commentWeight(p(10000, 5000)) < 0.8,
-        `来場者1万・コメント5千（r=${commentRatio(p(10000, 5000)).toFixed(2)}＝弾幕ではない）`
-        + ` → w=${commentWeight(p(10000, 5000)).toFixed(3)}（基礎重み1.0なら0.9超）`)
-
-    // 🔴 **弾幕っぽさで差がつく（形）** — 利用者の実機報告: 1人あたり3〜4倍でも弾幕の可能性がある。
-    //    半減点が10だった時は 0.85 対 0.95 で**差が1割しかなく、順位がほぼ動かなかった**。
-    const susp = p(200, 700)     // 1人あたり約3.2倍（弾幕疑い）
-    const modest = p(1000, 1500) // 1人あたり約1.5倍（本物）
-    check('BE-2 🔴 1人あたり3倍の番組は1.5倍の番組より3割以上軽い（半減点10なら落ちる）',
-        commentWeight(susp) < 0.7 * commentWeight(modest),
-        `r=${commentRatio(susp).toFixed(1)}→w=${commentWeight(susp).toFixed(3)} /`
-        + ` r=${commentRatio(modest).toFixed(1)}→w=${commentWeight(modest).toFixed(3)}`
-        + ` （比=${(commentWeight(susp) / commentWeight(modest)).toFixed(2)}。半減点10なら0.90で差がつかない）`)
-
-    check('BE 🔴 少人数が大量投稿する「弾幕」は強く効く（重み<0.1）',
-        commentWeight(p(150, 30000)) < 0.1,
-        `来場者150・コメント3万 → r=${commentRatio(p(150, 30000)).toFixed(1)} / w=${commentWeight(p(150, 30000)).toFixed(3)}`)
-    // 下駄の役目は「データが少ないうちは弾幕扱いしない」。基礎重みは掛かるので絶対値では見ず、
-    // **弾幕でない番組の重みと比べて遜色ないか**で見る（定数から独立させるため）。
-    check('BE 若い番組は弾幕扱いされない（下駄で「疑わしきは罰せず」側へ寄る）',
-        commentWeight(p(3, 15)) > 0.9 * commentWeight(p(10000, 10)),
-        `来場者3・コメント15 → r=${commentRatio(p(3, 15)).toFixed(2)}（下駄${commentWeightViewerFloor}が無ければ r=5）`
-        + ` / w=${commentWeight(p(3, 15)).toFixed(3)} 対 ほぼ無補正=${commentWeight(p(10000, 10)).toFixed(3)}`)
-
-    // --- 形（定数を変えても成り立つ性質） ---
-    // r を細かく掃いて、単調減少・連続・正であることを見る。**閾値方式ならここで落ちる。**
-    let monotone = true, positive = true, maxJump = 0, prevW = commentWeight(p(0, 0))
-    const STEPS = 4000, R_MAX = commentWeightHalfRatio * 40
-    for (let i = 1; i <= STEPS; i++) {
-        const r = (R_MAX * i) / STEPS
-        // r = c / (v + floor) を満たす番組を作る（v=0 なら c = r * floor）
-        const w = commentWeight(p(0, r * commentWeightViewerFloor))
-        if (!(w < prevW)) monotone = false
-        if (!(w > 0)) positive = false
-        maxJump = Math.max(maxJump, prevW - w)
-        prevW = w
-    }
-    check('BE 🔴 重みは r に対して単調に減る（増える区間が無い）', monotone)
-    check('BE 🔴 重みはゼロにならない（漸近するだけ＝コメントを完全には捨てない）',
-        positive && commentWeight(p(0, 1e9)) > 0,
-        `r=5000万でも w=${commentWeight(p(0, 1e9)).toExponential(2)}`)
-    check('BE 🔴 連続でなだらか（隣接する r で重みが跳ばない＝判定・閾値が無い）',
-        maxJump < 0.01,
-        `r を ${R_MAX} まで ${STEPS} 分割して掃いた時の最大の落差 = ${maxJump.toFixed(5)}`)
-
-    // --- 勢いの計算に効いているか ---
-    const dt = 60000
-    const prevRec = (v, c) => ({ viewers: v, comments: c, momentum: 0, _fetchedAt: NOW - dt })
-    const withAge = (v, c, min) => ({ ...p(v, c), onAirTime: { beginAt: new Date(NOW - min * 60000).toISOString() } })
-    // 来場者の増分は素通し、コメントの増分だけが重みを受ける
-    const real = nextMomentum(prevRec(10000, 20000), p(10200, 20600), NOW)
-    const danmaku = nextMomentum(prevRec(150, 30000), p(152, 31000), NOW)
-    check('BE 🔴 増分が同規模でも、弾幕側は勢いに乗らない',
-        danmaku < real / 10,
-        `本物(+200来場,+600コメ)=${real.toFixed(2)} / 弾幕(+2来場,+1000コメ)=${danmaku.toFixed(2)}`
-        + ' ※旧実装(1:1)なら 800 対 1002 で弾幕が勝つ')
-    check('BE 初回（前回値なし）にも同じ補正が乗る',
-        initialMomentum(withAge(150, 30000, 60), NOW) < initialMomentum(withAge(150, 3000, 60), NOW) * 2,
-        'コメントが10倍でも勢いは10倍にならない')
-    check('BE 第2キー（累計）にも同じ補正が乗る',
-        totalEngagement(p(150, 30000)) < totalEngagement(p(10000, 0)),
-        `弾幕の累計=${totalEngagement(p(150, 30000)).toFixed(1)} / 来場者1万コメント0の累計=${totalEngagement(p(10000, 0))}`)
-
-    // --- 旧実装との一致条件（🔴 「置き換えても同じ」を口約束にしない） ---
-    // コメントが増えず両方が減らない周期では、旧 `max(0, Δ合計)` と新 `max(0,Δ来場)+w·max(0,Δコメ)`
-    // は一致する。**一致しないのは「片方だけ減った周期」だけ**で、そこは新のほうが正しい。
-    const legacyEquiv = nextMomentum(prevRec(100, 0), p(160, 0), NOW)
-    // ⚠️ **時定数を直書きしないこと。** 2026-08-10 に 3分→8分 へ変えた時、実装は正しいのに
-    //    ここだけが落ちた。この検査が見たいのは「Δ来場だけに α が掛かる」という**式の形**で、
-    //    α の値そのものではない（効いているのは 60 の係数）。だから実装と同じ定数でよい。
-    const a60 = 1 - Math.exp(-dt / momentumTauMs)
-    check('BE コメントが増えない周期は旧実装と一致する', Math.abs(legacyEquiv - 60 * a60) < 1e-9)
-    check('BE 🔴 片方だけ減った周期は旧実装と一致しない（新のほうが正しい）',
-        nextMomentum(prevRec(100, 100), p(95, 110), NOW) > nextMomentum(prevRec(100, 100), p(95, 105), NOW),
-        '来場者側の揺れ(-5)が実在するコメント(+10)を食い潰さない')
-}
-
-/**
- * BE(実描画経路): 弾幕番組が本物の人気番組より上に来ないか。
- *
- * **旧実装(1:1)ではこの検証は必ず落ちる**（弾幕のほうが増分合計で勝つ数字にしてある）。
- */
-async function danmakuRanking() {
+async function commentsDoNotAffectRanking() {
     const { buildRenderHarness, wireUpdateManager, apiProgram } = await import('./render-harness.mjs')
-    console.log('=== BE 弾幕より本物の人気番組が上に来る（実描画経路） ===')
+    console.log('=== BE コメントは順位に影響しない（実描画経路） ===')
     const NOW = Date.now()
-    const h = buildRenderHarness({ programsSort: 'active' })
-    const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
-    const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
-    const ids = () => h.dom.ids().join(',')
-    h.state.notifyRows = []
-
-    // lv910 = 本物（来場者1万・コメント2万 → 1人あたり2件）。毎分 +200来場者 +600コメント
-    // lv911 = 弾幕（来場者150・コメント3万 → 1人あたり176件）。毎分 +2来場者 +1000コメント
-    // 増分の単純合計は 800 対 1002 で**弾幕が勝つ**。それでも本物が上に来ることを見る。
-    let v910 = 10000, c910 = 20000, v911 = 150, c911 = 30000
-    const feed = (cycle) => {
-        h.state.followPrograms = [
-            apiProgram({ id: 'lv910', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v910, comments: c910 }),
-            apiProgram({ id: 'lv911', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v911, comments: c911 }),
-        ]
-    }
-    feed(0)
-    await run()
-    for (let cycle = 1; cycle <= 4; cycle++) {
-        h.ageStorage(60000)
-        v910 += 200; c910 += 600
-        v911 += 2; c911 += 1000
-        feed(cycle)
+    // lv910 = 来場者が伸びる番組（毎分 +200） / lv911 = 来場者はほぼ伸びずコメントだけ伸びる（+2 / +1000）
+    const runWith = async (comments911) => {
+        const h = buildRenderHarness({ programsSort: 'active' })
+        const { um, loadingManager } = wireUpdateManager({ AppState, LoadingManager, UpdateManager }, h)
+        const run = async () => { const s = await um.updateSidebar(); if (s) loadingManager.finishSession(s) }
+        h.state.notifyRows = []
+        let v910 = 10000, v911 = 150, c911 = comments911
+        const feed = (cycle) => {
+            h.state.followPrograms = [
+                apiProgram({ id: 'lv910', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v910, comments: 20000 }),
+                apiProgram({ id: 'lv911', beginAtMs: NOW - (60 + cycle) * 60000, viewers: v911, comments: c911 }),
+            ]
+        }
+        feed(0)
         await run()
+        for (let cycle = 1; cycle <= 4; cycle++) {
+            h.ageStorage(60000)
+            v910 += 200; v911 += 2; c911 += comments911 > 0 ? 1000 : 0
+            feed(cycle)
+            await run()
+        }
+        const out = {
+            ids: h.dom.ids().join(','),
+            ap911: parseFloat(h.dom.getById('911').getAttribute('active-point')),
+        }
+        h.restore()
+        return out
     }
-    const ap = (id) => parseFloat(h.dom.getById(id).getAttribute('active-point'))
-    check('BE 🔴 増分合計では弾幕が勝つ数字でも、本物の人気番組が上に来る',
-        ids() === '910,911',
-        `並び=${ids()} / 本物=${ap('910').toFixed(1)} 弾幕=${ap('911').toFixed(1)}`
-        + '（旧実装1:1なら弾幕が上）')
-    check('BE 覗き窓の属性が両方のカードに入っている（実機で定数を詰めるのに使う）',
-        parseFloat(h.dom.getById('911').getAttribute('data-comment-ratio')) > 100
-        && parseFloat(h.dom.getById('911').getAttribute('data-comment-weight')) < 0.1
-        && parseFloat(h.dom.getById('910').getAttribute('data-comment-weight'))
-           > 10 * parseFloat(h.dom.getById('911').getAttribute('data-comment-weight')),
-        `弾幕 r=${h.dom.getById('911').getAttribute('data-comment-ratio')} w=${h.dom.getById('911').getAttribute('data-comment-weight')}`
-        + ` / 本物 r=${h.dom.getById('910').getAttribute('data-comment-ratio')} w=${h.dom.getById('910').getAttribute('data-comment-weight')}`)
-    h.restore()
+    const many = await runWith(30000)
+    check('BE （空振り防止）コメントだけ多い番組にも推定同接が出ている',
+        Number.isFinite(many.ap911) && many.ap911 > 0, String(many.ap911))
+    check('BE 🔴 コメントが多くても、来場者が伸びている番組が上に来る',
+        many.ids === '910,911', `並び=${many.ids}`)
+
+    // 🔴 **並び順だけでは足りない。** 「コメントを軽く見ている」だけでも順番は合うので、
+    //    コメントだけを変えて**数字が1ミリも動かない**ことを見る。
+    //
+    // ⚠️ **描画経路を2回走らせて比べないこと**（2026-08-13 に踏んだ）。推定同接は
+    //    `Date.now()` の関数なので、2回目は実時計が進んだぶんだけ末尾の桁が違う
+    //    （実測: 39.7287 対 39.7287 で、目には同じでも 1e-9 では一致しない）。
+    //    かといって時計を止めると `viewerSamples` の時刻まで潰れて推定が成立しない。
+    //    **同じ `now` を渡せる式のほうで見る**のが正しい切り分け。
+    const { estimateConcurrentViewers } = await import('../src/utils/momentum.js')
+    const { defaultDwellMinutes } = await import('../src/config/constants.js')
+    const T = NOW - 60 * 60000
+    const samples = []
+    for (let m = 0; m <= 60; m += 2) samples.push([T + m * 60000, 100 + 12 * m])
+    const withComments = (comments) => ({
+        providerType: 'user', viewers: 100 + 12 * 60, comments,
+        viewerSamples: samples, onAirTime: { beginAt: new Date(T).toISOString() },
+    })
+    const noComment = estimateConcurrentViewers(withComments(0), NOW, defaultDwellMinutes)
+    const heavy = estimateConcurrentViewers(withComments(9999999), NOW, defaultDwellMinutes)
+    check('BE （空振り防止）比べる値そのものが出ている', noComment > 0, String(noComment))
+    check('BE 🔴 コメント数を変えても推定同接は1ミリも変わらない（順位計算に入っていない）',
+        noComment === heavy,
+        `コメント0→${noComment} / コメント1000万→${heavy}`)
 }
 
 /**
@@ -6767,13 +6584,12 @@ if (real) {
     console.log('')
     await loopKeepsUpWithManyCards()
     console.log('')
-    await momentumScore()
+    await activePointOrdering()
     console.log('')
     await momentumRanking()
     console.log('')
-    await commentWeightShape()
     console.log('')
-    await danmakuRanking()
+    await commentsDoNotAffectRanking()
     console.log('')
     await programEndConfirmation()
     await endedByAutoNextGroup()

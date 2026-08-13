@@ -2,7 +2,7 @@ import { elapsedTickMs, thumbnailTtlMs, thumbnailRetryBaseMs, thumbnailRetryMaxM
 import { compareByActivePoint } from '../utils/programOrder.js'
 import { getWatchPoints, ownerKeyOf } from '../services/watchHistory.js'
 import { formatElapsed } from '../ui/elapsedTime.js'
-import { totalEngagement, commentWeight, commentRatio, estimateConcurrentViewers } from '../utils/momentum.js'
+import { estimateConcurrentViewers } from '../utils/momentum.js'
 
 /**
  * URL に cache バスターを安全に付与する（既に '?' を含む URL は '&' で繋ぐ）。
@@ -760,18 +760,21 @@ export function reapplyRankAttributes(container, infos) {
 }
 
 /**
- * 人気順が読む属性を**まとめて**書く。カードを作る時と、その場更新の時の両方から呼ぶ。
+ * 並べ替えが読む属性を**まとめて**書く。カードを作る時と、その場更新の時の両方から呼ぶ。
  *
  * 🔴 **集約してあるのは片方だけ書く事故を構造的に潰すため。** 以前は2箇所で個別に
- * `active-point` と `data-total` を書いており、「片方だけ更新すると同点時の並びが古い値で決まる」
+ * `active-point` と第2キーを書いており、「片方だけ更新すると同点時の並びが古い値で決まる」
  * という⚠️コメントで守っていた。**思い出して守るガードは、書く場所が増えた時に破れる。**
  * 属性を足したくなったらここへ足すこと（doc/09 項目BE）。
  *
- * - `active-point` … 盛り上がり（第1キー）
- * - `data-total`   … 来場者＋重み付きコメントの累計（同点時の第2キー）
- * - `data-comment-weight` / `data-comment-ratio` … 弾幕補正の実効値。**順位計算には使わない**。
- *   暫定定数を実機で詰めるための覗き窓で、DevTools で要素を見れば効き方が分かる。
- *   定数が固まったらこの2つは消してよい。
+ * - `active-point`     … 推定同時視聴者数（人気順の第1キー）
+ * - `data-begin-at`    … 放送開始（人気順の同点時の第2キー）
+ * - `data-watch-count` … 視聴点数（よく見る順のキー）。**画面には出さない**
+ * - `data-service`     … タブ分離の表示切り替えが読む
+ *
+ * ⚠️ **読み手のない属性を足さないこと。** `data-total` / `data-comment-weight` /
+ *    `data-comment-ratio` は実機観察用の覗き窓として書き続けていたが、順位から外れた後も
+ *    誰も読まないまま毎周期すべてのカードに書かれていた（2026-08-13 に撤去・doc/09 項目CM-2）。
  *
  * @param {HTMLElement} el カードのコンテナ
  * @param {Object} data 番組データ
@@ -846,16 +849,11 @@ export function applyRankAttributes(el, data) {
     // サムネ右下の経過時間（doc/09 項目CX）。**読むのは上の data-begin-at と同じ値**。
     // ⚠️ ここは取得のたびにしか走らない（既定120秒）。その間の進みは startElapsedTicker が埋める。
     writeElapsedLabel(el, beginMs, Date.now())
-    // ⚠️ 以下3つは**順位計算に使っていない**。弾幕補正の効き方を実機で見るための覗き窓。
-    //    順位が推定同接へ移行した今、消してよい候補（doc/09 項目BE の後日談）。
     // よく見る順の材料。**書き手はここだけ**（他の順位属性と同じ扱い）。
     // 履歴が未読み込みなら 0。全員 0 なら第2キー（人気順）で並ぶので、順位が壊れることはない。
-    // ⚠️ **画面には出さない**（テスト表示の「7pt」は 1.20.3 で撤去・doc/09 項目CM-2）。
+    // ⚠️ **画面には出さない**（テスト表示の「7pt」は 1.20.4 で撤去・doc/09 項目CM-2）。
     //    値は並べ替え専用。出し直したくなったら設定にすること。
     el.setAttribute('data-watch-count', String(getWatchPoints(ownerKeyOf(data))))
-    el.setAttribute('data-total', String(Math.round(totalEngagement(data) * 10) / 10))
-    el.setAttribute('data-comment-weight', commentWeight(data).toFixed(3))
-    el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))
 }
 
 /**

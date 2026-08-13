@@ -1,6 +1,5 @@
 import { maxSaveProgramInfos, viewerSampleMinGapMs, viewerSampleMaxAgeMs, viewerSampleMaxCount, optionKeys } from '../config/constants.js'
 import { handleError } from '../utils/error.js'
-import { nextMomentum, nextViewerRate } from '../utils/momentum.js'
 
 /**
  * 設定として保存してよいキーだけを取り出す。**storage へ書く手前の唯一の関所。**
@@ -234,7 +233,7 @@ export function patchProgramThumbnail(id, fields) {
  * 呼ぶと O(N^2) になる。これを1回の読み書きに畳む。id 一致は上書き、無ければ追加、末尾から上限トリム。
  * 各レコードに _fetchedAt（取得時刻）を付与する。毎回フルレコードで上書きするので、
  * サムネURL未生成のまま古い値が固定化することはない。
- * @param {Array<object>} programInfos **破壊的に `momentum`（盛り上がり）を書き戻す**。
+ * @param {Array<object>} programInfos **破壊的に `viewerSamples`（来場者の履歴）を書き戻す**。
  *   前回値との差分が要るのでここでしか計算できず、描画側も同じ配列を使うため（本文の🔴を参照）。
  */
 export function upsertProgramInfos(programInfos) {
@@ -244,23 +243,10 @@ export function upsertProgramInfos(programInfos) {
     const now = Date.now()
     for (const info of programInfos) {
         if (!info || !info.id) continue
-        // 「盛り上がり」は前回値との差分なので、**新旧が出会うここが唯一の計算地点**。
-        //
-        // 🔴 **渡された info 自身にも書き戻すこと（破壊的）。** 呼び出し元は upsert に渡した配列を
-        //    そのまま描画へ回す（`_refreshDetailsViaScrape` → `_mergeSources`）。保存用のコピーにだけ
-        //    書くと、画面が使うオブジェクトは momentum を知らないまま＝**計算しても順位に何も反映されない**。
-        //    例外もログも出ないので、気付けるのは「人気順にしても並びが変わらない」という形だけになる。
-        info.momentum = nextMomentum(byId.get(info.id), info, now)
-        // 推定同接（人気順の第1キー）の材料。**来場者だけ**の到着レート。
-        // momentum と同じ理由でここが唯一の計算地点であり、同じ理由で渡された info 自身へ
-        // 破壊的に書き戻す（保存用のコピーにだけ書くと画面に反映されない）。
-        // 🔴 **`viewerRateSeeded` も一緒に持ち回すこと**（doc/09 項目CL）。
-        //    「この到着レートはまだ仮置き（累計来場者からの当て推量）である」という印で、
-        //    次回に実測が取れた時これを見て**混ぜずに置き換える**。落とすと元の
-        //    「新着がいきなり上位に入り20分かけて落ちる」動きに戻る。
-        const rateInfo = nextViewerRate(byId.get(info.id), info, now)
-        info.viewerRate = rateInfo.rate
-        info.viewerRateSeeded = rateInfo.seeded
+        // ⚠️ **ここで「誰も読まない値」を作らないこと**（2026-08-13・doc/09 項目CM-2）。
+        //    以前は `momentum`（勢い）と `viewerRate`（到着レート）も毎周期ここで計算して
+        //    保存していたが、順位が推定同接へ移った後は**読み手が自分自身しか居なかった**。
+        //    番組数ぶんの計算と storage への書き込みだけが残るので、撤去した。
         // 🔴 **サムネのURLを「空」で上書きしないこと**（2026-08-10・doc/09 項目CJ）。
         //    ここは丸ごと置き換えなので、**補完に1回失敗しただけで前回埋まったURLが消える。**
         //    実際にそれで「ライブサムネが出ず配信者アイコンのまま」になっていた（再現済み）。
@@ -279,7 +265,7 @@ export function upsertProgramInfos(programInfos) {
         //    **保存は直るのに画面はアイコンのまま**という、いちばん分かりにくい形になる。
         // 来場者の履歴。**推定同接の本体の材料**（doc/09 項目CO）。
         // 🔴 **ここが唯一の記録地点。** 新しい来場者数と時刻が出会うのはここだけで、
-        //    momentum / viewerRate と同じ理由で**渡された info 自身にも書き戻す**
+        //    サムネURLの引き継ぎと同じ理由で**渡された info 自身にも書き戻す**
         //    （保存用のコピーにだけ書くと、画面が使う側に履歴が無く推定が従来式へ落ちる）。
         info.viewerSamples = appendViewerSample(
             (byId.get(info.id) || {}).viewerSamples, Number(info.viewers) || 0, now,
