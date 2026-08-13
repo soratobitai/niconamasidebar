@@ -27,8 +27,15 @@
 | **Kick 連携 ON/OFF** | （フォーム外・**拡張のオプションページ**） | — | **保存しない**（`chrome.permissions.contains()` が唯一の真実） | 無効 | options.html | `permissions.onAdded/onRemoved` → SW が各タブへ `kick:stateChanged` |
 | **番組表示方法** | `kickDisplayMode` | `mixed`(統合表示)/`tabs`(タブで分ける) | `kickDisplayMode` | `'mixed'` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`syncServiceTabs`（再描画せず CSS で出し分け） |
 | 選択中のタブ | `kickActiveTab` | `mixed`(統合)/`nicolive`/`kick` | `kickActiveTab` | `'nicolive'` | サイドバー上部のタブ（`tabs` の時だけ表示） | クリックで保存。一覧は `SERVICE_TABS`（sidebar.js）が唯一の定義 |
-| **カードの大きさ** | `cardSize` | `small`/`medium`/`large` | `cardSize` | `'medium'` | sidebar.js（自動更新の上） | onChanged→`setCardSize`＋`setProgramContainerWidth`（取得はしない） |
-| **人気順の基準（W）** | `dwellMinutes` | `5`/`10`/`20`/`40`（分・推定同接の平均滞在時間） | `dwellMinutes` | `10` | sidebar.js（**表示順序の直後・常時表示**） | onChanged→`setDwellMinutes` ＋ リスト更新を1回 |
+| **カードの大きさ** | `cardSize` | `small`/`medium`/`large` | `cardSize` | `'medium'` | sidebar.js（番組カードの設定の中） | onChanged→`setCardSize`＋`setProgramContainerWidth`（取得はしない） |
+| **同時視聴者数（β版）** | `showViewerCount` | `on`/`off` | `showViewerCount` | `'off'` | sidebar.js（番組カードの設定の中） | onChanged→`applyShowViewerCount`（`<html>` の印を付け外し） |
+| **経過時間** | `showElapsedTime` | `on`/`off` | `showElapsedTime` | `'off'` | sidebar.js（番組カードの設定の中） | onChanged→`applyShowElapsedTime` ＋ `startElapsedTicker` |
+| **サイドバーの置き方** | `sidebarPlacement` | `push`(画面分割)/`overlay`(重ねる) | `sidebarPlacement` | `'push'` | sidebar.js | onChanged→`ui/placement.js`（判定と幅の書き込みは1箇所） |
+
+⛔ **「人気順の基準（W）」は 2026-08-12 に廃止**（doc/09 項目CU）。W は固定値
+（`defaultDwellMinutes`）になった。**同接を画面に出す以上、あれは推定値であって
+好みで動かすつまみではない**という判断。⚠️ 設定として復活させないこと。
+保存値を持つ環境だけ数字が変わる。
 
 🔴 **「Kick を有効にするか」だけは設定値として保存していない。**
 ユーザーは `chrome://extensions` からこの画面を通さずに権限を取り消せるため、
@@ -36,16 +43,8 @@
 
 🔴 **ON/OFF だけが拡張のオプションページにある。**`chrome.permissions.request()` は
 コンテンツスクリプトから呼べず、サイドバー内の設定 UI はニコ生ページの DOM だから。
-権限を伴わない「番組表示方法」と「バランス」はサイドバー内にある（利用者要望・2026-08-04）。
+権限を伴わない「番組表示方法」はサイドバー内にある（利用者要望・2026-08-04）。
 
-🔴 **「人気順の基準」は Kick 連携の設定ではない。**中身は推定同接の W（平均滞在時間）で、
-**Kick を使っていなくてもニコ生の順位を動かす**（doc/09 項目 BL-5）。
-一時期 Kick セクション内に「ニコ生とのバランス」として置いていたが、
-**連携しない利用者が触れないのに効いている**状態だったので独立させた（2026-08-04・利用者判断）。
-
-効き方は2つある。混同しないこと。
-- **右にするほど「長く続いている番組」が上に来る**（経過が W 未満の番組は係数が経過分になるため）
-- Kick と統合表示している場合、**右にするほどニコ生の番組が上に来る**
 
 ⚠️ 保存値は `mixed` のまま。**表示ラベルだけ**を「統合表示」にしてある（2026-08-04）。
 値を変えると既存ユーザーの設定が既定へ落ちる。
