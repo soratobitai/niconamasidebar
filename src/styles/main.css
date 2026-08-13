@@ -314,21 +314,6 @@ body.nicosidebar-light,
     background: #53fc18; /* Kick のブランドカラー */
 }
 
-/* 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
-   おすすめ順の材料（視聴回数）が正しく数えられているかを実機で見るためのもの。 */
-.program_container .provider .watch_count_badge {
-    margin-left: auto;
-    padding: 0 4px;
-    font-size: calc(9px * var(--nns-card-scale));
-    line-height: 1.6;
-    color: var(--sb-fg);
-    border: 1px solid var(--sb-line);
-    border-radius: 3px;
-    opacity: 0.7;
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
 /* 🔴 **「統合」タブではバッジを出すこと。** 片方だけのタブは**タブ自体がラベル**なので
    バッジは要らないが、統合は両方が混ざるので**どちらのカードか分からなくなる**。
    ここを `[data-service-tab]` の一括指定にすると統合でも消える（2026-08-07 に足した時の注意点）。 */

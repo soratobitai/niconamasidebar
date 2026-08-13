@@ -407,15 +407,6 @@ export function makeProgramElement(data, loadingImageURL) {
         providerDiv.appendChild(badge)
     }
 
-    // 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
-    //    中身は applyRankAttributes が書く（順位属性と同じ値を使う＝表示と並びがずれない）。
-    //    ⚠️ 生成時は `applyRankAttributes` がこれより**前**に走っているので、ここで一度埋める。
-    //       埋めないと、次のリスト更新（最大120秒後）まで空欄のままになる。
-    const watchBadge = document.createElement('span')
-    watchBadge.className = 'watch_count_badge'
-    watchBadge.textContent = getWatchPoints(ownerKeyOf(data)) + 'pt'
-    providerDiv.appendChild(watchBadge)
-
     container.appendChild(providerDiv)
 
     // サムネイルセクション
@@ -857,14 +848,11 @@ export function applyRankAttributes(el, data) {
     writeElapsedLabel(el, beginMs, Date.now())
     // ⚠️ 以下3つは**順位計算に使っていない**。弾幕補正の効き方を実機で見るための覗き窓。
     //    順位が推定同接へ移行した今、消してよい候補（doc/09 項目BE の後日談）。
-    // おすすめ順の材料。**書き手はここだけ**（他の順位属性と同じ扱い）。
+    // よく見る順の材料。**書き手はここだけ**（他の順位属性と同じ扱い）。
     // 履歴が未読み込みなら 0。全員 0 なら第2キー（人気順）で並ぶので、順位が壊れることはない。
-    const watchPoints = getWatchPoints(ownerKeyOf(data))
-    el.setAttribute('data-watch-count', String(watchPoints))
-    // 🔴 **テスト用の表示。確認が済んだら消すこと**（doc/09 項目CM-2 に消し方）。
-    //    消すのは3箇所: この2行 / makeProgramElement のバッジ生成 / main.css の .watch_count_badge。
-    const badge = el.querySelector ? el.querySelector('.watch_count_badge') : null
-    if (badge) badge.textContent = watchPoints + 'pt'
+    // ⚠️ **画面には出さない**（テスト表示の「7pt」は 1.20.3 で撤去・doc/09 項目CM-2）。
+    //    値は並べ替え専用。出し直したくなったら設定にすること。
+    el.setAttribute('data-watch-count', String(getWatchPoints(ownerKeyOf(data))))
     el.setAttribute('data-total', String(Math.round(totalEngagement(data) * 10) / 10))
     el.setAttribute('data-comment-weight', commentWeight(data).toFixed(3))
     el.setAttribute('data-comment-ratio', commentRatio(data).toFixed(2))

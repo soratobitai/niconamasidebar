@@ -677,6 +677,37 @@ async function recommendOrder() {
     check('CM カードが回数を持つ（書き手は applyRankAttributes だけ）',
         /setAttribute\('data-watch-count'/.test(sb)
         && (sb.match(/data-watch-count/g) || []).length === 1)
+    // 🔴 **視聴点数は画面に出さない**（1.20.3 で撤去・doc/09 項目CM-2）。
+    //    「7pt」は実機で数え方を見るためのテスト表示で、**自作用語がそのまま出ていた**もの。
+    //    値は並べ替え専用として残っている（上の data-watch-count）。出し直すなら設定にすること。
+    //    ⚠️ 消し忘れやすいので**3箇所ぜんぶ**見る。CSS だけ残っても気付けない。
+    const cssForBadge = rd('styles/main.css')
+    check('CM 🔴 視聴点数を画面に出していない（テスト表示の 7pt）',
+        !/watch_count_badge/.test(sb) && !/watch_count_badge/.test(cssForBadge)
+        && !/\+ 'pt'/.test(sb),
+        'sidebar.js のバッジ生成／点数の書き込み／main.css の .watch_count_badge')
+    // 実物のカードでも見る。**ソースの正規表現だけでは、別の名前で出し直された時に素通りする。**
+    {
+        const { installMockDom } = await import('./mock-dom.mjs')
+        const domForBadge = installMockDom()
+        try {
+            const { makeProgramElement } = await import('../src/render/sidebar.js')
+            const card = makeProgramElement({
+                id: 'lv1', title: 't', providerType: 'user',
+                contentOwner: { id: 'u1', name: 'n', icon: 'https://icon/1.png' },
+                thumbnailUrl: 'https://dlive.nicovideo.jp/live/1/screenshot/1.jpg',
+                isMemberOnly: false,
+                onAirTime: { beginAt: new Date(Date.now() - 60000).toISOString() },
+            }, { loadingImageURL: 'l.gif', watchPageBaseUrl: 'https://live.nicovideo.jp/watch/' })
+            // 🔴 空振り防止。querySelector が何も返せない土台だと、下の「無い」は当たり前になる。
+            check('CM （空振り防止）実物のカードから配信者名を引ける',
+                !!(card && card.querySelector && card.querySelector('.provider_name')))
+            check('CM 🔴 実物のカードに視聴点数のバッジが無い',
+                !!card && !card.querySelector('.watch_count_badge'))
+        } finally {
+            domForBadge.restore()
+        }
+    }
     const oh = stripComments(rd('handlers/optionsHandler.js'))
     // --- 点数制（2026-08-10・利用者要望「長く見た番組に加点」）---
     const { watchPointIntervalMs, watchPointMaxPerVisit } = await import('../src/config/constants.js')
