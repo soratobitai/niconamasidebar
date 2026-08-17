@@ -1071,3 +1071,91 @@ html.nns-overlay body > #sidebar_line {
     left: var(--nns-sb-w, 0px);
     z-index: 2147483001; /* 中身より上。閉じている時に掴めなくならないように */
 }
+
+/* Kick連携のお知らせ（doc/09 項目DA）。設定アイコンの真下に吹き出しで出す。
+   🔴 **既定は出さない。** 表示は JS が `hidden` を外した時だけ。配線が動かなかった時に
+      「勝手に出る」より「出ない」で壊れるほうがよい（viewer_overlay と同じ向き）。
+   🔴 **絶対配置にしない。** `.sidebar_header` は flex なので、幅100%の行として
+      折り返させれば設定パネルにもリストにも重ならない。重ねると z-index と
+      「設定を開いている間は隠す」処理が要る（doc/09 項目DA の「作り」を参照）。 */
+#kick_intro {
+    flex: 0 0 100%;
+    /* 🔴 margin ではなく padding で空ける。`.sidebar_header` の下は
+       `.sidebar_body { padding-top }` が持っており、margin だと相殺する（131行目の注記と同じ罠）。 */
+    padding: 0 0 10px;
+    box-sizing: border-box;
+    font-weight: normal;
+}
+#kick_intro[hidden] {
+    display: none; /* flex の子は hidden 属性だけでは消えない */
+}
+.kick_intro_inner {
+    position: relative;
+    max-width: 260px;
+    margin-left: auto; /* 設定アイコン側（右）へ寄せる */
+    padding: 8px 10px;
+    box-sizing: border-box;
+    color: var(--sb-fg);
+    background: var(--sb-bg);
+    border: 1px solid var(--sb-accent);
+    border-radius: 6px;
+}
+/* 上向きの三角。設定アイコンのだいたい真下を指す。
+   ⚠️ 位置は px 固定でよい。サイドバー幅が変わっても右端からの距離は変わらない。 */
+.kick_intro_inner::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    right: 12px;
+    width: 10px;
+    height: 10px;
+    background: var(--sb-bg);
+    border-left: 1px solid var(--sb-accent);
+    border-top: 1px solid var(--sb-accent);
+    transform: rotate(45deg);
+}
+.kick_intro_head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 6px;
+}
+.kick_intro_title {
+    font-size: 0.78rem;
+    font-weight: bold;
+    line-height: 1.4;
+    color: var(--sb-header-fg);
+}
+.kick_intro_close {
+    flex: 0 0 auto;
+    padding: 0 2px;
+    font-size: 0.9rem;
+    line-height: 1;
+    color: var(--sb-fg);
+    background: none;
+    border: 0;
+    cursor: pointer;
+    opacity: 0.7;
+}
+.kick_intro_close:hover {
+    opacity: 1;
+}
+.kick_intro_body {
+    margin-top: 4px;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    color: var(--sb-fg);
+}
+.kick_intro_open {
+    margin-top: 8px;
+    padding: 3px 10px;
+    font-size: 0.72rem;
+    color: #fff;
+    background: var(--sb-accent);
+    border: 0;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.kick_intro_open:hover {
+    filter: brightness(1.1);
+}

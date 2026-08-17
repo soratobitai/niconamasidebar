@@ -561,6 +561,20 @@ export function setKickNotice(show) {
     el.hidden = !show
 }
 
+/**
+ * Kick連携のお知らせの出し入れ（doc/09 項目DA）。**印を付けるだけ**で、判断はしない。
+ *
+ * 🔴 **出すかどうかを決めるのはここではない**（`ui/kickIntro.js` の `shouldShowKickIntro`）。
+ *    「消したか」と「Kick が有効か」の2つを見る必要があり、どちらも非同期で読む。
+ *    ここに条件を書くと、判断が描画のたびに走る場所へ散らばる。
+ * @param {boolean} show
+ */
+export function setKickIntroVisible(show) {
+    const el = document.getElementById('kick_intro')
+    if (!el) return
+    el.hidden = !show
+}
+
 export function syncServiceTabs(container, mode, activeTab) {
     const tabs = document.getElementById('serviceTabs')
     if (!container) return 0
@@ -1454,6 +1468,21 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                         </div>
                                         <div class="sidebar_header_item_col" id="setting_options" title="オプション">
                                             <img src='${optionsImageURL}' alt="オプション">
+                                        </div>
+                                    </div>
+                                    <!-- Kick連携のお知らせ（doc/09 項目DA）。設定アイコンの下に吹き出しで出す。
+                                         🔴 **既定は hidden。** 出すかどうかは ui/kickIntro.js が決める。
+                                            配線が動かなかった時に「勝手に出る」より「出ない」で壊れるほうがよい
+                                            （同時視聴者数・経過時間の印と同じ向き）。
+                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                    <div id="kick_intro" hidden>
+                                        <div class="kick_intro_inner">
+                                            <div class="kick_intro_head">
+                                                <span class="kick_intro_title">Kick連携機能が追加されました</span>
+                                                <button type="button" id="kick_intro_close" class="kick_intro_close" title="今後表示しない" aria-label="今後表示しない">×</button>
+                                            </div>
+                                            <div class="kick_intro_body">Kick でフォロー中の配信も、このサイドバーに並べられます。</div>
+                                            <button type="button" id="kick_intro_open" class="kick_intro_open">設定を見る</button>
                                         </div>
                                     </div>
                                 </div>

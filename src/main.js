@@ -3,13 +3,14 @@ import './styles/main.css'
 import { sidebarMinWidth, loadingSessionTimeoutMs, minLoadingDurationMs, defaultCardSize, defaultShowViewerCount, defaultShowElapsedTime } from './config/constants.js'
 import { debounce } from './utils/dom.js'
 import { getOptions as getOptionsFromStorage, getProgramInfos } from './services/storage.js'
-import { buildSidebarShell, setAnimThumbnailFeed, startElapsedTicker, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf } from './render/sidebar.js'
+import { buildSidebarShell, setAnimThumbnailFeed, startElapsedTicker, setupServiceTabHandlers, syncServiceTabs, setThumbnailImageProxy, reapplyRankAttributes, shouldOpenSidebarAtStart, watchTargetIdOf, setKickIntroVisible } from './render/sidebar.js'
 import { consumeAutoNextHopMark } from './services/status.js'
 import { loadWatchHistory, recordWatch, currentOwnerKeyOnNicoPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { createSidebarControl } from './ui/sidebarControl.js'
 import { applySidebarPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
 import { applyShowElapsedTime } from './ui/elapsedTime.js'
+import { KICK_INTRO_KEY, shouldShowKickIntro, readKickIntroDismissed, readKickGranted, saveKickIntroDismissed } from './ui/kickIntro.js'
 import { adjustWatchPageChild, setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { AppState } from './core/AppState.js'
 import { LoadingManager } from './managers/LoadingManager.js'
@@ -508,6 +509,12 @@ chrome.storage.onChanged.addListener(function (changes) {
         options.showElapsedTime = changes.showElapsedTime.newValue;
         applyShowElapsedTime(options.showElapsedTime);
     }
+    // Kick連携のお知らせを別タブで消したら、こちらでも消す（doc/09 項目DA）。
+    // 🔴 **消す方向にしか動かさない。** 逆向き（false で出し直す）にすると、
+    //    storage が壊れた時に一度消した案内が復活する。
+    if (changes[KICK_INTRO_KEY] && changes[KICK_INTRO_KEY].newValue) {
+        setKickIntroVisible(false);
+    }
     if (changes.cardSize) {
         options.cardSize = changes.cardSize.newValue;
         setCardSize(options.cardSize);
@@ -648,9 +655,33 @@ const rerankInPlace = () => {
 };
 
 
+/**
+ * Kick連携のお知らせを閉じて、二度と出さない（doc/09 項目DA）。
+ * 呼ぶのは3箇所: ×を押した時／案内の「設定を見る」を押した時／Kick が有効になった時。
+ * 🔴 **画面を先に閉じてから保存する。** 保存に失敗しても押した手応えは返す
+ *    （次にページを開いた時にまた出るが、押しても消えないよりはよい）。
+ */
+const dismissKickIntro = () => {
+    setKickIntroVisible(false);
+    saveKickIntroDismissed();
+};
+
+/**
+ * お知らせを出すかどうかを決めて反映する。**判断はここ1箇所**（doc/09 項目DA）。
+ * ⚠️ 非同期で2つ読む（消したか／Kick が有効か）。どちらも「分からない時は出さない」に倒す。
+ */
+const reflectKickIntro = async () => {
+    const [dismissed, kickGranted] = await Promise.all([
+        readKickIntroDismissed(),
+        readKickGranted(),
+    ]);
+    setKickIntroVisible(shouldShowKickIntro({ dismissed, kickGranted }));
+};
+
 const reflectOptions = () => {
     // 第3引数: Kick 連携が有効になった直後にリストを取り直す（次の定期更新を待たない）。
-    setupOptionsHandler(options, sortPrograms, () => { updateSidebar(); });
+    // 🔴 **お知らせもここで閉じる。** 有効にしたのに「追加されました」が残るのは変。
+    setupOptionsHandler(options, sortPrograms, () => { updateSidebar(); dismissKickIntro(); });
     // 🔴 最初の描画より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize);
     // サイドバーの置き方（寄せる／重ねる）。**印を付けるだけ。**寄せ幅の計算は setRootWidth。
@@ -666,4 +697,27 @@ const reflectOptions = () => {
         options.kickActiveTab = tab;
         try { chrome.storage.local.set({ kickActiveTab: tab }); } catch (e) { /* 無効化済み */ }
     });
+
+    // Kick連携のお知らせ（doc/09 項目DA）。**設定ではないので options には持たない。**
+    const introClose = document.getElementById('kick_intro_close');
+    if (introClose && !introClose.dataset.wired) {
+        introClose.dataset.wired = '1';
+        introClose.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); dismissKickIntro(); });
+    }
+    const introOpen = document.getElementById('kick_intro_open');
+    if (introOpen && !introOpen.dataset.wired) {
+        introOpen.dataset.wired = '1';
+        introOpen.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // 案内から自分で開いた＝目的を果たしたので閉じる。
+            // ⚠️ **歯車を普通に押しただけでは閉じないこと。** 見落とした人に二度と出なくなる。
+            dismissKickIntro();
+            const body = document.querySelector('.sidebar_body');
+            if (body) body.classList.add('show-settings');
+            const kickRow = document.getElementById('open_kick_settings');
+            if (kickRow && kickRow.scrollIntoView) kickRow.scrollIntoView({ block: 'center' });
+        });
+    }
+    reflectKickIntro();
 };
