@@ -149,19 +149,23 @@ export function mapNotifyboxRowToInfo(row, beginAtIso) {
     }
 }
 
-/**
- * Fetch detailed program info by live id (number without "lv").
- * 用途を限定: フォローAPIがライブサムネを返さない番組（固定画像配信者など）だけ呼び、
- * liveScreenshotThumbnailUrls を補完する。全番組には使わない。
- * @param {number|string} liveId - Live id without the "lv" prefix.
- * @returns {Promise<any|undefined>} Program data object on success, or undefined on failure.
- */
 // In-flight dedupe for detail API（同時リクエストの重複防止のみ）
-const programInfoInFlight = new Map() // liveId -> Promise
+// 中身は {data, metaStatus}。`fetchProgramInfo` と `fetchProgramInfoWithStatus` が
+// **同じ約束を共有する**ので、形の違う2つの入口があっても取得は1回で済む。
+const programInfoInFlight = new Map() // liveId -> Promise<{data, metaStatus}>
 
-export async function fetchProgramInfo(liveId) {
-    const id = String(liveId)
-
+/**
+ * 詳細APIを1回叩く（内部用）。応答本文の `meta.status` ごと返す。
+ *
+ * 🔴 **`metaStatus` は HTTP のステータスではなく、応答 JSON の `meta.status`。**
+ *    この区別が終了確認の要になっている（doc/09 項目BF-2）:
+ *      404 … **APIが「その番組は無い」と答えた**（`errorCode: NOT_FOUND`）。放送中の番組は
+ *            必ず 200 を返すので、404 は「放送していない」という**答え**である。
+ *      0   … 答えが得られなかった（通信断・JSONでない応答）。ゲートウェイやCDNが返す
+ *            404 は HTML なので `.json()` が投げ、こちらへ落ちる。**上の 404 とは混ざらない。**
+ * @returns {Promise<{data: any|undefined, metaStatus: number}>}
+ */
+function requestProgramInfo(id) {
     if (programInfoInFlight.has(id)) {
         return programInfoInFlight.get(id)
     }
@@ -170,25 +174,25 @@ export async function fetchProgramInfo(liveId) {
         try {
             let response = await fetch(`${liveInfoAPI}/lv${id}`)
             response = await response.json()
-            if (response.meta?.status !== 200 || !response.data) {
+            const metaStatus = Number(response.meta?.status) || 0
+            if (metaStatus !== 200 || !response.data) {
                 // 🔴 **404 は異常ではない**（2026-08-10・利用者のコンソールに出て気付いた）。
                 //    この API を叩く3箇所は、どれも「その番組がまだ在るか」を確かめる用途:
                 //      終了確認 / 放送直後のサムネ追撃 / フォローAPIの穴埋め
                 //    番組が終われば消えるので、404 は**予定どおりの答え**。
                 //    警告を出すと、正常運転でコンソールが埋まって本物の異常が埋もれる。
-                //    呼び出し側は undefined を「答えが得られなかった」として既に扱っている。
-                if (response.meta?.status !== 200 && response.meta?.status !== 404) {
+                if (metaStatus !== 404) {
                     handleError(
-                        new Error(`API returned status ${response.meta.status}`),
-                        { api: 'fetchProgramInfo', liveId: id, status: response.meta.status }
+                        new Error(`API returned status ${metaStatus}`),
+                        { api: 'fetchProgramInfo', liveId: id, status: metaStatus }
                     )
                 }
-                return undefined
+                return { data: undefined, metaStatus }
             }
-            return response.data
+            return { data: response.data, metaStatus }
         } catch (error) {
             handleError(error, { api: 'fetchProgramInfo', liveId: id })
-            return undefined
+            return { data: undefined, metaStatus: 0 }
         } finally {
             programInfoInFlight.delete(id)
         }
@@ -196,4 +200,26 @@ export async function fetchProgramInfo(liveId) {
 
     programInfoInFlight.set(id, p)
     return p
+}
+
+/**
+ * Fetch detailed program info by live id (number without "lv").
+ * 用途を限定: フォローAPIがライブサムネを返さない番組（固定画像配信者など）だけ呼び、
+ * liveScreenshotThumbnailUrls を補完する。全番組には使わない。
+ * @param {number|string} liveId - Live id without the "lv" prefix.
+ * @returns {Promise<any|undefined>} 取れなかった時（404 も通信断も）は undefined。
+ */
+export async function fetchProgramInfo(liveId) {
+    return (await requestProgramInfo(String(liveId))).data
+}
+
+/**
+ * 終了確認専用の入口（doc/09 項目BF-2）。**404 と通信断を区別する**ために `metaStatus` を返す。
+ * ⚠️ サムネ補完（`fillMissingDetails`）はこちらを使わないこと。あちらに 404 と通信断の
+ *    区別は要らず、`undefined` を「補えなかった」として扱うだけでよい。
+ * @param {number|string} liveId
+ * @returns {Promise<{data: any|undefined, metaStatus: number}>}
+ */
+export async function fetchProgramInfoWithStatus(liveId) {
+    return requestProgramInfo(String(liveId))
 }

@@ -914,8 +914,13 @@ async function windowedConcurrent() {
     // --- ⑩ 404 は警告しない（正常な答え）---
     const api = stripComments(readFileSync(new URL('../src/services/api.js', import.meta.url), 'utf8'))
     check('CO ⑩ 番組が消えた（404）を警告にしない',
-        /status !== 404/.test(api),
+        /!== 404\)[\s\S]{0,200}?handleError/.test(api),
         '終了確認・サムネ追撃・穴埋めのどれも「まだ在るか」を聞く用途。404 は予定どおりの答え')
+    // 🔴 404（APIの答え）と通信断（答えが無い）を**同じ値にしないこと**。混ぜると終了確認が
+    //    「通信が切れただけの番組」を終了とみなして消す（doc/09 項目BF-2）。
+    check('CO ⑩-2 通信断は 404 と別の値（metaStatus 0）で返す',
+        /metaStatus: 0/.test(api),
+        'catch 側を 404 と同じ値にすると、通信断で放送中の番組が消える')
     check('CO ⑩ それ以外の状態コードは今までどおり警告する',
         /handleError\([\s\S]{0,120}?API returned status/.test(api))
 }
@@ -1728,7 +1733,9 @@ async function programEndConfirmation() {
     check('BF-2 🔴 notifybox から消えても、詳細APIが on_air なら消さない',
         has(700), ids() + '（700 は notifybox に居ないが放送中）')
 
-    // ④ 詳細APIが答えない周期（通信断・404）は消さない。**判断材料が無い時は消さない。**
+    // ④ 詳細APIが答えない周期（通信断・JSONでない応答）は消さない。**判断材料が無い時は消さない。**
+    //    ⚠️ **404 はここに含めないこと。** 404 は「その番組は存在しない」という答えであり、
+    //       「答えが無い」ではない（⑩で別に固定している）。
     h.state.followPrograms = [prog(700, 30), prog(702, 10), prog(704, 5)]
     h.state.notifyRows = [row(702)]
     h.state.detailFails = true
@@ -1826,6 +1833,57 @@ async function programEndConfirmation() {
         `${h.state.calls.detail}件 問い合わせた（疑いは ${lots.length}件）`)
     check('BF-2⑨ 上限を超えても番組は消えない（次の周期に回るだけ）',
         ids().split(',').length === lots.length, `${ids().split(',').length}/${lots.length}件`)
+
+    // ⑩ 🔴 **404 は「答えが無い」ではなく「その番組は存在しない」という答え**（2026-08-17）。
+    //
+    //    放送中の番組は必ず 200 を返す（同日実測: 放送中70件すべて 200／終了番組は2012年のものでも
+    //    `ended` を返し続け、404 に化けない）。よって 404 なら放送していない。
+    //    ⚠️ **通信断と混ぜないこと。** 実装が見ているのは応答JSONの `meta.status` で、
+    //       ゲートウェイが返すHTMLの404は `.json()` が投げて metaStatus 0 になる（＝消さない）。
+    //       ここを1つのスイッチで検査すると、その区別が壊れても気付けない。
+    h.state.followPrograms = [prog(830, 60), prog(831, 30), prog(832, 10)]
+    h.state.notifyRows = [row(830), row(831), row(832)]
+    h.state.endedIds = new Set()
+    h.state.notFoundIds = new Set()
+    await run()
+    check('BF-2⑩ 前提: 3番組が並ぶ', ids().split(',').length === 3, ids())
+    h.state.notifyRows = [row(831), row(832)]     // 830 だけ notifybox から消える
+    h.state.notFoundIds = new Set(['830'])        // 詳細APIは 404（終了と同時に削除された形）
+    await run()
+    check('BF-2⑩ 🔴 詳細APIが 404 なら消す（フォローAPIがまだ返していても）',
+        !has(830), ids() + '（フォローAPIは3件返し続けている）')
+    check('BF-2⑩ 404 の巻き添えで他の番組は消えない', has(831) && has(832), ids())
+
+    // ⑪ 🔴 **全員404は信じない。** id の作り方やAPIのパスが変わると全部が揃って404になる。
+    //    それを「全部終わった」と読むと**カードが一斉に消える**。失敗の方向は非対称なので疑う側へ倒す。
+    //    ⚠️ **生き残る番組を1つ残すこと。** 全部消すと `combined.length === 0` の分岐
+    //       （放送中0件の周期は既存DOMを維持する）に入り、**ガードを壊しても同じ結果になる**。
+    //       2026-08-17 に実際この形で書いてしまい、ガードを外しても鳴らなかった。
+    h.state.followPrograms = [prog(840, 60), prog(841, 40), prog(842, 20), prog(843, 10), prog(844, 5)]
+    h.state.notifyRows = [row(840), row(841), row(842), row(843), row(844)]
+    h.state.notFoundIds = new Set()
+    await run()
+    check('BF-2⑪ 前提: 5番組が並ぶ', ids().split(',').length === 5, ids())
+    h.state.notifyRows = [row(844)]                                  // 844 以外の4件が疑いになり
+    h.state.notFoundIds = new Set(['840', '841', '842', '843'])      // その4件が全部404
+    await run()
+    check('BF-2⑪ 🔴 疑いが全員404の周期は1件も消さない（こちらの故障を先に疑う）',
+        ids().split(',').length === 5, `${ids().split(',').length}件 / ${ids()}`)
+
+    // ⑪-2 ただし**3件未満では判定しない**。1〜2件だけ終わって消えるのは普通に起きるので、
+    //      ここで疑うと「終わった番組が消えない」を作り込むことになる。
+    //      ⚠️ **生き残る番組を1つ残すこと。** 全部消すと `combined.length === 0` の分岐
+    //         （放送中0件の周期は既存DOMを維持する）に入り、消えたかどうかを判定できない。
+    h.state.followPrograms = [prog(850, 60), prog(851, 30), prog(852, 10)]
+    h.state.notifyRows = [row(850), row(851), row(852)]
+    h.state.notFoundIds = new Set()
+    await run()
+    check('BF-2⑪-2 前提: 3番組が並ぶ', ids().split(',').length === 3, ids())
+    h.state.notifyRows = [row(852)]                  // 疑いは 850 と 851 の2件だけ
+    h.state.notFoundIds = new Set(['850', '851'])
+    await run()
+    check('BF-2⑪-2 🔴 疑いが2件なら、全員404でも消える（3件未満は「全員404」と見ない）',
+        !has(850) && !has(851) && has(852), ids())
     h.restore()
 }
 

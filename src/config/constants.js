@@ -38,6 +38,10 @@ export const endCheckMaxPerCycle = 20;
 // 実測値（2026-08-02・doc/09 項目BF-2）:
 //   詳細APIは番組終了の **0.5〜1.0秒後**には `liveCycle: 'ended'` を返す。応答 約31ms・約2KB。
 //   番組ページ（HTML内 `embedded-data` の `program.status`）は 1〜2秒速いが 50KB・245ms のため不採用。
+// 実測値（2026-08-17・doc/09 項目BF-2）:
+//   放送中の番組は必ず 200 を返す（放送中70件すべて）。終了した番組は 2012年のものでも `ended` を
+//   返し続け、404 に化けない。よって **`meta.status` 404 は「その番組は存在しない」＝終了の答え**。
+//   ⚠️ 通信断は `metaStatus 0` で来る。**404 と同じ値にしないこと**（消してはいけない側）。
 
 export const sidebarMinWidth = 180;
 /**

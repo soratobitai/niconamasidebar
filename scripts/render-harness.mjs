@@ -84,7 +84,11 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         // 番組詳細API が「終了した」と答える番組id（'lv700' でも '700' でも可）。
         // 項目BF-2 の終了確認は、notifybox の不在を疑いにして**ここへ問い合わせる**。
         endedIds: new Set(),
-        detailFails: false,   // 詳細APIが答えない状況（通信断・404）を作る
+        // 番組詳細API が **meta.status 404**（＝その番組は存在しない）と答える番組id。
+        // 🔴 `detailFails`（通信断）とは別物。実装はこの2つを区別して、404 だけ「終了」とみなす
+        //    （doc/09 項目BF-2）。**同じスイッチにまとめないこと** — まとめると区別を検査できない。
+        notFoundIds: new Set(),
+        detailFails: false,   // 詳細APIが答えない状況（通信断・JSONでない応答）を作る
         calls: { notify: 0, follow: 0, detail: 0 },
     }
 
@@ -112,6 +116,10 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
             //   終了   → { meta:{status:200}, data:{ liveCycle:'ended',  … } }
             //   無い番組 → HTTP 404 / meta.status 404
             const id = (/\/lv(\d+)/.exec(u) || [])[1] || ''
+            if (state.notFoundIds.has(id) || state.notFoundIds.has('lv' + id)) {
+                // 実測（2026-08-17）: 本文は meta だけで data は付かない
+                return jsonResponse({ meta: { status: 404, errorCode: 'NOT_FOUND', errorMessage: 'program not found' } })
+            }
             const ended = state.endedIds.has(id) || state.endedIds.has('lv' + id)
             const data = { liveCycle: ended ? 'ended' : 'on_air' }
             // `state.detailThumb` を立てた時だけ、ライブスクショを返す番組詳細としても振る舞う
