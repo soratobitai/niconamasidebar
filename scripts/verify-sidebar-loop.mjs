@@ -3742,6 +3742,95 @@ async function concurrentEstimate() {
 }
 
 /**
+ * CZ: 設定の書き戻しが失敗しても、読み取れた設定を捨てないこと（doc/09 項目CZ）。
+ *
+ * 🔴 症状は**「同時視聴者数と経過時間を両方ONにしているのに、全番組で出ない回がある。
+ *    ページ読み込みのタイミング次第で出たり出なかったり」**（2026-08-17・利用者報告）。
+ *
+ * 表示の判定は `<html>` のクラス（`nns-show-viewers` / `nns-show-elapsed`）だけで、
+ * それを付けるのは `reflectOptions()` の2行。渡る `options` が既定に落ちると
+ * **両方まとめて・全番組で**出なくなる。既定はどちらも OFF だから。
+ *
+ * `getOptions` は「読み取り」と「既定値の焼き付け（書き戻し）」を**同じ try に入れていた**ため、
+ * 書き戻しがこけただけで読めていた設定を捨てて既定を返していた。
+ * 書き戻しは次回を速くするための副作用で、戻り値の正しさとは関係が無い。
+ *
+ * ⚠️ **正規表現で見ない。** 実際に set を失敗させて戻り値を確かめる。
+ */
+async function optionsSurviveWritebackFailure() {
+    console.log('=== CZ 書き戻しが失敗しても設定を捨てないこと ===')
+    const saved = { chrome: globalThis.chrome }
+    const store = { showViewerCount: 'on', showElapsedTime: 'on', sidebarTheme: 'dark' }
+    // 既定は「両方 OFF」。ここが実際の既定と同じであることが、この検査の意味そのもの。
+    const defaults = { showViewerCount: 'off', showElapsedTime: 'off', sidebarTheme: 'light' }
+    let getFails = false
+    let setFails = false
+    globalThis.chrome = {
+        runtime: { id: 'test-extension-id', lastError: null, getURL: (p) => p },
+        storage: {
+            local: {
+                // ⚠️ 実装は `get(callback)` の**1引数**で呼ぶ。第2引数を前提にすると
+                //    cb が undefined になり、全項目が「前提」から落ちる（実際に踏んだ）。
+                get(keys, cb) {
+                    const done = typeof keys === 'function' ? keys : cb
+                    if (getFails) {
+                        globalThis.chrome.runtime.lastError = { message: 'read failed (test)' }
+                        done({})
+                        globalThis.chrome.runtime.lastError = null
+                        return
+                    }
+                    done(structuredClone(store))
+                },
+                set(obj, cb) {
+                    if (setFails) {
+                        globalThis.chrome.runtime.lastError = { message: 'write failed (test)' }
+                        cb()
+                        globalThis.chrome.runtime.lastError = null
+                        return
+                    }
+                    for (const [k, v] of Object.entries(obj)) store[k] = structuredClone(v)
+                    cb()
+                },
+            },
+            onChanged: { addListener: () => {} },
+        },
+    }
+    try {
+        const { getOptions } = await import('../src/services/storage.js')
+        const { isViewerCountVisible } = await import('../src/ui/viewerCount.js')
+        const { isElapsedTimeVisible } = await import('../src/ui/elapsedTime.js')
+
+        const ok = await getOptions(defaults)
+        check('CZ 前提: 普通に読めれば保存値が返る',
+            ok.showViewerCount === 'on' && ok.showElapsedTime === 'on', JSON.stringify(ok))
+
+        setFails = true
+        const afterWriteFail = await getOptions(defaults)
+        check('CZ 🔴 書き戻しが失敗しても、読めた設定をそのまま返す',
+            afterWriteFail.showViewerCount === 'on' && afterWriteFail.showElapsedTime === 'on',
+            JSON.stringify(afterWriteFail) + '（既定へ落ちると全番組で両方とも出なくなる）')
+        // 症状そのもの（画面に出るか）まで繋げて見る。設定値の比較だけだと、
+        // 表示判定の向きが逆になった時に素通りする。
+        check('CZ 🔴 その戻り値で「出す」と判定される',
+            isViewerCountVisible(afterWriteFail.showViewerCount)
+            && isElapsedTimeVisible(afterWriteFail.showElapsedTime))
+        check('CZ 書き戻しが失敗しても他の設定も生きている',
+            afterWriteFail.sidebarTheme === 'dark', afterWriteFail.sidebarTheme)
+        setFails = false
+
+        // 読めなかった時だけ既定へ倒す（ここを消すと、storage が壊れた時に undefined が流れる）
+        getFails = true
+        const afterReadFail = await getOptions(defaults)
+        check('CZ 🔴 読み取りが失敗した時は既定へ倒す（ここは従来どおり）',
+            afterReadFail.showViewerCount === 'off' && afterReadFail.showElapsedTime === 'off',
+            JSON.stringify(afterReadFail))
+        getFails = false
+    } finally {
+        globalThis.chrome = saved.chrome
+    }
+}
+
+/**
  * CP: 設定の保存が「設定以外」を巻き込まないか（doc/09 項目CP）。
  *
  * 🔴 症状は**おすすめ順の点数が急に0に戻る**で、エラーは出ない。原因は
@@ -4221,8 +4310,10 @@ async function autoUpdateOff() {
         check(`BQ 移行先 '${to}' は選択肢に実在する`, radioVals.includes(to),
             '実在しない値へ寄せると、無選択のまま何も保存できない')
     }
+    // ⚠️ `const` を含めて綴らないこと。宣言の書き方（const/let）が変わっただけで落ちる
+    //    ＝実装は正しいのに NG が出る（2026-08-17 に踏んだ）。見たいのは「呼んでいるか」だけ。
     check('BQ 移行は保存値を読む唯一の入口（getOptions）を通る',
-        /const merged = migrateOptions\(/.test(st),
+        /\bmerged = migrateOptions\(/.test(st),
         'ここを通さないと、片方のページだけ古い値のまま動く')
 
     // 既定値そのものが選択肢に無い、という壊れ方も同じ結果になる
@@ -6679,6 +6770,7 @@ if (real) {
     await settingsSegmentOrder()
     await autoUpdateOff()
     await optionsPersistScope()
+    await optionsSurviveWritebackFailure()
     await concurrentEstimate()
     await serviceTabs()
     await cardSize()

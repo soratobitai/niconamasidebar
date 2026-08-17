@@ -88,6 +88,7 @@ function migrateOptions(options) {
 }
 
 export async function getOptions(defaultOptions = {}) {
+    let merged
     try {
         const stored = await new Promise((resolve, reject) => {
             chrome.storage.local.get((result) => {
@@ -99,10 +100,28 @@ export async function getOptions(defaultOptions = {}) {
             })
         })
 
-        const merged = migrateOptions({ ...defaultOptions, ...stored })
+        merged = migrateOptions({ ...defaultOptions, ...stored })
+    } catch (error) {
+        // ここだけが「設定を読めなかった」＝既定へ倒してよい唯一の場合。
+        // 🔴 **静かに倒さないこと。** 症状は「設定が全部あの日だけ効かない」で、
+        //    利用者からは原因が絶対に分からない（2026-08-17・doc/09 項目CZ）。
+        handleError(error, { function: 'getOptions', phase: 'read', storage: 'chrome.storage.local' })
+        console.warn(
+            '[設定] 保存済みの設定を読めなかったため、このページでは既定値で動きます。'
+            + '同時視聴者数・経過時間などの表示が出ないのはこのためです。ページを再読込すると直ります。'
+        )
+        return defaultOptions
+    }
 
-        // 🔴 **書き戻すのは設定キーだけ。** `merged` は storage 全体を含んでいるので、
-        //    そのまま set すると読み込み時点のスナップショットで他の書き手を上書きする。
+    // 既定値の焼き付け。**読み取りとは別の try に置くこと。**
+    // 🔴 **ここが失敗しても `merged` を捨ててはいけない**（2026-08-17・doc/09 項目CZ）。
+    //    以前は read と同じ try に入っており、**書き戻しがこけただけで読めていた設定を捨てて
+    //    既定を返していた。** 既定は同時視聴者数も経過時間も OFF なので、
+    //    「両方ONにしているのに全番組で出ない・再読込すると直る」になる（利用者報告）。
+    //    書き戻しは次回を速くするための副作用であって、戻り値の正しさとは関係が無い。
+    // 🔴 **書き戻すのは設定キーだけ。** `merged` は storage 全体を含んでいるので、
+    //    そのまま set すると読み込み時点のスナップショットで他の書き手を上書きする。
+    try {
         await new Promise((resolve, reject) => {
             chrome.storage.local.set(pickOptionKeys(merged), () => {
                 if (chrome.runtime.lastError) {
@@ -112,12 +131,11 @@ export async function getOptions(defaultOptions = {}) {
                 }
             })
         })
-
-        return merged
     } catch (error) {
-        handleError(error, { function: 'getOptions', storage: 'chrome.storage.local' })
-        return defaultOptions
+        handleError(error, { function: 'getOptions', phase: 'writeback', storage: 'chrome.storage.local' })
     }
+
+    return merged
 }
 
 /**
