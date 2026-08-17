@@ -1069,21 +1069,24 @@ async function thumbUrlSurvivesFailedFill() {
         .find((x) => x.id === 'lv' + NUM)
     const imgOf = () => h.dom.getById(NUM).querySelector('.program_thumbnail_img')
 
-    // 🔴 **実測どおりの形にすること。** 一覧のスクショは「包まれた」URLで来て、
-    //    この形の時 API は flippedListingThumbnail を返さない（2026-08-10 実測）。
-    const wrapped = 'https://listing-thumbnail.live.nicovideo.jp/?url='
-        + encodeURIComponent('https://asset2.dlive.nicovideo.jp/70f3/x/screenshot/12/thumbnail-360x640/screenshot.jpg')
+    // 🔴 **補完がまだ必要な形を使うこと。** 放送直後でスクショが未生成の番組は
+    //    `listingThumbnail` 自体が空で来る（`warnIfFlippedThumbMissing` のコメントと同じ前提）。
+    //
+    // ⚠️ **2026-08-17 に土台を差し替えた。** 以前はここに「包まれた縦型URL」を置いていたが、
+    //    項目DB で**包みを解いて採用するようにしたので、その形はもう補完を待たずに出る。**
+    //    包まれた形のままだと ① が成立せず、この項目が守りたい ③（巻き戻らないこと）まで
+    //    確かめられなくなる。**土台だけ替えて、守る対象は変えていない。**
     const prog = apiProgram({ id: 'lv' + NUM, beginAtMs: Date.now() - 30000, thumb: false })
-    prog.listingThumbnail = wrapped
+    prog.listingThumbnail = ''
     delete prog.flippedListingThumbnail
     h.state.followPrograms = [prog]
-    h.state.notifyRows = [{ id: NUM, title: '縦型' }]
+    h.state.notifyRows = [{ id: NUM, title: 'スクショ未生成' }]
 
     // ① スクショがまだ生成されていない周期＝繋ぎは配信者アイコン
     await run()
     check('CJ ① スクショ未生成の間は配信者アイコン',
         (imgOf().getAttribute('src') || '').includes('icon'), imgOf().getAttribute('src'))
-    check('CJ ① （空振り防止）一覧の包まれたURLをライブサムネとして採用していない',
+    check('CJ ① （空振り防止）まだライブサムネを持っていない',
         !stored().thumbnailUrl, `保存=${stored().thumbnailUrl}`)
 
     // ② 詳細APIにスクショが出た周期＝補完されて表示が切り替わる
@@ -2885,9 +2888,20 @@ async function flippedThumb() {
     check('AW 回収したURLは定期更新の対象にも入る（liveScreenshotThumbnailUrls）',
         withFlipped.liveScreenshotThumbnailUrls && withFlipped.liveScreenshotThumbnailUrls.middle === SHOT)
 
+    // 🔴 **2026-08-17（項目DB）で方針が変わった箇所。**
+    //    包まれた形は「一律で捨てる」から「**解いて、同じ判定にかける**」になった。
+    //    判定そのものは緩めていないので、項目AA の事故（チャンネルアイコンをライブサムネ扱い）は
+    //    起きない。**両方を並べて固定する**（片方だけだと、緩めても厳しくしても素通りする）。
+    const WRAPPED_ICON = 'https://listing-thumbnail.live.nicovideo.jp/?url='
+        + encodeURIComponent('https://img.cdn.nimg.jp/s/nicochannel/live/2633237/6920d4d3.jpg/128x128l_FFFFFF.jpg')
     const wrapped = mapApiProgramToInfo({ ...base, listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED })
-    check('AW 🔴 プロキシに包まれた形は採用しない（項目AA の事故を避ける）',
-        wrapped.thumbnailUrl === '' && !isLiveScreenshotUrl(WRAPPED), wrapped.thumbnailUrl)
+    check('AW 🔴 包まれた形は解いて採用する（縦型はこの形でしか来ない・項目DB）',
+        wrapped.thumbnailUrl === SHOT && !isLiveScreenshotUrl(WRAPPED),
+        `${wrapped.thumbnailUrl}（包み自体は今も live 判定を通らない）`)
+    const wrappedIcon = mapApiProgramToInfo({ ...base, listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED_ICON })
+    check('AW 🔴 解いた中身がスクショでなければ採用しない（項目AA の事故を避ける）',
+        wrappedIcon.thumbnailUrl === '' && !wrappedIcon.liveScreenshotThumbnailUrls,
+        wrappedIcon.thumbnailUrl)
 
     const normal = mapApiProgramToInfo({ ...base, listingThumbnail: SHOT, flippedListingThumbnail: FIXED })
     check('AW listingThumbnail がスクショなら従来どおりそれを使う（flipped に引きずられない）',
@@ -2913,8 +2927,11 @@ async function flippedTrap() {
     console.log('=== BK 固定画像の警告が誤報しない／壊れた時は鳴る ===')
     const SHOT = 'https://asset2.dlive.nicovideo.jp/915e/abc/screenshot/123/thumbnail-352x198/screenshot.jpg'
     const FIXED = 'https://listing-thumbnail.live.nicovideo.jp?image=prod-lv1/thumbnail_1.png&w=352&h=198'
-    // 実測で「回収できない」に分類された形。listingThumbnail 自体が包まれたスクショで flipped は来ない
+    // 包まれた形。**中身がスクショなら 2026-08-17 以降は回収できる**（項目DB）。
     const WRAPPED = 'https://listing-thumbnail.live.nicovideo.jp/?url=' + encodeURIComponent(SHOT)
+    // 包みの中身がスクショでない形＝**本当に回収できない**。罠が鳴るべき側の代表（実測にあった形）。
+    const WRAPPED_ICON = 'https://listing-thumbnail.live.nicovideo.jp/?url='
+        + encodeURIComponent('https://img.cdn.nimg.jp/s/nicochannel/live/2633237/6920d4d3.jpg/128x128l_FFFFFF.jpg')
     let seq = 0
     const prog = (extra) => ({
         id: `lv${++seq}`, title: 't', providerType: 'community', liveCycle: 'ON_AIR',
@@ -2974,10 +2991,20 @@ async function flippedTrap() {
         oneWrappedFlip[0] ? oneWrappedFlip[0].slice(0, 100) : '無言')
 
     // ⑥ 壊れ方その2: flipped は来るが全部が採用できない形になった（母数あり）
+    // ⚠️ **2026-08-17（項目DB）で土台を替えた。** 包まれたスクショは解いて採用するようになったので、
+    //    「採用できない形」の代表は **包みの中身がスクショでないもの**になった。
+    //    ここを WRAPPED（中身がスクショ）のままにすると全件回収できてしまい、
+    //    **罠が鳴らないのに合格する空振り検査**になる。
     const changed = await warnsFor(Array.from({ length: 3 }, () =>
-        prog({ listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED })))
+        prog({ listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED_ICON })))
     check('BK 🔴 flipped の形が変わったら鳴る', changed.length === 1,
         changed[0] ? changed[0].slice(0, 90) : '鳴らなかった')
+
+    // ⑦ 逆に、包まれたスクショなら回収できるので鳴らない（項目DB が効いていることの裏取り）
+    const wrappedOk = await warnsFor(Array.from({ length: 3 }, () =>
+        prog({ listingThumbnail: FIXED, flippedListingThumbnail: WRAPPED })))
+    check('BK 包まれたスクショは回収できるので鳴らない（項目DB）', wrappedOk.length === 0,
+        wrappedOk[0] ? wrappedOk[0].slice(0, 100) : '無言')
 }
 
 /**
@@ -3768,6 +3795,85 @@ async function concurrentEstimate() {
     }
     check('CQ W が 0 や負でも壊れない',
         Number.isFinite(estimateConcurrentViewers({ viewers: 10 }, T0, 0)))
+}
+
+/**
+ * DB: 包まれたサムネURLを解く（doc/09 項目DB・2026-08-17 利用者報告）。
+ *
+ * 🔴 **症状は「kick.com でニコ生の縦型配信だけサムネが配信者アイコンのまま」。**
+ *    ホバーすると過去のコマだけがアニメーションする（コマは SW の IndexedDB にあり、
+ *    ニコ生ページで貯めた分が kick.com でも再生されるため）。
+ *
+ * 🔴 **原因は kick.com に補完が無いこと。** `fillMissingDetails` の呼び出しは
+ *    `fetchFollowedProgramsViaPage` の1箇所だけ＝ニコ生ページ専用。kick.com は
+ *    SW から生データを受け取って `mapApiProgramToInfo` に通すだけなので、
+ *    **縦型（＝必ず包まれて来る）が永久に空のまま**だった（項目BN の型の再発）。
+ *
+ * ⚠️ **判定を緩めて直したのではない。** 包みを解いてから同じ `isLiveScreenshotUrl` にかける。
+ *    ここを「ホストで通す」に緩めると項目AA の事故（チャンネルアイコンをライブサムネ扱い）になる。
+ */
+async function unwrapWrappedThumbnail() {
+    console.log('=== DB 包まれたサムネURLを解く ===')
+    const { isLiveScreenshotUrl, unwrapListingThumbnail, pickLiveScreenshot, mapApiProgramToInfo }
+        = await import('../src/services/followPageSource.js')
+
+    // 実測値をそのまま使う（2026-08-17・公開の recent 版）。
+    const WRAPPED_SHOT = 'https://listing-thumbnail.live.nicovideo.jp/?url=https%3A%2F%2Fasset2.dlive.nicovideo.jp%2F5810%2F6a82fffa92be5475c992180b%2Fscreenshot%2F12%2Fthumbnail-360x640%2Fscreenshot.jpg'
+    const INNER_SHOT = 'https://asset2.dlive.nicovideo.jp/5810/6a82fffa92be5475c992180b/screenshot/12/thumbnail-360x640/screenshot.jpg'
+    // 🔴 **これが在るから「ホストで通す」ではいけない。** 同じ包みでチャンネルアイコンが来る。
+    const WRAPPED_ICON = 'https://listing-thumbnail.live.nicovideo.jp/?url=https%3A%2F%2Fimg.cdn.nimg.jp%2Fs%2Fnicochannel%2Flive%2F2633237%2F6920d4d3.jpg%2F128x128l_FFFFFF.jpg'
+    const FIXED_IMAGE = 'https://listing-thumbnail.live.nicovideo.jp?image=prod-lv351199224/thumbnail_1781890843095.png&w=352&h=198&v=1'
+    const PLAIN_SHOT = 'https://asset2.dlive.nicovideo.jp/c313/6a83011d/screenshot/123/thumbnail-352x198/screenshot.jpg'
+
+    check('DB 包みから中身を取り出せる', unwrapListingThumbnail(WRAPPED_SHOT) === INNER_SHOT,
+        unwrapListingThumbnail(WRAPPED_SHOT))
+    check('DB 包みでないURLからは何も取り出さない',
+        unwrapListingThumbnail(PLAIN_SHOT) === '' && unwrapListingThumbnail('') === ''
+        && unwrapListingThumbnail(null) === '')
+    check('DB `?image=` の形は取り出せない（中身がURLではない）',
+        unwrapListingThumbnail(FIXED_IMAGE) === '', unwrapListingThumbnail(FIXED_IMAGE))
+    check('DB 壊れたURLでも投げない', unwrapListingThumbnail('not a url') === '')
+    // 🔴 ホスト名は完全一致で見る（部分一致は項目CB の誤爆と同じ）。
+    check('DB 🔴 似たホスト名を包み扱いしない',
+        unwrapListingThumbnail('https://evil-listing-thumbnail.live.nicovideo.jp.example.com/?url=https%3A%2F%2Fa.jp%2Fscreenshot%2Fx.jpg') === '')
+
+    check('DB 🔴 包みを解いた結果がスクショなら採用する（縦型がここで救われる）',
+        pickLiveScreenshot(WRAPPED_SHOT) === INNER_SHOT, pickLiveScreenshot(WRAPPED_SHOT))
+    check('DB 🔴 包みを解いた結果がチャンネルアイコンなら採用しない（項目AA の再発防止）',
+        pickLiveScreenshot(WRAPPED_ICON) === '', pickLiveScreenshot(WRAPPED_ICON))
+    check('DB 素のスクショは今までどおり採用する', pickLiveScreenshot(PLAIN_SHOT) === PLAIN_SHOT)
+    check('DB 固定画像は採用しない', pickLiveScreenshot(FIXED_IMAGE) === '')
+    check('DB 先に見つかった方を採る（listing → flipped の順）',
+        pickLiveScreenshot(PLAIN_SHOT, WRAPPED_SHOT) === PLAIN_SHOT)
+    check('DB listing が駄目なら flipped の包みも解く',
+        pickLiveScreenshot(FIXED_IMAGE, WRAPPED_SHOT) === INNER_SHOT)
+
+    // 写像まで通す。**縦型が空にならないこと**が本題。
+    const vertical = mapApiProgramToInfo({
+        id: 'lv1', title: 't', providerType: 'community', programProvider: { id: '1', name: 'n' },
+        statistics: {}, beginAt: Date.now(), listingThumbnail: WRAPPED_SHOT,
+    })
+    check('DB 🔴 縦型（包まれたスクショ）で thumbnailUrl が空にならない',
+        vertical.thumbnailUrl === INNER_SHOT, vertical.thumbnailUrl || '(空)')
+    check('DB 🔴 定期更新の対象にもなる（20秒ごとに取り直す）',
+        vertical.liveScreenshotThumbnailUrls && vertical.liveScreenshotThumbnailUrls.middle === INNER_SHOT)
+
+    const chan = mapApiProgramToInfo({
+        id: 'lv2', title: 't', providerType: 'channel', socialGroup: { id: 'ch1', name: 'c' },
+        statistics: {}, beginAt: Date.now(), listingThumbnail: WRAPPED_ICON,
+    })
+    check('DB 🔴 チャンネルの包まれたアイコンをライブサムネにしない',
+        !chan.liveScreenshotThumbnailUrls && !chan.large1280x720ThumbnailUrl,
+        JSON.stringify({ ss: chan.liveScreenshotThumbnailUrls, lg: chan.large1280x720ThumbnailUrl }))
+
+    // 🔴 **両ページが同じ写像を通ること。** ここが分かれると kick.com だけまた抜ける（項目BN）。
+    const { readFileSync } = await import('fs')
+    const rd = (f) => stripComments(readFileSync(new URL('../src/' + f, import.meta.url), 'utf8'))
+    for (const [page, file] of [['ニコ生', 'services/followPageSource.js'], ['kick.com', 'kickPage.js']]) {
+        check(`DB 🔴 ${page}側が mapApiProgramToInfo を通る`, /mapApiProgramToInfo\(/.test(rd(file)))
+    }
+    check('DB 🔴 採用の判定は1箇所だけ（書き手を2人にしない）',
+        (rd('services/followPageSource.js').match(/isLiveScreenshotUrl\(c\)/g) || []).length === 1)
 }
 
 /**
@@ -6939,6 +7045,7 @@ if (real) {
     await optionsPersistScope()
     await optionsSurviveWritebackFailure()
     await kickIntroNotice()
+    await unwrapWrappedThumbnail()
     await concurrentEstimate()
     await serviceTabs()
     await cardSize()

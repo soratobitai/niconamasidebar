@@ -45,6 +45,54 @@ export function isLiveScreenshotUrl(u) {
 }
 
 /**
+ * 一覧APIが `listing-thumbnail` プロキシに**包んで**返したURLから、中身のURLを取り出す
+ * （2026-08-17・doc/09 項目DB）。包みでなければ空文字。
+ *
+ * 【なぜ要るか】**縦型配信のスクショは、必ずこの包みで来る。**
+ * 実測（2026-08-17・公開の recent 版70件）: 写像後にサムネが空になる3件はすべてこの形で、
+ * 中身は3件とも `…/screenshot/…/thumbnail-360x640/…`（＝縦型）だった。
+ *
+ * 🔴 **これは項目AA の「ホストで緩める」ではない。** 取り出した中身を
+ *    **`isLiveScreenshotUrl` にもう一度かける**のが要点で、判定そのものは緩めていない。
+ *    同じ実測で、中身が `img.cdn.nimg.jp/…/128x128l…`（チャンネルアイコン）の番組が1件あり、
+ *    **それは判定で落ちる**。ホストで通す形にしていたらこれを拾っていた。
+ *
+ * ⚠️ **包みは2つの形がある。** 取り出せるのは `?url=<エンコードしたURL>` の方だけ。
+ *    `?image=prod-lv…/thumbnail_….png` の方は中身がURLではないので取り出せない
+ *    （そちらは固定画像運用で、`flippedListingThumbnail` から回収する既存の道が効く）。
+ *
+ * @param {string} u
+ * @returns {string} 取り出せたURL。包みでない・取り出せない時は空文字
+ */
+export function unwrapListingThumbnail(u) {
+    if (typeof u !== 'string' || !u) return ''
+    try {
+        const parsed = new URL(u)
+        // 🔴 ホストは完全一致で見る。部分一致にすると別のホストまで包み扱いになる（項目CB の誤爆）。
+        if (parsed.hostname !== 'listing-thumbnail.live.nicovideo.jp') return ''
+        return parsed.searchParams.get('url') || ''
+    } catch (e) {
+        return ''   // 相対URL・壊れたURL
+    }
+}
+
+/**
+ * 表示に使えるライブスクショURLを1つ選ぶ。**包みも解いて試す。**
+ * 🔴 **採用の判定は `isLiveScreenshotUrl` の1箇所だけ**にすること。ここで別の条件を足すと、
+ *    「どれをライブサムネとみなすか」の書き手が2人になる（項目AA の再発）。
+ * @param {...string} candidates 素のURL（包みでもよい）
+ * @returns {string} 最初に見つかったライブスクショURL。無ければ空文字
+ */
+export function pickLiveScreenshot(...candidates) {
+    for (const c of candidates) {
+        if (isLiveScreenshotUrl(c)) return c
+        const inner = unwrapListingThumbnail(c)
+        if (isLiveScreenshotUrl(inner)) return inner
+    }
+    return ''
+}
+
+/**
  * フロントAPIの1番組（data.programs[]）を、詳細API相当の内部 programInfo 形へ変換する。
  * 配信者設定の固定画像は使わず、ライブスクショのときだけサムネURLを採用する（要件）。
  * @param {object} p
@@ -61,13 +109,13 @@ export function mapApiProgramToInfo(p) {
     // （一覧ページでこの手の番組のサムネが固定画像とスクショで交互に入れ替わるのは、この2枚のこと）。
     // ここで拾えば、その番組ごとに詳細APIを叩き直す fillMissingDetails がほぼ不要になる
     // （2026-07-31 実測: user 67件中22件が固定画像運用＝約1/3。その22件すべてが flipped を持っていた）。
-    // ⚠️ 採用は **isLiveScreenshotUrl を通る素直な形だけ**。同22件中2件は listing-thumbnail プロキシに
-    //    包まれた形（`?url=<エンコードしたスクショURL>`）で来ており、判定を通らない。ここを緩めて
-    //    ホストで通すと、同じホストが配る固定画像・チャンネルアイコンまで「ライブサムネ」として
-    //    登録してしまう（doc/09 項目AA の事故そのもの）。包まれた分は従来どおり詳細APIの補完に回す。
+    // ⚠️ 採用は **isLiveScreenshotUrl を通る形だけ**。ホストで通すと、同じホストが配る
+    //    固定画像・チャンネルアイコンまで「ライブサムネ」として登録してしまう（項目AA の事故そのもの）。
+    // 🔴 **包まれた形（`?url=<エンコードしたURL>`）は、解いてから同じ判定にかける**
+    //    （2026-08-17・doc/09 項目DB）。判定は緩めていない。**縦型配信のスクショは必ずこの形で来る**ので、
+    //    ここで拾わないと縦型だけサムネが出ない。kick.com 側は詳細APIでの補完が無いため直撃していた。
     const flipped = p.flippedListingThumbnail || ''
-    const shot = isLiveScreenshotUrl(rawThumb) ? rawThumb
-        : (isLiveScreenshotUrl(flipped) ? flipped : '')
+    const shot = pickLiveScreenshot(rawThumb, flipped)
     const thumb = providerType === 'user' ? shot : rawThumb
     // ただし「20秒周期で取り直す対象」に含めてよいのはライブスクショだけ。
     // 前提（ニコ生の仕様・2026-07-26 に利用者確認）: チャンネル番組にライブサムネは提供されない。
