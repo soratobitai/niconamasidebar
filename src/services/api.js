@@ -174,16 +174,23 @@ function requestProgramInfo(id) {
         try {
             let response = await fetch(`${liveInfoAPI}/lv${id}`)
             response = await response.json()
-            const metaStatus = Number(response.meta?.status) || 0
+            // 🔴 **数値でなければ 0（＝答えが得られなかった）に倒す。**
+            //    `Number('404')` のような緩い変換にすると、想定外の応答が「終了の答え」に化けて
+            //    **カードを消す側へ倒れる。** 失敗の方向は非対称（消しすぎ ≫ 消し足りない）なので、
+            //    削除の引き金になる値の解釈は厳しくしておく（doc/09 項目BF-2）。
+            const rawStatus = response.meta?.status
+            const metaStatus = Number.isFinite(rawStatus) ? rawStatus : 0
             if (metaStatus !== 200 || !response.data) {
                 // 🔴 **404 は異常ではない**（2026-08-10・利用者のコンソールに出て気付いた）。
                 //    この API を叩く3箇所は、どれも「その番組がまだ在るか」を確かめる用途:
                 //      終了確認 / 放送直後のサムネ追撃 / フォローAPIの穴埋め
                 //    番組が終われば消えるので、404 は**予定どおりの答え**。
                 //    警告を出すと、正常運転でコンソールが埋まって本物の異常が埋もれる。
-                if (metaStatus !== 404) {
+                // ⚠️ **200 も外すこと。** `meta.status` が 200 なのに `data` が無い応答で
+                //    「API returned status 200」という意味のない警告が出る（2026-08-17 のレビューで発見）。
+                if (metaStatus !== 200 && metaStatus !== 404) {
                     handleError(
-                        new Error(`API returned status ${metaStatus}`),
+                        new Error(`API returned status ${metaStatus} (raw: ${JSON.stringify(rawStatus)})`),
                         { api: 'fetchProgramInfo', liveId: id, status: metaStatus }
                     )
                 }

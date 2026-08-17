@@ -88,6 +88,11 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
         // 🔴 `detailFails`（通信断）とは別物。実装はこの2つを区別して、404 だけ「終了」とみなす
         //    （doc/09 項目BF-2）。**同じスイッチにまとめないこと** — まとめると区別を検査できない。
         notFoundIds: new Set(),
+        // 番組id → 詳細APIが返す**生の本文**（想定外の応答を作る用）。
+        // 例: `new Map([['830', { meta: { status: '404' } }]])`
+        // ⚠️ 実装は数値の meta.status しか採用しない。文字列 '404' や data 無しの 200 を
+        //    「終了」と読んでしまわないことを、ここで実際に作って確かめる。
+        detailRawById: new Map(),
         detailFails: false,   // 詳細APIが答えない状況（通信断・JSONでない応答）を作る
         calls: { notify: 0, follow: 0, detail: 0 },
     }
@@ -116,6 +121,9 @@ export function buildRenderHarness({ intervalSec = 60, programsSort = 'newest' }
             //   終了   → { meta:{status:200}, data:{ liveCycle:'ended',  … } }
             //   無い番組 → HTTP 404 / meta.status 404
             const id = (/\/lv(\d+)/.exec(u) || [])[1] || ''
+            if (state.detailRawById.has(id) || state.detailRawById.has('lv' + id)) {
+                return jsonResponse(state.detailRawById.get(id) ?? state.detailRawById.get('lv' + id))
+            }
             if (state.notFoundIds.has(id) || state.notFoundIds.has('lv' + id)) {
                 // 実測（2026-08-17）: 本文は meta だけで data は付かない
                 return jsonResponse({ meta: { status: 404, errorCode: 'NOT_FOUND', errorMessage: 'program not found' } })

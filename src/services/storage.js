@@ -110,7 +110,12 @@ export async function getOptions(defaultOptions = {}) {
             '[設定] 保存済みの設定を読めなかったため、このページでは既定値で動きます。'
             + '同時視聴者数・経過時間などの表示が出ないのはこのためです。ページを再読込すると直ります。'
         )
-        return defaultOptions
+        // ⚠️ **控えを返すこと。** 呼び出し元は戻り値を `options` として持ち回り、
+        //    `storage.onChanged` で書き換える（`options.showViewerCount = …`）。
+        //    渡された既定オブジェクトそのものを返すと、その書き換えが**呼び出し元の
+        //    `defaultOptions` を汚染する**。今は getOptions がページ1回だけなので実害は出ないが、
+        //    2回目の呼び出しが増えた瞬間に「既定のはずが前回の値」になる。
+        return { ...defaultOptions }
     }
 
     // 既定値の焼き付け。**読み取りとは別の try に置くこと。**

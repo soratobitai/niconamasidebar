@@ -913,9 +913,17 @@ async function windowedConcurrent() {
 
     // --- ⑩ 404 は警告しない（正常な答え）---
     const api = stripComments(readFileSync(new URL('../src/services/api.js', import.meta.url), 'utf8'))
-    check('CO ⑩ 番組が消えた（404）を警告にしない',
-        /!== 404\)[\s\S]{0,200}?handleError/.test(api),
+    // 🔴 **200 と 404 の両方を外していること。** 404 は予定どおりの答え（番組が終われば消える）。
+    //    200 は「status 200 なのに data が無い」応答で、`API returned status 200` という
+    //    意味のない警告が出る（2026-08-17 のレビューで発見。片方だけ外していた）。
+    check('CO ⑩ 番組が消えた（404）と中身なし(200)を警告にしない',
+        /metaStatus !== 200 && metaStatus !== 404/.test(api),
         '終了確認・サムネ追撃・穴埋めのどれも「まだ在るか」を聞く用途。404 は予定どおりの答え')
+    // 🔴 削除の引き金になる値の解釈は厳しく。`Number('404')` を通すと想定外の応答が
+    //    「終了の答え」に化けてカードを消す（消しすぎ ≫ 消し足りない）。
+    check('CO ⑩-3 meta.status は数値の時だけ採用する',
+        /Number\.isFinite\(rawStatus\)/.test(api),
+        '緩い変換にすると、文字列や想定外の値が 404 として扱われて番組が消える')
     // 🔴 404（APIの答え）と通信断（答えが無い）を**同じ値にしないこと**。混ぜると終了確認が
     //    「通信が切れただけの番組」を終了とみなして消す（doc/09 項目BF-2）。
     check('CO ⑩-2 通信断は 404 と別の値（metaStatus 0）で返す',
@@ -1884,6 +1892,27 @@ async function programEndConfirmation() {
     await run()
     check('BF-2⑪-2 🔴 疑いが2件なら、全員404でも消える（3件未満は「全員404」と見ない）',
         !has(850) && !has(851) && has(852), ids())
+
+    // ⑫ 🔴 **想定外の応答を「終了」と読まないこと**（2026-08-17 のレビューで足した）。
+    //    404 を削除の引き金にした以上、`meta.status` の解釈が緩いと想定外の応答で
+    //    **放送中の番組が消える**。数値の 404 だけを採用していることを実際に作って確かめる。
+    h.state.followPrograms = [prog(860, 60), prog(861, 40), prog(862, 10)]
+    h.state.notifyRows = [row(860), row(861), row(862)]
+    h.state.notFoundIds = new Set()
+    h.state.detailRawById = new Map()
+    await run()
+    check('BF-2⑫ 前提: 3番組が並ぶ', ids().split(',').length === 3, ids())
+    h.state.notifyRows = [row(862)]                  // 860 と 861 が疑いになる
+    h.state.detailRawById = new Map([
+        ['860', { meta: { status: '404' } }],        // 文字列の 404（想定外の形）
+        ['861', { meta: { status: 200 } }],          // 200 なのに data が無い
+    ])
+    await run()
+    check('BF-2⑫ 🔴 文字列の "404" は終了と読まない（数値だけ採用）',
+        has(860), ids() + '（緩い変換だと消える）')
+    check('BF-2⑫ 🔴 status 200 で data が無い応答も終了と読まない',
+        has(861), ids())
+    h.state.detailRawById = new Map()
     h.restore()
 }
 
@@ -3759,7 +3788,18 @@ async function concurrentEstimate() {
  */
 async function optionsSurviveWritebackFailure() {
     console.log('=== CZ 書き戻しが失敗しても設定を捨てないこと ===')
-    const saved = { chrome: globalThis.chrome }
+    const saved = { chrome: globalThis.chrome, document: globalThis.document }
+    // `<html>` の代わり。**実物の applyShow*() を通して印が付くところまで見る**ため。
+    // 設定値の比較だけで止めると、反映側の向きが逆になっても素通りする。
+    const htmlClasses = new Set()
+    globalThis.document = {
+        documentElement: {
+            classList: {
+                toggle: (name, on) => { if (on) htmlClasses.add(name); else htmlClasses.delete(name) },
+                contains: (name) => htmlClasses.has(name),
+            },
+        },
+    }
     const store = { showViewerCount: 'on', showElapsedTime: 'on', sidebarTheme: 'dark' }
     // 既定は「両方 OFF」。ここが実際の既定と同じであることが、この検査の意味そのもの。
     const defaults = { showViewerCount: 'off', showElapsedTime: 'off', sidebarTheme: 'light' }
@@ -3797,8 +3837,13 @@ async function optionsSurviveWritebackFailure() {
     }
     try {
         const { getOptions } = await import('../src/services/storage.js')
-        const { isViewerCountVisible } = await import('../src/ui/viewerCount.js')
-        const { isElapsedTimeVisible } = await import('../src/ui/elapsedTime.js')
+        const { isViewerCountVisible, applyShowViewerCount, SHOW_VIEWERS_CLASS } = await import('../src/ui/viewerCount.js')
+        const { isElapsedTimeVisible, applyShowElapsedTime, SHOW_ELAPSED_CLASS } = await import('../src/ui/elapsedTime.js')
+        // main.js / kickPage.js の reflectOptions がやっているのと同じ2行。
+        const reflect = (o) => {
+            applyShowViewerCount(o.showViewerCount)
+            applyShowElapsedTime(o.showElapsedTime)
+        }
 
         const ok = await getOptions(defaults)
         check('CZ 前提: 普通に読めれば保存値が返る',
@@ -3814,6 +3859,12 @@ async function optionsSurviveWritebackFailure() {
         check('CZ 🔴 その戻り値で「出す」と判定される',
             isViewerCountVisible(afterWriteFail.showViewerCount)
             && isElapsedTimeVisible(afterWriteFail.showElapsedTime))
+        // 🔴 症状そのもの（<html> に印が付くか）まで通す。ここが利用者の見ている場所。
+        htmlClasses.clear()
+        reflect(afterWriteFail)
+        check('CZ 🔴 その戻り値で <html> に両方の印が付く（＝画面に出る）',
+            htmlClasses.has(SHOW_VIEWERS_CLASS) && htmlClasses.has(SHOW_ELAPSED_CLASS),
+            `付いた印: ${[...htmlClasses].join(',') || '(無し)'}`)
         check('CZ 書き戻しが失敗しても他の設定も生きている',
             afterWriteFail.sidebarTheme === 'dark', afterWriteFail.sidebarTheme)
         setFails = false
@@ -3824,9 +3875,43 @@ async function optionsSurviveWritebackFailure() {
         check('CZ 🔴 読み取りが失敗した時は既定へ倒す（ここは従来どおり）',
             afterReadFail.showViewerCount === 'off' && afterReadFail.showElapsedTime === 'off',
             JSON.stringify(afterReadFail))
+        // 🔴 既定へ倒す時は**控えを返す**こと。呼び出し元は戻り値を options として持ち回り、
+        //    storage.onChanged で書き換えるので、既定オブジェクトそのものだと汚染される。
+        afterReadFail.showViewerCount = 'on'
+        check('CZ 🔴 既定へ倒した戻り値を書き換えても、渡した既定は汚れない',
+            defaults.showViewerCount === 'off', `defaults=${defaults.showViewerCount}`)
         getFails = false
+
+        // 🔴 **鎖の真ん中を縛る。** ここまでで「getOptions が正しい値を返す」と
+        //    「applyShow*() が印を付ける」は固定できたが、**その2つを繋ぐ
+        //    `applyShow*(options.showX)` の1行**はどこも見ていなかった。
+        //    実際に `main.js` を `applyShowElapsedTime("off")` へ壊しても全項目合格した
+        //    （2026-08-17 のレビューで発見）。利用者の症状そのものの形なのに素通りしていた。
+        //    ⚠️ **形を細かく縛らないこと。** 一度 `fn(<変数>.<設定名>)` に完全一致させる形で書いたが、
+        //       それだと `fn(changes.showElapsedTime.newValue)` のような**正当な書き方まで NG** になる。
+        //       捕まえたいのは「直書き」なので、見るのは次の2つだけにする:
+        //         ① どの呼び出しにもリテラルを渡していないこと（これが壊れ方そのもの）
+        //         ② 設定名のプロパティから採っている呼び出しが1つ以上あること（配線が在ること）
+        const { readFileSync } = await import('fs')
+        const rd = (f) => stripComments(readFileSync(new URL('../src/' + f, import.meta.url), 'utf8'))
+        for (const [page, file] of [['ニコ生', 'main.js'], ['kick.com', 'kickPage.js']]) {
+            const t = rd(file)
+            for (const fn of ['applyShowViewerCount', 'applyShowElapsedTime']) {
+                const key = fn.replace('apply', '')                       // ShowViewerCount
+                const prop = key.charAt(0).toLowerCase() + key.slice(1)   // showViewerCount / showElapsedTime
+                const all = (t.match(new RegExp(fn + '\\(', 'g')) || []).length
+                const literal = (t.match(new RegExp(fn + '\\(\\s*[\'"`]', 'g')) || []).length
+                const fromSetting = (t.match(new RegExp(fn + '\\([^)]*\\.' + prop, 'g')) || []).length
+                check(`CZ 🔴 ${page}の ${fn} に直書きの値を渡していない`,
+                    all >= 2 && literal === 0,
+                    `呼び出し ${all} 箇所 / 直書き ${literal} 箇所（1つでも混ざると、その設定はその経路で永久に効かない）`)
+                check(`CZ ${page}の ${fn} が .${prop} から値を採っている`,
+                    fromSetting >= 1, `${fromSetting} 箇所`)
+            }
+        }
     } finally {
         globalThis.chrome = saved.chrome
+        globalThis.document = saved.document
     }
 }
 
