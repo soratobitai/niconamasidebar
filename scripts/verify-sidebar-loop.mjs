@@ -5929,6 +5929,72 @@ async function overshiftProbeGroup() {
         kp.includes('項目DC') && readFileSync(new URL('../src/services/overshiftProbe.js', import.meta.url), 'utf8').includes('項目DC'))
 }
 
+/**
+ * 【一時的】DD 診断の検証。**原因が確定したら、このグループごと消す。**
+ *
+ * 🔴 追っているのは「ニコ生だけ落ちて据え置きが続く」形。**両方落ちた時は黙る**のが要件で、
+ *    そこを取り違えると、画面に案内が出ている場面でも二重に鳴る。
+ */
+async function nicoStaleProbeGroup() {
+    console.log('=== DD【一時】kick.com でニコ生だけ取得失敗が続く ===')
+    const { createNicoStaleState, noteNicoFetch } = await import('../src/services/nicoStaleProbe.js')
+    const { readFileSync } = await import('fs')
+
+    // 🔴 **時刻は渡す。**実装の Date.now() に依存させると、経過秒の検証ができない。
+    const T0 = 1_000_000
+
+    // --- ① 正常な時は黙る（毎周期鳴るものを配らない） ---
+    let s = createNicoStaleState()
+    check('DD 🔴 取得できている間は1行も出ない',
+        noteNicoFetch(s, { ok: true, now: T0, kickOk: true }) === null
+        && noteNicoFetch(s, { ok: true, now: T0 + 20000, kickOk: true }) === null)
+
+    // --- ② ニコ生だけ落ちたら、理由と据え置き件数を出す ---
+    s = createNicoStaleState()
+    const first = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0, staleCount: 7, kickOk: true })
+    check('DD 🔴 ニコ生だけ落ちたら1回目で鳴る（理由と据え置き件数つき）',
+        !!first && first.includes('unauthorized') && first.includes('7件'), String(first))
+
+    // --- ③ 毎周期は鳴らさない。長引いた時だけ途中経過 ---
+    let mid = null
+    for (let i = 2; i <= 9; i++) {
+        const line = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + i * 20000, staleCount: 7, kickOk: true })
+        if (line) mid = 'i=' + i + ' ' + line
+    }
+    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', mid === null, String(mid))
+    const tenth = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + 10 * 20000, staleCount: 7, kickOk: true })
+    check('DD 10周期目に途中経過を出す（経過秒つき）',
+        !!tenth && tenth.includes('200秒') && tenth.includes('10周期'), String(tenth))
+
+    // --- ④ 回復も出す。**これが無いと「いつまで続いたか」が分からない** ---
+    const back = noteNicoFetch(s, { ok: true, now: T0 + 11 * 20000, kickOk: true })
+    check('DD 🔴 回復した時に、続いた時間と周期数を出す',
+        !!back && back.includes('220秒') && back.includes('10周期'), String(back))
+    check('DD 回復後は状態が戻る（次の失敗がまた1回目として鳴る）',
+        noteNicoFetch(s, { ok: true, now: T0 + 12 * 20000 }) === null
+        && !!noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 13 * 20000, staleCount: 3, kickOk: true }))
+
+    // --- ⑤ 両方落ちている間は黙る（画面に案内が出ているので） ---
+    s = createNicoStaleState()
+    check('DD 🔴 Kick も落ちている間は黙る（案内が出ているので二重に言わない）',
+        noteNicoFetch(s, { ok: false, reason: 'network', now: T0, staleCount: 5, kickOk: false }) === null
+        && noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 20000, staleCount: 5, kickOk: false }) === null)
+    // 🔴 それでも**時計は動かす**。Kick が戻った時に「いつから落ちていたか」を正しく言えること。
+    const afterKickBack = noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 40000, staleCount: 5, kickOk: true })
+    check('DD 🔴 Kick が戻ったら、ニコ生が落ち始めた時刻から数える（黙っていた間も計測している）',
+        !!afterKickBack && afterKickBack.includes('40秒'), String(afterKickBack))
+
+    // --- ⑥ 撤去できる形か ---
+    const kp = readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8')
+    check('DD 🔴 呼び出しは1箇所だけ（撤去漏れを防ぐ）',
+        (kp.match(/noteNicoFetch\(/g) || []).length === 1)
+    check('DD 🔴 kickRes.ok を渡している（渡さないと両方失敗でも鳴る）',
+        /kickOk:\s*kickRes\.ok/.test(kp))
+    check('DD 🔴 撤去の目印が両方に入っている（doc/09 項目DD）',
+        kp.includes('項目DD')
+        && readFileSync(new URL('../src/services/nicoStaleProbe.js', import.meta.url), 'utf8').includes('項目DD'))
+}
+
 async function gridColumnFixGroup() {
     console.log('=== CA カードの列数を「使える幅」で決め直す ===')
     const { columnsOf, minWidthOf, pickColumns, planGridColumns, planFromMeasurement, collectColumnRules,
@@ -7261,6 +7327,7 @@ if (real) {
     await kickAutoNext()
     await fixedOverlayNudgeGroup()
     await overshiftProbeGroup()
+    await nicoStaleProbeGroup()
     await gridColumnFixGroup()
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()
