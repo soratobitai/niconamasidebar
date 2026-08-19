@@ -29,6 +29,8 @@ import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
 import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
+// 🔴 **一時的な診断（doc/09 項目DC）。原因が確定したら import ごと消すこと。**
+import { probeOvershift } from './services/overshiftProbe.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
 import { applyLiveStatistics } from './services/liveStatistics.js'
@@ -382,6 +384,11 @@ function startReconciler() {
         //    境界線のドラッグ中に pointermove のたびに走る。採取は 15 点の当たり判定なので
         //    1回は軽いが、毎フレームやる種類の処理ではない。ドラッグ後は次の周期で揃う。
         try { nudgeFixedOverlays(reservedWidth(), { pointerActive }) } catch (e) { /* 押せなくても本体は止めない */ }
+
+        // 🔴 **一時的な診断（doc/09 項目DC）。原因が確定したら、この2行を消すこと。**
+        //    レイドのモーダルで背景が帯の幅ぶん余計に右へ寄る件。出た時だけ1回 console に残す。
+        //    ⚠️ **押し出しの後に置くこと。** 前に置くと、まだ直っていない位置を見て毎回鳴る。
+        try { probeOvershift(reservedWidth()) } catch (e) { /* 診断で本体を止めない */ }
     }, RECONCILE_MS)
 }
 
