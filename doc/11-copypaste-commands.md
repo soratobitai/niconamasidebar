@@ -24,7 +24,24 @@
 
 ## 今のコマンド
 
-### 番組が終わる瞬間のフォローAPIを見張る（項目DD）
+### フォローAPI の `status` に何が使えるか（項目DD・**先にこちら**）
+
+**貼る場所: `https://live.nicovideo.jp/follow` のコンソール。** 10秒で終わる。放置不要。
+
+終了した番組の一覧が同じホストから取れれば、**kick.com に新しい権限を足さずに直せる。**
+
+```js
+(async()=>{const B='https://live.nicovideo.jp/front/api/pages/follow/v1/programs';for(const s of ['onair','ended','closed','past','end','finished','reserved','timeshift','all','']){const u=B+'?'+(s?'status='+s+'&':'')+'offset=0&limit=5';let out=s?s:'(status なし)';try{const r=await fetch(u,{credentials:'include',cache:'no-store'});let j=null;try{j=await r.json()}catch(e){}const ps=j&&j.data&&Array.isArray(j.data.programs)?j.data.programs:null;out+=' | HTTP '+r.status+' | meta '+(j&&j.meta?JSON.stringify(j.meta):'なし')+' | total '+(j&&j.data?j.data.total:'?')+' | 件数 '+(ps?ps.length:'programs無し');if(ps&&ps.length)out+=' | '+ps.map(p=>p.id+' '+p.liveCycle+' 開始'+new Date(p.beginAt).toLocaleTimeString()).join(' , ')}catch(e){out+=' | 例外 '+e.message}console.log(out)}console.log('=== ここまで ===')})()
+```
+
+出力を**まるごと**貼り返す。見るのは「`onair` 以外で 200 が返り、`liveCycle` が `ENDED` 等の
+番組が入っているものがあるか」。あれば `status=onair` との差分で終了が分かる。
+
+---
+
+### 番組が終わる瞬間のフォローAPIを見張る（項目DD・**済**）
+
+⚠️ **2026-08-19 に実施済み。結果は doc/09 項目DD の実測2。** 再実行は不要。
 
 **貼る場所: `https://live.nicovideo.jp/follow` のコンソール。**
 ⚠️ **番組視聴ページでは貼らないこと。** 自動移動でページが変わるとその時点で止まる。
