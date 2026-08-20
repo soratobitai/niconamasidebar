@@ -30,7 +30,6 @@ import { orderComparator } from './utils/programOrder.js'
 import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
 // 🔴 **一時的な診断（doc/09 項目DC）。原因が確定したら import ごと消すこと。**
-import { probeOvershift } from './services/overshiftProbe.js'
 // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら import ごと消すこと。**
 import { createNicoStaleState, noteNicoFetch } from './services/nicoStaleProbe.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
@@ -274,6 +273,34 @@ function applyShift() {
     if (body.style.marginLeft !== want.marginLeft) body.style.marginLeft = want.marginLeft
     if (body.style.width !== want.width) body.style.width = want.width
     if (body.style.minWidth !== want.minWidth) body.style.minWidth = want.minWidth
+
+    // 🔴 **body の `padding-left` を 0 で押さえる**（2026-08-20・doc/09 項目DC・利用者報告）。
+    //    Kick のモーダル（レイド・クリップ再生ほか全部）はスクロールを止める時、
+    //    `react-remove-scroll-bar` が **body の左端を測って、同じ値を左の余白へ書き戻す。**
+    //    向こうは同時に `margin-left: 0` も書くので、向こうだけなら差し引き 0 で位置が保たれる。
+    //    ところが**こちらの `margin-left` はインライン**なので、規則である向こうの `margin-left: 0`
+    //    に勝って残る。結果、**帯の幅が2つ効いて中身が 2×W まで押し出される。**
+    //
+    //    実測（doc/09 実測5・帯 674・画面 1920）:
+    //      body の枠 left=674・幅 1246 ／ 左の余白 674 → 中身は 1348 から、幅は 572 しか残らない
+    //
+    //    ⚠️ **`!important` で当てること。** インラインの `!important` は**スタイルシート側の
+    //       `!important` よりも強い。** 向こうが後の版で付けても効き続ける。
+    //    ⚠️ **常時当てること。** 向こうが書くのはモーダルが開いた瞬間。こちらが 500ms の
+    //       突き合わせで後追いすると、**開くたびに一瞬 2×W へ跳ねてから戻る。**
+    //    🔴 **触るのは左だけ。** 右と上の余白は本物のスクロールバー補正なので残す。
+    //       まとめて消すと、スクロールバーが消えるぶんのガタつきを向こうが直せなくなる。
+    //    ⚠️ 寄せていない時（連携off・重ねる設定）は外す。Kick 本来の余白を奪わない。
+    //    🔴 **条件は `want` から導くこと。** 別に書くと、寄せの条件を変えた時にここだけ取り残される。
+    const shifted = want.marginLeft !== ''
+    const pad = body.style.getPropertyValue('padding-left')
+    if (shifted) {
+        if (pad !== '0px' || body.style.getPropertyPriority('padding-left') !== 'important') {
+            body.style.setProperty('padding-left', '0px', 'important')
+        }
+    } else if (pad !== '') {
+        body.style.removeProperty('padding-left')
+    }
 }
 
 /**
@@ -389,10 +416,6 @@ function startReconciler() {
         //    1回は軽いが、毎フレームやる種類の処理ではない。ドラッグ後は次の周期で揃う。
         try { nudgeFixedOverlays(reservedWidth(), { pointerActive }) } catch (e) { /* 押せなくても本体は止めない */ }
 
-        // 🔴 **一時的な診断（doc/09 項目DC）。原因が確定したら、この2行を消すこと。**
-        //    レイドのモーダルで背景が帯の幅ぶん余計に右へ寄る件。出た時だけ1回 console に残す。
-        //    ⚠️ **押し出しの後に置くこと。** 前に置くと、まだ直っていない位置を見て毎回鳴る。
-        try { probeOvershift(reservedWidth()) } catch (e) { /* 診断で本体を止めない */ }
     }, RECONCILE_MS)
 }
 
