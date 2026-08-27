@@ -5745,6 +5745,158 @@ async function widthRewriteSelectorGroup() {
         !css.includes(':max-w-screen'))
 }
 
+/**
+ * 【一時的】DD 診断の検証。**原因が確定したら、このグループごと消す。**
+ *
+ * 🔴 2周目。1周目は「仮説の口」しか無く、**1行も出ないまま終わった**（doc/09 項目DD）。
+ *    今回は口が3つある。**3つとも独立に検証する**（1つが黙っても他が鳴ること）。
+ */
+async function nicoStaleProbeGroup() {
+    console.log('=== DD【一時】同じ配信者の新旧2番組／ニコ生だけ取得失敗 ===')
+    const { createNicoStaleState, noteNicoFetch, createDupOwnerState, noteDuplicateOwners, probeStartupLine } =
+        await import('../src/services/nicoStaleProbe.js')
+    const { readFileSync } = await import('fs')
+
+    // 🔴 **時刻は渡す。**実装の Date.now() に依存させると、経過秒の検証ができない。
+    const T0 = 1_000_000
+
+    // =====================================================================
+    // 口①（起動）: これが無いと沈黙が読めない
+    // =====================================================================
+    const startup = probeStartupLine()
+    check('DD 🔴 起動の1行が出る（沈黙を「症状なし」と読める根拠になる）',
+        typeof startup === 'string' && startup.includes('診断DD') && startup.length > 20, String(startup))
+
+    // =====================================================================
+    // 口②（本命・症状）: 同じ配信者の番組が2枚以上並んでいないか
+    // =====================================================================
+    const ent = (key, id, beginMs) => ({ key, id, beginMs })
+
+    // --- 正常な時は黙る ---
+    let d = createDupOwnerState()
+    check('DD 🔴 重複が無い間は1行も出ない',
+        noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null
+        && noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 + 20000 }) === null)
+    check('DD 空のリストでも落ちない・鳴らない',
+        noteDuplicateOwners(d, { entries: [], now: T0 }) === null
+        && noteDuplicateOwners(d, { entries: null, now: T0 }) === null)
+
+    // --- 同じ配信者が2枚 → 1回だけ鳴る ---
+    d = createDupOwnerState()
+    const dupEntries = [ent('nico:9', 'lv100', T0 - 3600000), ent('nico:9', 'lv200', T0 - 60000), ent('nico:2', 'lv2')]
+    const dupFirst = noteDuplicateOwners(d, { entries: dupEntries, now: T0, fresh: true })
+    check('DD 🔴 同じ配信者が2枚並んだら鳴る（配信者キーと番組IDつき）',
+        !!dupFirst && dupFirst.includes('nico:9') && dupFirst.includes('lv100') && dupFirst.includes('lv200'),
+        String(dupFirst))
+    check('DD 🔴 新旧が分かるよう経過分を出す（どちらが古いか）',
+        !!dupFirst && dupFirst.includes('60分') && dupFirst.includes('1分'), String(dupFirst))
+
+    // 🔴 **ここが1周目に欠けていた1ビット。** 仮説（据え置き）を殺せる唯一の材料。
+    check('DD 🔴 取得成功中の重複は「据え置きではない」と書く（仮説を殺せる）',
+        !!dupFirst && dupFirst.includes('据え置きではありません'), String(dupFirst))
+    let d2 = createDupOwnerState()
+    const staleDup = noteDuplicateOwners(d2, { entries: dupEntries, now: T0, fresh: false })
+    check('DD 🔴 据え置き中の重複はそう書く（fresh で文面が変わる）',
+        !!staleDup && staleDup.includes('据え置き中') && !staleDup.includes('据え置きではありません'), String(staleDup))
+
+    // --- 毎周期は鳴らさない ---
+    let dupMid = null
+    for (let i = 2; i <= 9; i++) {
+        const line = noteDuplicateOwners(d, { entries: dupEntries, now: T0 + i * 20000, fresh: true })
+        if (line) dupMid = 'i=' + i + ' ' + line
+    }
+    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', dupMid === null, String(dupMid))
+    const dupTenth = noteDuplicateOwners(d, { entries: dupEntries, now: T0 + 10 * 20000, fresh: true })
+    check('DD 10周期目に途中経過を出す（経過秒つき）',
+        !!dupTenth && dupTenth.includes('200秒') && dupTenth.includes('10周期'), String(dupTenth))
+
+    // --- 消えたら「解消」を出す。**いつ直ったかが分かると原因が絞れる** ---
+    const cleared = noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv200'), ent('nico:2', 'lv2')], now: T0 + 11 * 20000 })
+    check('DD 🔴 重複が消えたら解消を出す（続いた時間つき）',
+        !!cleared && cleared.includes('解消') && cleared.includes('220秒'), String(cleared))
+    check('DD 解消後は状態が戻る（また同じ配信者で重複したら鳴る）',
+        noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv200')], now: T0 + 12 * 20000 }) === null
+        && !!noteDuplicateOwners(d, { entries: dupEntries, now: T0 + 13 * 20000 }))
+
+    // --- 誤検知しない形か ---
+    d = createDupOwnerState()
+    check('DD 🔴 同じ番組IDが2回入っているのは重複としない（描画側の取り違えと区別する）',
+        noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv100'), ent('nico:9', 'lv100')], now: T0 }) === null)
+    check('DD 🔴 配信者キーを作れない番組は数えない（判定できないので黙る）',
+        noteDuplicateOwners(d, { entries: [ent('', 'lv1'), ent('', 'lv2')], now: T0 }) === null)
+    check('DD 別の配信者が2人いるだけでは鳴らない',
+        noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null)
+
+    // =====================================================================
+    // 口③（仮説）: ニコ生の取得だけ失敗して据え置きが続いていないか
+    // =====================================================================
+
+    // --- ① 正常な時は黙る（毎周期鳴るものを配らない） ---
+    let s = createNicoStaleState()
+    check('DD 🔴 取得できている間は1行も出ない',
+        noteNicoFetch(s, { ok: true, now: T0, kickOk: true }) === null
+        && noteNicoFetch(s, { ok: true, now: T0 + 20000, kickOk: true }) === null)
+
+    // --- ② ニコ生だけ落ちたら、理由と据え置き件数を出す ---
+    s = createNicoStaleState()
+    const first = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0, staleCount: 7, kickOk: true })
+    check('DD 🔴 ニコ生だけ落ちたら1回目で鳴る（理由と据え置き件数つき）',
+        !!first && first.includes('unauthorized') && first.includes('7件'), String(first))
+
+    // --- ③ 毎周期は鳴らさない。長引いた時だけ途中経過 ---
+    let mid = null
+    for (let i = 2; i <= 9; i++) {
+        const line = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + i * 20000, staleCount: 7, kickOk: true })
+        if (line) mid = 'i=' + i + ' ' + line
+    }
+    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', mid === null, String(mid))
+    const tenth = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + 10 * 20000, staleCount: 7, kickOk: true })
+    check('DD 10周期目に途中経過を出す（経過秒つき）',
+        !!tenth && tenth.includes('200秒') && tenth.includes('10周期'), String(tenth))
+
+    // --- ④ 回復も出す。**これが無いと「いつまで続いたか」が分からない** ---
+    const back = noteNicoFetch(s, { ok: true, now: T0 + 11 * 20000, kickOk: true })
+    check('DD 🔴 回復した時に、続いた時間と周期数を出す',
+        !!back && back.includes('220秒') && back.includes('10周期'), String(back))
+    check('DD 回復後は状態が戻る（次の失敗がまた1回目として鳴る）',
+        noteNicoFetch(s, { ok: true, now: T0 + 12 * 20000 }) === null
+        && !!noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 13 * 20000, staleCount: 3, kickOk: true }))
+
+    // --- ⑤ 両方落ちている間は黙る（画面に案内が出ているので） ---
+    s = createNicoStaleState()
+    check('DD 🔴 Kick も落ちている間は黙る（案内が出ているので二重に言わない）',
+        noteNicoFetch(s, { ok: false, reason: 'network', now: T0, staleCount: 5, kickOk: false }) === null
+        && noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 20000, staleCount: 5, kickOk: false }) === null)
+    // 🔴 それでも**時計は動かす**。Kick が戻った時に「いつから落ちていたか」を正しく言えること。
+    const afterKickBack = noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 40000, staleCount: 5, kickOk: true })
+    check('DD 🔴 Kick が戻ったら、ニコ生が落ち始めた時刻から数える（黙っていた間も計測している）',
+        !!afterKickBack && afterKickBack.includes('40秒'), String(afterKickBack))
+
+    // =====================================================================
+    // 撤去できる形か／両方の口が本当に繋がっているか
+    // =====================================================================
+    const kp = readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8')
+    check('DD 🔴 呼び出しは1箇所ずつ（撤去漏れを防ぐ）',
+        (kp.match(/noteNicoFetch\(/g) || []).length === 1
+        && (kp.match(/noteDuplicateOwners\(/g) || []).length === 1
+        && (kp.match(/probeStartupLine\(\)/g) || []).length === 1)
+    // 🔴 **1周目の失敗をここで縛る。** 症状の口を繋ぎ忘れたら、また何も取れずに終わる。
+    check('DD 🔴 症状の口（重複）が本当に繋がっている',
+        /noteDuplicateOwners\(dupOwnerState/.test(kp) && /ownerKeyOf\(/.test(kp))
+    check('DD 🔴 起動の1行が init で出る（載っているか分かるように）',
+        /console\.warn\(probeStartupLine\(\)\)/.test(kp))
+    check('DD 🔴 fresh に nicoRes.ok を渡している（据え置きかどうかを取り違えない）',
+        /fresh:\s*nicoRes\.ok/.test(kp))
+    check('DD 🔴 kickRes.ok を渡している（渡さないと両方失敗でも鳴る）',
+        /kickOk:\s*kickRes\.ok/.test(kp))
+    check('DD 🔴 撤去の目印が両方に入っている（doc/09 項目DD）',
+        kp.includes('項目DD')
+        && readFileSync(new URL('../src/services/nicoStaleProbe.js', import.meta.url), 'utf8').includes('項目DD'))
+    // ⚠️ **診断が載ったまま公開しないための綱。** version_name が目印。
+    check('DD 🔴 診断が載っている間は manifest に version_name の目印がある',
+        /"version_name":\s*"[^"]*diag-DD/.test(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8')))
+}
+
 async function gridColumnFixGroup() {
     console.log('=== CA カードの列数を「使える幅」で決め直す ===')
     const { columnsOf, minWidthOf, pickColumns, planGridColumns, planFromMeasurement, collectColumnRules,
@@ -7076,6 +7228,7 @@ if (real) {
     await autoNextTarget()
     await kickAutoNext()
     await fixedOverlayNudgeGroup()
+    await nicoStaleProbeGroup()
     await gridColumnFixGroup()
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()

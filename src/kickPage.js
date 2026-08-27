@@ -29,6 +29,8 @@ import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
 import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
+// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら import ごと消すこと。**
+import { createNicoStaleState, noteNicoFetch, createDupOwnerState, noteDuplicateOwners, probeStartupLine } from './services/nicoStaleProbe.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
 import { applyLiveStatistics } from './services/liveStatistics.js'
@@ -38,7 +40,7 @@ import { AppState } from './core/AppState.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { observeKickProgramEnd } from './services/kickStatus.js'
 import { consumeAutoNextHopMark, takeEndedByAutoNext } from './services/status.js'
-import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
+import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints, ownerKeyOf } from './services/watchHistory.js'
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
@@ -79,6 +81,9 @@ let lastKickPrograms = []
 let lastNicoPrograms = []
 // 更新中か。定期・ボタン・開閉・設定変更の4経路から呼ばれるので多重実行を防ぐ。
 let isRefreshing = false
+// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この2行を消すこと。**
+const nicoStaleState = createNicoStaleState()
+const dupOwnerState = createDupOwnerState()
 // document へ張るリスナーはサイドバーを差し込み直しても残るので、1度だけにする。
 let escKeyWired = false
 // ポインタのボタンが押されている間 true。**小窓を掴んで動かしている最中に押さない**ため
@@ -693,6 +698,28 @@ async function refreshProgramsInner(container) {
     //    ⚠️ ニコ生ページ側は `_endedConfirmed` に載せて同じことをしている。**片方だけにしないこと。**
     const nicoPrograms = dropEndedByAutoNext(nicoRes.ok ? nicoRes.programs : lastNicoPrograms)
 
+    // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この塊を消すこと。**
+    //    口①＝症状そのもの（同じ配信者が2枚）／口②＝仮説（据え置きが続いていないか）。
+    //    ⚠️ **2つとも呼ぶこと。** 1周目は口②だけで、仮説が外れた時に何も残らなかった。
+    //    ⚠️ **`kickRes.ok` を渡すこと。** 両方失敗なら画面に案内が出るので、そこでは騒がない。
+    try {
+        const dupLine = noteDuplicateOwners(dupOwnerState, {
+            entries: nicoPrograms.map((p) => ({
+                key: ownerKeyOf(p),
+                id: p && p.id,
+                beginMs: p && p.onAirTime && p.onAirTime.beginAt ? Date.parse(p.onAirTime.beginAt) : NaN,
+            })),
+            now: Date.now(),
+            fresh: nicoRes.ok,
+        })
+        if (dupLine) console.warn(dupLine)
+        const line = noteNicoFetch(nicoStaleState, {
+            ok: nicoRes.ok, reason: nicoRes.reason, now: Date.now(),
+            staleCount: lastNicoPrograms.length, kickOk: kickRes.ok,
+        })
+        if (line) console.warn(line)
+    } catch (e) { /* 診断で本体を止めない */ }
+
     // 両方ダメ＝未ログイン・権限なしの可能性。ニコ生ページと同じ場所に案内を出す。
     // ⚠️ **「片方でも失敗」に緩めないこと。** `#api_error` の中身はニコ生のログインリンクなので、
     //    ニコ生を使わない利用者の kick.com に**永久にニコ生のログイン誘導**が出ることになる。
@@ -976,6 +1003,9 @@ function teardown() {
 
 async function init() {
     if (!extensionAlive()) return
+    // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この1行を消すこと。**
+    //    🔴 起動を必ず1行出す。1周目はこれが無く、**沈黙を「症状が出ていない」と読めなかった。**
+    console.warn(probeStartupLine())
     options = await getOptionsFromStorage(defaultOptions)
     // 🔴 insertSidebar より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize)
