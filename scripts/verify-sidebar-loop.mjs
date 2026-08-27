@@ -4414,6 +4414,30 @@ async function kickSidebarMovesAsOnePiece() {
         wantCond.includes('isActive') && !wantCond.includes('isOpen'),
         `条件: ${wantCond} / isOpen で分岐すると、閉じた瞬間にページが 100vw へ戻ってハンドルの下へ潜り込む`)
 
+    // --- DC: モーダルが body へ書き戻す左の余白を押さえる（2026-08-20・利用者報告） ---
+    // 🔴 Kick のモーダルはスクロールを止める時、**body の左端を測って同じ値を左の余白へ書き戻す。**
+    //    向こうは同時に `margin-left: 0` も書くが、**こちらの margin はインラインなので勝って残る。**
+    //    結果、帯の幅が2つ効いて中身が 2×W まで押し出される（実測: 674 が 1348 に）。
+    // ⚠️ **関数の中身を取り出してから見る。** ファイル全体で見ると、別の場所に同じ字面があるだけで
+    //    通ってしまう。取り出しに失敗した時に黙って通らないよう、長さも見る（空振り防止）。
+    const shiftFn = (kpc.match(/function applyShift\(\)[\s\S]*?\n}/) || [])[0] || ''
+    check('DC 検査が applyShift() を取り出せている（空振り防止）',
+        shiftFn.length > 200 && shiftFn.includes('reservedWidth()'), `${shiftFn.length} 文字`)
+    check('DC body の左の余白を 0 で押さえている',
+        /setProperty\('padding-left',\s*'0px',\s*'important'\)/.test(shiftFn),
+        '向こうの規則に勝つにはインラインの !important が要る。無いと中身が 2×W まで押し出される')
+    check('DC 🔴 押さえる条件は寄せと同じものから導いている',
+        /want\.marginLeft !== ''/.test(shiftFn),
+        '別条件を書くと、寄せの条件を変えた時にここだけ取り残される')
+    check('DC 寄せていない時は外す（Kick 本来の余白を奪わない）',
+        /removeProperty\('padding-left'\)/.test(shiftFn),
+        '連携を切った後も 0 が残ると、Kick が自分で付けた左の余白を奪ったままになる')
+    // 🔴 右と上は**本物のスクロールバー補正**。奪うと、スクロールバーが消えるぶんの
+    //    ガタつきを向こうが直せなくなる。こちらが困っているのは左だけ。
+    check('DC 触るのは左だけ（スクロールバー補正は残す）',
+        !/padding-right|padding-top|padding-bottom|paddingRight|paddingTop/.test(kpc),
+        'kickPage.js が左以外の余白に触れている')
+
     // 🔴 **CSS 側で寄せ幅を計算し直さないこと。** JS が body に当てた数値を変数1本で受け取る。
     //    以前は CSS が `100vw - 幅 - 余白` と同じ計算をしており、開閉で式が変わった時点で
     //    2箇所を手で揃える約束が保てなくなった。
@@ -5719,280 +5743,6 @@ async function widthRewriteSelectorGroup() {
         bad.length === 0 && widthFamily.length >= 4, `悪い=${bad.join(' / ') || 'なし'} / 総数=${widthFamily.length}`)
     check('CB 🔴 ":max-w-screen" を足さない（lg:max-w-screen-md を拾ってしまう）',
         !css.includes(':max-w-screen'))
-}
-
-/**
- * 【一時的】DC 診断そのものの検証。**原因が確定したら、このグループごと消す。**
- *
- * 🔴 診断は「出ないこと」も仕事のうち。正常な形で黙ることを先に固定しないと、
- *    毎周期鳴り続けるものを利用者に配ることになる。
- */
-async function overshiftProbeGroup() {
-    console.log('=== DC【一時】レイド時の位置ずれ診断 ===')
-    const { probeOvershift, resetProbe, checkPlacement, containingBlockReasons,
-        RULE_INSET0_SELECTOR, RULE_CENTER_SELECTOR, PROBE_TOLERANCE_PX } =
-        await import('../src/services/overshiftProbe.js')
-    const { readFileSync } = await import('fs')
-
-    // 🔴 **期待値は実装の定数から作らない。**帯幅も画面幅もここに直接書く。
-    const R = 380
-    const VW = 1920
-
-    // --- ① 包含ブロックを作る条件。**transform だけではない** ---
-    check('DC transform / filter / backdrop-filter / perspective を基準として拾う',
-        containingBlockReasons({ transform: 'matrix(1,0,0,1,0,0)' }).length === 1
-        && containingBlockReasons({ filter: 'blur(2px)' }).length === 1
-        && containingBlockReasons({ backdropFilter: 'blur(8px)' }).length === 1
-        && containingBlockReasons({ perspective: '800px' }).length === 1)
-    check('DC 🔴 webkit 接頭辞つきの backdrop-filter も拾う（Kick は Tailwind の backdrop-blur）',
-        containingBlockReasons({ webkitBackdropFilter: 'blur(8px)' }).length === 1)
-    check('DC 🔴 will-change は予告だけで基準を作る（値が none でも該当）',
-        containingBlockReasons({ transform: 'none', willChange: 'transform' }).length === 1)
-    check('DC contain は paint/layout/strict/content だけ。size は基準を作らない',
-        containingBlockReasons({ contain: 'paint' }).length === 1
-        && containingBlockReasons({ contain: 'layout' }).length === 1
-        && containingBlockReasons({ contain: 'size' }).length === 0)
-    check('DC 🔴 何も無ければ空（"none" と空文字を理由に数えない）',
-        containingBlockReasons({ transform: 'none', filter: 'none', backdropFilter: '', contain: '', willChange: 'auto' }).length === 0
-        && containingBlockReasons(null).length === 0)
-
-    // --- ② 位置の判定。**二重ずれ（2×帯幅）で鳴り、正しい位置では黙る** ---
-    const rect = (left, width = 400) => ({ left, width })
-    check('DC 二重ずれ（左端 2×帯幅）で鳴る',
-        checkPlacement('inset0', { reserved: R, viewportWidth: VW, rect: rect(R * 2) }) !== null)
-    check('DC 🔴 正しい位置（左端＝帯幅）では黙る',
-        checkPlacement('inset0', { reserved: R, viewportWidth: VW, rect: rect(R) }) === null
-        && checkPlacement('body', { reserved: R, viewportWidth: VW, rect: rect(R) }) === null
-        && checkPlacement('nudged', { reserved: R, viewportWidth: VW, rect: rect(R) }) === null)
-    // 🔴 **許容幅は 8 と直接書く。`PROBE_TOLERANCE_PX` を import して組み立てないこと。**
-    //    実装から作ると、許容幅を 0 に変えても期待値が一緒に動いて**通ってしまう**
-    //    （2026-08-19 の変異検査で実際に素通りした。隣の BY グループに同じ赤字がある）。
-    check('DC 許容幅は 8px。ちょうどは黙り、超えたら鳴る（1px の揺れで鳴らせない）',
-        checkPlacement('inset0', { reserved: R, viewportWidth: VW, rect: rect(R + 8) }) === null
-        && checkPlacement('inset0', { reserved: R, viewportWidth: VW, rect: rect(R + 9) }) !== null
-        && checkPlacement('inset0', { reserved: R, viewportWidth: VW, rect: rect(R - 9) }) !== null
-        && PROBE_TOLERANCE_PX === 8, `公開値=${PROBE_TOLERANCE_PX}`)
-    // 中央寄せは**中心**で見る。左端で見ると幅が変わるたびに鳴る。
-    // 可視領域 [380,1920] の中心は 1150。幅 440 のモーダルの左端は 930。
-    check('DC 中央寄せは可視領域の中心にいれば黙る（左端ではなく中心で見ている）',
-        checkPlacement('center', { reserved: R, viewportWidth: VW, rect: { left: 930, width: 440 } }) === null)
-    check('DC 中央寄せが帯の半分ぶん右へずれたら鳴る',
-        checkPlacement('center', { reserved: R, viewportWidth: VW, rect: { left: 930 + R / 2, width: 440 } }) !== null)
-
-    // --- ③ CSS と文字列が揃っているか（片方だけ直すと診断が空振りする） ---
-    const css = readFileSync(new URL('../src/styles/kickPage.css', import.meta.url), 'utf8')
-    check('DC 🔴 診断のセレクタが kickPage.css と同一（ずれると当たらず、黙ったまま見逃す）',
-        css.includes(RULE_INSET0_SELECTOR) && css.includes(RULE_CENTER_SELECTOR),
-        `inset0=${css.includes(RULE_INSET0_SELECTOR)} center=${css.includes(RULE_CENTER_SELECTOR)}`)
-
-    // --- ④ 偽の DOM で通しで動かす ---
-    const mkNode = (o = {}) => {
-        const node = {
-            nodeType: 1, tagName: o.tag || 'DIV', id: o.id || '', className: o.cls || '',
-            style: { marginLeft: o.marginLeft || '', left: o.inlineLeft || '' },
-            children: [], parentElement: null,
-            _cs: {
-                position: o.pos || 'fixed', left: o.cssLeft || '0px',
-                transform: o.transform || 'none', filter: o.filter || 'none',
-                backdropFilter: o.backdropFilter || 'none', perspective: 'none',
-                contain: o.contain || '', willChange: o.willChange || 'auto',
-            },
-            _attrs: new Map(o.attrs || []),
-            getBoundingClientRect: () => ({ left: o.left ?? 0, top: o.top ?? 0, width: o.w ?? 800, height: o.h ?? 600 }),
-            hasAttribute(n) { return this._attrs.has(n) },
-            getAttribute(n) { return this._attrs.has(n) ? this._attrs.get(n) : null },
-            closest(sel) {
-                let cur = this
-                while (cur) { if (sel === '#' + cur.id) return cur; cur = cur.parentElement }
-                return null
-            },
-            // 🔴 **本物と同じ意味で判定すること。** 単なる部分一致にすると、
-            //    `~=`（単語一致）と `*=`（部分一致）の使い分けを検証できない。
-            matches(sel) {
-                const tokens = String(this.className).split(/\s+/).filter(Boolean)
-                if (sel === RULE_INSET0_SELECTOR) return tokens.includes('fixed') && tokens.includes('inset-0')
-                if (sel === RULE_CENTER_SELECTOR) return tokens.includes('fixed') && String(this.className).includes('left-[50%]')
-                return false
-            },
-        }
-        for (const c of o.children || []) { c.parentElement = node; node.children.push(c) }
-        return node
-    }
-    const mkEnv = (body, { hidden = false, fullscreen = null } = {}) => {
-        const nudgedNodes = []
-        const walk = (n) => { if (n.hasAttribute('data-nns-nudge')) nudgedNodes.push(n); for (const c of n.children) walk(c) }
-        walk(body)
-        return {
-            doc: { body, hidden, fullscreenElement: fullscreen, querySelectorAll: () => nudgedNodes },
-            win: { innerWidth: VW, getComputedStyle: (el) => el._cs, location: { pathname: '/test' } },
-        }
-    }
-    // 開始の知らせと、ずれの報告を分けて数える。
-    const capture = () => {
-        const lines = []
-        return {
-            lines,
-            log: (s) => lines.push(s),
-            notices: () => lines.filter((l) => l.includes('見張りを開始')),
-            reports: () => lines.filter((l) => l.includes('検出しました')),
-        }
-    }
-    const payloadOf = (cap) => {
-        const line = cap.reports()[0]
-        return line ? JSON.parse(line.slice(line.indexOf('\n') + 1)) : null
-    }
-
-    // ④-1 正常な形。**ここで鳴ったら診断は使い物にならない。**
-    resetProbe()
-    const cleanOverlay = mkNode({ cls: 'z-dialog fixed inset-0 bg-black/75', left: R, w: VW - R, h: 1080 })
-    const cleanBody = mkNode({ tag: 'BODY', pos: 'static', left: R, w: VW - R, h: 1080, children: [cleanOverlay] })
-    const c1 = capture()
-    const n1 = probeOvershift(R, { ...mkEnv(cleanBody), log: c1.log })
-    check('DC 🔴 正常な形ではずれを1件も出さない（毎周期鳴るものを配らない）',
-        n1 === 0 && c1.reports().length === 0, `件数=${n1} 報告=${c1.reports().length}`)
-    // 🔴 無音の結果を読めるようにする1行。これが無いと、レイドで何も出なかった時に
-    //    「ずれなかった」のか「診断が載っていなかった」のかが区別できない。
-    check('DC 🔴 見張り開始を1回だけ知らせる（無音の結果を読めるようにする）',
-        c1.notices().length === 1, `知らせ=${c1.notices().length}`)
-    const c1b = capture()
-    probeOvershift(R, { ...mkEnv(cleanBody), log: c1b.log })
-    probeOvershift(R, { ...mkEnv(cleanBody), log: c1b.log })
-    check('DC 🔴 開始の知らせは2回目以降 出さない（500ms ごとに流れない）',
-        c1b.lines.length === 0, `行=${c1b.lines.length}`)
-
-    // ④-2 入れ子。暗幕が backdrop-filter を持ち、中身がその子。中身は 2×帯幅 にいる。
-    resetProbe()
-    const inner = mkNode({ cls: 'z-dialog fixed inset-0 flex', left: R * 2, w: VW - R, h: 1080 })
-    const backdrop = mkNode({
-        cls: 'z-dialog fixed inset-0 bg-black/75 backdrop-blur-sm', backdropFilter: 'blur(8px)',
-        left: R, w: VW - R, h: 1080, children: [inner],
-    })
-    const body2 = mkNode({ tag: 'BODY', pos: 'static', left: R, w: VW - R, h: 1080, children: [backdrop] })
-    const c2 = capture()
-    const n2 = probeOvershift(R, { ...mkEnv(body2), log: c2.log })
-    const payload2 = payloadOf(c2)
-    const inner2 = payload2 && payload2.件.find((f) => f.el.cls.includes('flex'))
-    check('DC 🔴 入れ子の二重ずれを捕まえる（暗幕の中の要素が 2×帯幅）',
-        n2 >= 1 && !!inner2 && inner2.kind === 'inset0', `件数=${n2}`)
-    check('DC 🔴 基準を作っている祖先を名指しする（これが無いと直し方が決まらない）',
-        !!inner2 && inner2.containingBlock.length === 1
-        && inner2.containingBlock[0].cb.includes('backdrop-filter'),
-        inner2 ? JSON.stringify(inner2.containingBlock) : '(見つからず)')
-    check('DC ずれ量を記録する（帯幅ぶん右）',
-        !!inner2 && inner2.placement && inner2.placement.delta === R,
-        inner2 && inner2.placement ? `delta=${inner2.placement.delta}` : '(placement なし)')
-    check('DC 🔴 親（暗幕）は正しい位置なので、ずれとしては報告しない',
-        !!payload2 && !payload2.件.some((f) => f.placement && f.el.cls.includes('bg-black/75')))
-
-    // ④-3 同じ形は繰り返さない。定期実行から呼ばれるので、抑えないと 500ms ごとに流れる。
-    const c3 = capture()
-    const n3 = probeOvershift(R, { ...mkEnv(body2), log: c3.log })
-    check('DC 🔴 同じ形は2回目以降 出さない（500ms ごとに流れない）',
-        n3 === 0 && c3.lines.length === 0, `件数=${n3} 行=${c3.lines.length}`)
-
-    // ④-4 body 自体がずれた場合。固定要素ではなく寄せそのものが犯人のとき。
-    resetProbe()
-    const body4 = mkNode({ tag: 'BODY', pos: 'static', left: R * 2, w: VW - R, h: 1080 })
-    const c4 = capture()
-    probeOvershift(R, { ...mkEnv(body4), log: c4.log })
-    const payload4 = payloadOf(c4)
-    check('DC 🔴 body 自体のずれも見る（仮説が外れていた時に気付ける唯一の口）',
-        !!payload4 && payload4.件.some((f) => f.kind === 'body'))
-
-    // ④-5 降りる条件。重ねる設定・裏タブ・全画面では何もしない。
-    // 🔴 **開始の知らせも出さないこと。** 出すと、重ねる設定の利用者や裏タブでも console に残る。
-    for (const [label, reserved, opts] of [
-        ['重ねる設定（帯幅 0）', 0, {}],
-        ['裏タブ', R, { hidden: true }],
-        ['全画面', R, { fullscreen: {} }],
-    ]) {
-        resetProbe()
-        const c = capture()
-        const n = probeOvershift(reserved, { ...mkEnv(body2, opts), log: c.log })
-        check(`DC ${label}では何もしない（知らせも出さない）`,
-            n === 0 && c.lines.length === 0, `件数=${n} 行=${c.lines.length}`)
-    }
-
-    // ④-6 サイドバー自身は対象外。
-    resetProbe()
-    const sb = mkNode({ id: 'niconamasidebar-kick-root', cls: 'fixed inset-0', left: 0, w: 360, h: 1080 })
-    const body6 = mkNode({ tag: 'BODY', pos: 'static', left: R, w: VW - R, h: 1080, children: [sb] })
-    const c6 = capture()
-    check('DC サイドバー自身は見ない',
-        probeOvershift(R, { ...mkEnv(body6), log: c6.log }) === 0 && c6.reports().length === 0)
-
-    // --- ⑤ 撤去できる形になっているか（一時コードを残さないための縛り） ---
-    const kp = readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8')
-    check('DC 🔴 呼び出しは定期の突き合わせ1箇所だけ（撤去漏れを防ぐ）',
-        (kp.match(/probeOvershift\(/g) || []).length === 1)
-    check('DC 🔴 撤去の目印が両方に入っている（doc/09 項目DC）',
-        kp.includes('項目DC') && readFileSync(new URL('../src/services/overshiftProbe.js', import.meta.url), 'utf8').includes('項目DC'))
-}
-
-/**
- * 【一時的】DD 診断の検証。**原因が確定したら、このグループごと消す。**
- *
- * 🔴 追っているのは「ニコ生だけ落ちて据え置きが続く」形。**両方落ちた時は黙る**のが要件で、
- *    そこを取り違えると、画面に案内が出ている場面でも二重に鳴る。
- */
-async function nicoStaleProbeGroup() {
-    console.log('=== DD【一時】kick.com でニコ生だけ取得失敗が続く ===')
-    const { createNicoStaleState, noteNicoFetch } = await import('../src/services/nicoStaleProbe.js')
-    const { readFileSync } = await import('fs')
-
-    // 🔴 **時刻は渡す。**実装の Date.now() に依存させると、経過秒の検証ができない。
-    const T0 = 1_000_000
-
-    // --- ① 正常な時は黙る（毎周期鳴るものを配らない） ---
-    let s = createNicoStaleState()
-    check('DD 🔴 取得できている間は1行も出ない',
-        noteNicoFetch(s, { ok: true, now: T0, kickOk: true }) === null
-        && noteNicoFetch(s, { ok: true, now: T0 + 20000, kickOk: true }) === null)
-
-    // --- ② ニコ生だけ落ちたら、理由と据え置き件数を出す ---
-    s = createNicoStaleState()
-    const first = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0, staleCount: 7, kickOk: true })
-    check('DD 🔴 ニコ生だけ落ちたら1回目で鳴る（理由と据え置き件数つき）',
-        !!first && first.includes('unauthorized') && first.includes('7件'), String(first))
-
-    // --- ③ 毎周期は鳴らさない。長引いた時だけ途中経過 ---
-    let mid = null
-    for (let i = 2; i <= 9; i++) {
-        const line = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + i * 20000, staleCount: 7, kickOk: true })
-        if (line) mid = 'i=' + i + ' ' + line
-    }
-    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', mid === null, String(mid))
-    const tenth = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + 10 * 20000, staleCount: 7, kickOk: true })
-    check('DD 10周期目に途中経過を出す（経過秒つき）',
-        !!tenth && tenth.includes('200秒') && tenth.includes('10周期'), String(tenth))
-
-    // --- ④ 回復も出す。**これが無いと「いつまで続いたか」が分からない** ---
-    const back = noteNicoFetch(s, { ok: true, now: T0 + 11 * 20000, kickOk: true })
-    check('DD 🔴 回復した時に、続いた時間と周期数を出す',
-        !!back && back.includes('220秒') && back.includes('10周期'), String(back))
-    check('DD 回復後は状態が戻る（次の失敗がまた1回目として鳴る）',
-        noteNicoFetch(s, { ok: true, now: T0 + 12 * 20000 }) === null
-        && !!noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 13 * 20000, staleCount: 3, kickOk: true }))
-
-    // --- ⑤ 両方落ちている間は黙る（画面に案内が出ているので） ---
-    s = createNicoStaleState()
-    check('DD 🔴 Kick も落ちている間は黙る（案内が出ているので二重に言わない）',
-        noteNicoFetch(s, { ok: false, reason: 'network', now: T0, staleCount: 5, kickOk: false }) === null
-        && noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 20000, staleCount: 5, kickOk: false }) === null)
-    // 🔴 それでも**時計は動かす**。Kick が戻った時に「いつから落ちていたか」を正しく言えること。
-    const afterKickBack = noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 40000, staleCount: 5, kickOk: true })
-    check('DD 🔴 Kick が戻ったら、ニコ生が落ち始めた時刻から数える（黙っていた間も計測している）',
-        !!afterKickBack && afterKickBack.includes('40秒'), String(afterKickBack))
-
-    // --- ⑥ 撤去できる形か ---
-    const kp = readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8')
-    check('DD 🔴 呼び出しは1箇所だけ（撤去漏れを防ぐ）',
-        (kp.match(/noteNicoFetch\(/g) || []).length === 1)
-    check('DD 🔴 kickRes.ok を渡している（渡さないと両方失敗でも鳴る）',
-        /kickOk:\s*kickRes\.ok/.test(kp))
-    check('DD 🔴 撤去の目印が両方に入っている（doc/09 項目DD）',
-        kp.includes('項目DD')
-        && readFileSync(new URL('../src/services/nicoStaleProbe.js', import.meta.url), 'utf8').includes('項目DD'))
 }
 
 async function gridColumnFixGroup() {
@@ -7326,8 +7076,6 @@ if (real) {
     await autoNextTarget()
     await kickAutoNext()
     await fixedOverlayNudgeGroup()
-    await overshiftProbeGroup()
-    await nicoStaleProbeGroup()
     await gridColumnFixGroup()
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()
