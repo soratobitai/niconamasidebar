@@ -5819,13 +5819,14 @@ async function nicoStaleProbeGroup() {
         && !!noteDuplicateOwners(d, { entries: dupEntries, now: T0 + 13 * 20000 }))
 
     // --- 誤検知しない形か ---
-    d = createDupOwnerState()
+    // 🔴 **1件ずつ状態を作り直すこと。** 使い回すと、前の check が誤って重複を登録した時に
+    //    次の check が「解消」を受け取って落ちる＝**どれが本当の原因か読めなくなる**（変異検査で実際に起きた）。
     check('DD 🔴 同じ番組IDが2回入っているのは重複としない（描画側の取り違えと区別する）',
-        noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv100'), ent('nico:9', 'lv100')], now: T0 }) === null)
+        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('nico:9', 'lv100'), ent('nico:9', 'lv100')], now: T0 }) === null)
     check('DD 🔴 配信者キーを作れない番組は数えない（判定できないので黙る）',
-        noteDuplicateOwners(d, { entries: [ent('', 'lv1'), ent('', 'lv2')], now: T0 }) === null)
+        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('', 'lv1'), ent('', 'lv2')], now: T0 }) === null)
     check('DD 別の配信者が2人いるだけでは鳴らない',
-        noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null)
+        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null)
 
     // =====================================================================
     // 口③（仮説）: ニコ生の取得だけ失敗して据え置きが続いていないか
