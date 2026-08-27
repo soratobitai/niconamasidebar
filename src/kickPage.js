@@ -29,9 +29,6 @@ import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
 import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
-// 🔴 **一時的な診断（doc/09 項目DC）。原因が確定したら import ごと消すこと。**
-// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら import ごと消すこと。**
-import { createNicoStaleState, noteNicoFetch } from './services/nicoStaleProbe.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
 import { applyLiveStatistics } from './services/liveStatistics.js'
@@ -82,8 +79,6 @@ let lastKickPrograms = []
 let lastNicoPrograms = []
 // 更新中か。定期・ボタン・開閉・設定変更の4経路から呼ばれるので多重実行を防ぐ。
 let isRefreshing = false
-// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この1行を消すこと。**
-const nicoStaleState = createNicoStaleState()
 // document へ張るリスナーはサイドバーを差し込み直しても残るので、1度だけにする。
 let escKeyWired = false
 // ポインタのボタンが押されている間 true。**小窓を掴んで動かしている最中に押さない**ため
@@ -697,17 +692,6 @@ async function refreshProgramsInner(container) {
     //    フォローAPIはしばらくその番組を返し続けるので、外さないとカードが残る。
     //    ⚠️ ニコ生ページ側は `_endedConfirmed` に載せて同じことをしている。**片方だけにしないこと。**
     const nicoPrograms = dropEndedByAutoNext(nicoRes.ok ? nicoRes.programs : lastNicoPrograms)
-
-    // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この4行を消すこと。**
-    //    据え置きに期限が無く、ニコ生だけ落ちると黙って古いリストを出し続ける。
-    //    ⚠️ **`kickRes.ok` を渡すこと。** 両方失敗なら画面に案内が出るので、そこでは騒がない。
-    try {
-        const line = noteNicoFetch(nicoStaleState, {
-            ok: nicoRes.ok, reason: nicoRes.reason, now: Date.now(),
-            staleCount: lastNicoPrograms.length, kickOk: kickRes.ok,
-        })
-        if (line) console.warn(line)
-    } catch (e) { /* 診断で本体を止めない */ }
 
     // 両方ダメ＝未ログイン・権限なしの可能性。ニコ生ページと同じ場所に案内を出す。
     // ⚠️ **「片方でも失敗」に緩めないこと。** `#api_error` の中身はニコ生のログインリンクなので、
