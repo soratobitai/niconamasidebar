@@ -4423,6 +4423,17 @@ async function kickEndedProgramsGroup() {
     const sb = rdRaw('src/render/sidebar.js')
     check('DE 🔴 案内のマークアップの既定は hidden', /<div id="perm_notice" hidden>/.test(sb))
     check('DE 案内の文言', /アップデートで新しい許可が必要になりました/.test(sb) && /id="perm_notice_open"[^>]*>確認する</.test(sb))
+    // 吹き出しの部品は Kick連携のお知らせ（項目DA・1.21.1 で撤去）から引き継いで名前を付け替えた。
+    // マークアップと CSS で名前がずれると、見た目だけが黙って崩れる。
+    const noticeMarkup = (sb.match(/<div id="perm_notice" hidden>[\s\S]*?<\/div>\s*<\/div>/) || [''])[0]
+    const bubbleClasses = [...new Set([...noticeMarkup.matchAll(/class="(nns_bubble_\w+)"/g)].map((x) => x[1]))]
+    const mainCss = rdRaw('src/styles/main.css')
+    check('DE （空振り防止）案内の吹き出しのクラスを拾えている', bubbleClasses.length >= 5, bubbleClasses.join(', '))
+    check('DE 🔴 案内の吹き出しのクラスは全部 CSS にある（付け替えでずれていない）',
+        bubbleClasses.every((c) => mainCss.includes('.' + c + ' {') || mainCss.includes('.' + c + '::')),
+        bubbleClasses.filter((c) => !mainCss.includes('.' + c)).join(', ') || 'ok')
+    check('DE 撤去したお知らせ（#kick_intro）は残っていない',
+        !/kick_intro/.test(sb) && !/kick_intro/.test(mainCss))
     check('DE 🔴 ×で閉じる', /perm_notice_close[\s\S]{0,200}?dismissPermNotice\(\)/.test(kick))
     const openBlock = (kick.match(/permOpen\.addEventListener\([\s\S]*?\n {8}\}\)/) || [''])[0]
     check('DE （空振り防止）「確認する」のハンドラを取り出せている', openBlock.length > 40, `${openBlock.length} 文字`)
@@ -4444,88 +4455,6 @@ async function kickEndedProgramsGroup() {
     check('DE 🔴 ×は走っている読み直しを無効にする', /permNoticeGen\+\+/.test(dismissBody))
     check('DE 🔴 ニコ生ページには配線しない（足した origin はどれも kick.com 上の中継用）',
         !/perm_notice|PermNotice/.test(src('main.js')))
-}
-
-/**
- * DA: Kick連携のお知らせ（doc/09 項目DA）。
- *
- * 🔴 **この機能の失敗は「一度消したお知らせがまた出る」**で、利用者からは
- *    「消しても消えない拡張」に見える。よって**出す条件より、出さない条件のほうを厚く固定する。**
- */
-async function kickIntroNotice() {
-    console.log('=== DA Kick連携のお知らせ ===')
-    const { readFileSync } = await import('fs')
-    const rd = (f) => readFileSync(new URL('../src/' + f, import.meta.url), 'utf8')
-    const { shouldShowKickIntro, KICK_INTRO_KEY, readKickIntroDismissed, readKickGranted }
-        = await import('../src/ui/kickIntro.js')
-    const { optionKeys } = await import('../src/config/constants.js')
-
-    // ① 出す／出さないの表。**出すのは1通りだけ。**
-    check('DA 未読 かつ Kick 無効の時だけ出す',
-        shouldShowKickIntro({ dismissed: false, kickGranted: false }) === true)
-    check('DA 🔴 消した人には出さない',
-        shouldShowKickIntro({ dismissed: true, kickGranted: false }) === false)
-    check('DA 🔴 Kick を既に有効にしている人には出さない（知っている人に知らせない）',
-        shouldShowKickIntro({ dismissed: false, kickGranted: true }) === false)
-    check('DA 両方成立していても出さない',
-        shouldShowKickIntro({ dismissed: true, kickGranted: true }) === false)
-    // 🔴 undefined を「false（未読・未許可）」と読むと、読めなかった時に出てしまう。
-    check('DA 🔴 分からない値（undefined）では出さない',
-        shouldShowKickIntro({}) === false && shouldShowKickIntro(null) === false)
-
-    // ② 読めなかった時は「出さない側」へ倒れること。**実際に chrome を壊して確かめる。**
-    const savedChrome = globalThis.chrome
-    try {
-        globalThis.chrome = {
-            runtime: {
-                id: 'x',
-                get lastError() { return { message: 'boom' } },
-                sendMessage: (_m, cb) => cb(undefined),
-            },
-            storage: { local: { get: (_k, cb) => cb(undefined) } },
-        }
-        check('DA 🔴 storage が読めない時は「消した」扱い（＝出さない）',
-            (await readKickIntroDismissed()) === true)
-        check('DA 🔴 SW が答えない時は「Kick 有効」扱い（＝出さない）',
-            (await readKickGranted()) === true)
-        globalThis.chrome = undefined // 拡張が無効化された後
-        check('DA 拡張が無効化されていても投げない（出さない側へ倒れる）',
-            (await readKickIntroDismissed()) === true && (await readKickGranted()) === true)
-    } finally {
-        globalThis.chrome = savedChrome
-    }
-
-    // ③ 🔴 **保存キーを optionKeys に入れないこと。** 入れると getOptions が毎回書き戻し、
-    //    saveOptions の巻き添えも受ける。「キーが在る＝消した」という単純さが壊れる。
-    check('DA 🔴 保存キーは設定ではない（optionKeys に入れない）',
-        !optionKeys.includes(KICK_INTRO_KEY), `optionKeys に ${KICK_INTRO_KEY} が在る`)
-
-    // ④ 既定は出さない（配線が動かなかった時に勝手に出ない）。
-    const sb = rd('render/sidebar.js')
-    check('DA 🔴 マークアップの既定は hidden',
-        /<div id="kick_intro" hidden>/.test(sb),
-        '既定で出す形にすると、配線が壊れた時に「勝手に出る」側で壊れる')
-
-    // ⑤ 消える経路が3つとも在ること。1つでも欠けると「消えないお知らせ」になる。
-    const mn = stripComments(rd('main.js'))
-    check('DA 🔴 ×で消える', /kick_intro_close[\s\S]{0,300}?dismissKickIntro\(\)/.test(mn))
-    check('DA 🔴 案内の「設定を見る」で消える', /kick_intro_open[\s\S]{0,400}?dismissKickIntro\(\)/.test(mn))
-    check('DA 🔴 Kick を有効にしたら消える',
-        /setupOptionsHandler\([\s\S]{0,160}?dismissKickIntro\(\)/.test(mn),
-        '有効にしたのに「追加されました」が残るのは変')
-    check('DA 別タブで消したらこちらでも消える',
-        new RegExp('changes\\[KICK_INTRO_KEY\\]').test(mn))
-    // 🔴 歯車を普通に押しただけでは消さない（見落とした人に二度と出なくなる）。
-    const gearBlock = (mn.match(/optionsBtn\.addEventListener\([\s\S]{0,300}?\}\);/) || [''])[0]
-    check('DA （空振り防止）歯車のハンドラを取り出せている', gearBlock.length > 40, `${gearBlock.length} 文字`)
-    check('DA 🔴 歯車を押しただけでは消さない', !/dismissKickIntro/.test(gearBlock))
-
-    // ⑥ kick.com には出さない（**意図的な例外**。あちらは連携が有効な時しかサイドバーが出ない）。
-    //    ⚠️ 両ページへ配線する決まり（項目BN）の例外なので、逆向きに固定して
-    //       「写し漏れ」と誤解されないようにする。
-    check('DA 🔴 kick.com 側には配線しない（意図的な例外）',
-        !/kick_intro/.test(stripComments(rd('kickPage.js'))),
-        'kick.com のサイドバーは連携が有効な時しか出ない＝知らせる相手が居ない')
 }
 
 /**
@@ -7644,7 +7573,6 @@ if (real) {
     await autoUpdateOff()
     await optionsPersistScope()
     await optionsSurviveWritebackFailure()
-    await kickIntroNotice()
     await unwrapWrappedThumbnail()
     await concurrentEstimate()
     await serviceTabs()

@@ -562,20 +562,6 @@ export function setKickNotice(show) {
 }
 
 /**
- * Kick連携のお知らせの出し入れ（doc/09 項目DA）。**印を付けるだけ**で、判断はしない。
- *
- * 🔴 **出すかどうかを決めるのはここではない**（`ui/kickIntro.js` の `shouldShowKickIntro`）。
- *    「消したか」と「Kick が有効か」の2つを見る必要があり、どちらも非同期で読む。
- *    ここに条件を書くと、判断が描画のたびに走る場所へ散らばる。
- * @param {boolean} show
- */
-export function setKickIntroVisible(show) {
-    const el = document.getElementById('kick_intro')
-    if (!el) return
-    el.hidden = !show
-}
-
-/**
  * 追加の許可の案内の出し入れ（doc/09 項目DE）。**印を付けるだけ**で、判断はしない
  * （`ui/permNotice.js` の `shouldShowPermNotice`）。
  * @param {boolean} show
@@ -1481,32 +1467,17 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                             <img src='${optionsImageURL}' alt="オプション">
                                         </div>
                                     </div>
-                                    <!-- Kick連携のお知らせ（doc/09 項目DA）。設定アイコンの下に吹き出しで出す。
-                                         🔴 **既定は hidden。** 出すかどうかは ui/kickIntro.js が決める。
-                                            配線が動かなかった時に「勝手に出る」より「出ない」で壊れるほうがよい
-                                            （同時視聴者数・経過時間の印と同じ向き）。
-                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
-                                    <div id="kick_intro" hidden>
-                                        <div class="kick_intro_inner">
-                                            <div class="kick_intro_head">
-                                                <span class="kick_intro_title">Kick連携機能が追加されました</span>
-                                                <button type="button" id="kick_intro_close" class="kick_intro_close" title="今後表示しない" aria-label="今後表示しない">×</button>
-                                            </div>
-                                            <div class="kick_intro_body">Kick でフォロー中の配信も、このサイドバーに並べられます。</div>
-                                            <button type="button" id="kick_intro_open" class="kick_intro_open">設定を見る</button>
-                                        </div>
-                                    </div>
                                     <!-- 追加の許可の案内（doc/09 項目DE）。kick.com のサイドバーだけで使う。
-                                         見た目は上のお知らせと同じ部品。出すかどうかは ui/permNotice.js が決める。
+                                         見た目は吹き出しの部品（main.css の .nns_bubble_*）。出すかどうかは ui/permNotice.js が決める。
                                          🔴 **既定は hidden。** 配線が動かなかった時は「出ない」で壊れる。
                                          ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
                                     <div id="perm_notice" hidden>
-                                        <div class="kick_intro_inner">
-                                            <div class="kick_intro_head">
-                                                <span class="kick_intro_title">アップデートで新しい許可が必要になりました</span>
-                                                <button type="button" id="perm_notice_close" class="kick_intro_close" title="今後表示しない" aria-label="今後表示しない">×</button>
+                                        <div class="nns_bubble_inner">
+                                            <div class="nns_bubble_head">
+                                                <span class="nns_bubble_title">アップデートで新しい許可が必要になりました</span>
+                                                <button type="button" id="perm_notice_close" class="nns_bubble_close" title="今後表示しない" aria-label="今後表示しない">×</button>
                                             </div>
-                                            <button type="button" id="perm_notice_open" class="kick_intro_open">確認する</button>
+                                            <button type="button" id="perm_notice_open" class="nns_bubble_open">確認する</button>
                                         </div>
                                     </div>
                                 </div>
