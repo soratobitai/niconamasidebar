@@ -45,6 +45,7 @@ storage へ書き戻す**（`pickOptionKeys` で `optionKeys` のキーだけ）
 | ライト/ダーク | （設定画面**末尾**のセグメント） | `dark`/`light` | `sidebarTheme` | `'light'` | sidebar.js（`#optionForm` 末尾 `input[name="sidebarTheme"]`） | onChanged→`applyTheme` |
 | サムネ基準間隔（実質固定） | （UI/保存なし） | — | `updateThumbnailInterval`（既定に無し） | 20秒（定数。常設ループが更新完了後に置き直す基準間隔） | — | — |
 | **Kick 連携 ON/OFF** | （フォーム外・**拡張のオプションページ**） | — | **保存しない**（`chrome.permissions.contains()` が唯一の真実） | 無効 | options.html | `permissions.onAdded/onRemoved` → SW が各タブへ `kick:stateChanged` |
+| **追加の許可**（doc/09 項目DE） | （フォーム外・**拡張のオプションページ**の Kick 欄。連携が有効で、後から足した許可が足りない時だけ出る） | — | **保存しない**（同上） | — | options.html の「追加の許可について」＋［許可する］／kick.com のサイドバーの「アップデートで新しい許可が必要になりました」［確認する］［×］ | ［確認する］は設定ページを開くだけ（許可はそこでしか取れない）。［×］は `permNoticeDismissedOrigins`（`chrome.storage.local`・**optionKeys ではない**）に閉じた時点の origin を足す＝その origin では二度と出さない。許可されると `kick:stateChanged` で消える |
 | **番組表示方法** | `kickDisplayMode` | `mixed`(統合表示)/`tabs`(タブで分ける) | `kickDisplayMode` | `'mixed'` | sidebar.js（**Kick 有効時のみ表示**） | onChanged→`syncServiceTabs`（再描画せず CSS で出し分け） |
 | 選択中のタブ | `kickActiveTab` | `mixed`(統合)/`nicolive`/`kick` | `kickActiveTab` | `'nicolive'` | サイドバー上部のタブ（`tabs` の時だけ表示） | クリックで保存。一覧は `SERVICE_TABS`（sidebar.js）が唯一の定義 |
 | **カードの大きさ** | `cardSize` | `small`/`medium`/`large` | `cardSize` | `'medium'` | sidebar.js（番組カードの設定の中） | onChanged→`setCardSize`＋`setProgramContainerWidth`（取得はしない） |

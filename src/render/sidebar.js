@@ -575,6 +575,17 @@ export function setKickIntroVisible(show) {
     el.hidden = !show
 }
 
+/**
+ * 追加の許可の案内の出し入れ（doc/09 項目DE）。**印を付けるだけ**で、判断はしない
+ * （`ui/permNotice.js` の `shouldShowPermNotice`）。
+ * @param {boolean} show
+ */
+export function setPermNoticeVisible(show) {
+    const el = document.getElementById('perm_notice')
+    if (!el) return
+    el.hidden = !show
+}
+
 export function syncServiceTabs(container, mode, activeTab) {
     const tabs = document.getElementById('serviceTabs')
     if (!container) return 0
@@ -1483,6 +1494,19 @@ export function buildSidebarShell({ reloadImageURL, optionsImageURL }) {
                                             </div>
                                             <div class="kick_intro_body">Kick でフォロー中の配信も、このサイドバーに並べられます。</div>
                                             <button type="button" id="kick_intro_open" class="kick_intro_open">設定を見る</button>
+                                        </div>
+                                    </div>
+                                    <!-- 追加の許可の案内（doc/09 項目DE）。kick.com のサイドバーだけで使う。
+                                         見た目は上のお知らせと同じ部品。出すかどうかは ui/permNotice.js が決める。
+                                         🔴 **既定は hidden。** 配線が動かなかった時は「出ない」で壊れる。
+                                         ⚠️ ここはテンプレートリテラルの中。バックティックを書かないこと。 -->
+                                    <div id="perm_notice" hidden>
+                                        <div class="kick_intro_inner">
+                                            <div class="kick_intro_head">
+                                                <span class="kick_intro_title">アップデートで新しい許可が必要になりました</span>
+                                                <button type="button" id="perm_notice_close" class="kick_intro_close" title="今後表示しない" aria-label="今後表示しない">×</button>
+                                            </div>
+                                            <button type="button" id="perm_notice_open" class="kick_intro_open">確認する</button>
                                         </div>
                                     </div>
                                 </div>

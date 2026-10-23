@@ -153,6 +153,45 @@ h1 {
     color: var(--ng);
 }
 
+/* 追加の許可（doc/09 項目DE）。接続テストと同じインデントで、囲って目に留まるようにする。 */
+.extra {
+    margin: 14px 0 0 28px;
+    padding: 12px 14px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+}
+
+.extra[hidden] {
+    display: none;
+}
+
+.extra-title {
+    margin: 0;
+    font-weight: 600;
+}
+
+.extra-desc {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.extra button {
+    margin-top: 10px;
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 14px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+}
+
+.extra button:hover {
+    filter: brightness(1.1);
+}
+
 .note {
     margin: 14px 0 0;
     font-size: 13px;

@@ -66,11 +66,39 @@
 |------|-----------|------|
 | `fetchLivePrograms` | `(rows=100) => Promise<false \| Array>` | `notifyboxAPI?rows=100` を `credentials:'include'` で取得。`meta.status===200` かつ `data.notifybox_content` があれば**その配列を返す**。失敗時 `false`。`liveProgramsInFlight`(Map) で `rows` をキーに重複排除 |
 | `fetchProgramInfo` | `(liveId) => Promise<any \| undefined>` | 1番組の**詳細**を `liveInfoAPI/lv{liveId}`（`lv` 無しのID）で取得。`meta.status===200` かつ `data` があれば `data` を返す。失敗時 `undefined`。`programInfoInFlight`(Map) で `liveId` をキーに重複排除。⚠️ **用途限定**：フォローAPIがライブサムネを返さない番組の補完（[followPageSource.js](#servicesfollowpagesourcejs-) の `fillMissingDetails`）だけが呼ぶ。全番組には叩かない |
+| `fetchProgramInfoWithStatus` | `(liveId) => Promise<{data, metaStatus}>` | 終了確認専用の入口。**404（番組が無い）と 0（答えが得られない）を区別する**ために応答 JSON の `meta.status` を返す。`fetchProgramInfo` と in-flight を共有 |
+| `interpretProgramInfoResponse` | `(json) => {data, metaStatus}` | **詳細APIの応答の読み方（両ページ共通の1関数）。**`meta.status` が数値でなければ 0、200 でも `data` が無ければ `data: undefined`。ニコ生ページは自分で叩いた応答を、kick.com は SW が中継した応答（`nico:programInfo`）を、どちらもここで読む（doc/09 項目DE）。🔴 各ページで読み方を書かないこと |
 | `mapNotifyboxRowToInfo` | `(row, beginAtIso) => object \| null` | notifybox の1行を内部 programInfo 形へ写像（`_mergeSources` が新着番組に使う）。**notifybox は id と title だけではない**: `community_name`（＝配信者名）と `thumbnail_url`（＝配信者アイコン）と `provider_type` を持つ。⚠️ アイコンは `contentOwner.icon` に入れ、**`thumbnailUrl` には入れない**（ライブサムネ誤登録＝項目AA の再発）。配信者IDはアイコンURL（`…/usericon/…/<id>.jpg` / `…/channel-icon/…/ch<id>.jpg`）から復元する |
 | （内部）`warnIfNotifyboxShapeChanged` | — | notifybox の応答から `community_name`/`thumbnail_url` が消えていたら**1回だけ** `console.warn`（鳴る罠）。正常時は無言。名前とアイコンが黙って消える壊れ方はエラーが出ないので、ここでしか気付けない |
 
 - 失敗は `handleError` に記録し、例外は投げず false / undefined を返す方針。
 - 番組**詳細を一括取得**する経路（並びと突き合わせる本流）はフロントAPI方式（[followPageSource.js](#servicesfollowpagesourcejs-)）。`fetchProgramInfo` はそこから漏れた「ライブサムネが空の番組」だけを埋める補助であり、旧「全番組×詳細API」ではない。
+
+---
+
+## services/endedPrograms.js ★
+
+**終了した番組をリストから外す判断。ニコ生ページ（`UpdateManager._dropEndedPrograms`）と kick.com（`refreshProgramsInner`）が同じものを使う**（doc/09 項目BF-2・DE）。
+2026-09-23 まではニコ生ページにしか無く、kick.com では終わった番組がフォローAPIの手放すまで（実測 40〜240秒）残っていた。
+
+| エクスポート | 説明 |
+|-------------|------|
+| `EndedProgramFilter` | `new EndedProgramFilter({ fetchStatus })`。`fetchStatus(liveId)` は **lv を外した数字**を受けて `{data, metaStatus}` を返す（throw しない）。ニコ生ページは `fetchProgramInfoWithStatus`、kick.com は SW 経由の `fetchProgramInfoViaSw` を渡す |
+| `.apply(programs, notifyList, isKnownEnded?)` | notifybox（`notifyList`）に居ない番組だけ詳細APIに聞き、`ended`／404 と**確認できた**番組を除いて返す。`notifyList` が `false`（失敗・kick.com で権限なし）の周期は**新たに聞かない**（確認済みの番組は外したまま）。1周期の問い合わせは `endCheckMaxPerCycle` 件まで。疑いが**全員404**（3件以上）の周期は1件も消さない。`isKnownEnded` は自動移動で離れた番組（聞かずに外す・鳴る罠の対象外） |
+| `.confirmed` | 詳細APIが終了と答えた番組id の Set。notifybox に戻ってきたら印を落として1回だけ警告（鳴る罠） |
+
+---
+
+## services/newPrograms.js ★
+
+**新しく始まった番組を早く出す部品。ニコ生ページ（`UpdateManager` の `_mergeSources` / `_seedNewProgramsToStorage` /
+`_fetchLiveThumbIfPendingYoung`。名前だけ残した入口）と kick.com（`refreshProgramsInner` とサムネの周期）が同じものを使う**（doc/09 項目DF）。
+
+| エクスポート | 説明 |
+|-------------|------|
+| `mergeProgramSources(notifyList, fetched, getStored)` | notifybox とフォローAPIの和集合。優先順位は「フォローAPI ＞ storage の前回値 ＞ notifybox の最小レコード（`mapNotifyboxRowToInfo`・名前とアイコンつき）」。`notifyList` が `false` なら `fetched` をそのまま返し、storage も読まない |
+| `seedNewProgramsToStorage(programs)` | `_source==='notifybox'` の最小レコードだけ storage に upsert（追撃の前提・次の周期から前回値として拾われる） |
+| `chaseLiveThumbIfYoung(id, fetchDetail)` | storage のレコードが「user・非会員・サムネ空・開始から `newProgramFastPollMs`（3分）以内」の時だけ `fetchDetail(id)`（詳細APIの `data`）を呼び、ライブスクショ形の URL なら `patchProgramThumbnail` で書き戻す。書き換えたら true。ニコ生ページは `fetchProgramInfo`、kick.com は SW 経由を渡す |
 
 ---
 

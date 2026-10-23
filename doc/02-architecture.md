@@ -159,13 +159,16 @@
 | モジュール | 責務 | 主なエクスポート |
 |-----------|------|----------------|
 | `main.js` | エントリ①。ニコ生の視聴ページ。初期化・イベント配線・各層への委譲・UI状態ブリッジ | （エントリのため export なし） |
-| `kickPage.js` | **エントリ②。kick.com 用**（動的登録）。サイドバーを `<html>` 直下へ差し込み、両サービスの番組を描画。ニコ生固有の機能（自動移動・番組終了検知・notifybox・動くサムネ）は持たない | （エントリのため export なし） |
+| `kickPage.js` | **エントリ②。kick.com 用**（動的登録）。サイドバーを `<html>` 直下へ差し込み、両サービスの番組を描画。ニコ生の取得（フォローAPI・notifybox・詳細API）は SW 経由。**ニコ生のリストの作り方（和集合・新着の種蒔き・ライブサムネの追撃・終了確認）はニコ生ページと同じ部品**（`services/newPrograms.js`・`services/endedPrograms.js`。doc/09 項目DE・DF） | （エントリのため export なし） |
+| `services/newPrograms.js` | **新しく始まった番組を早く出す（両ページ共通）。**notifybox とフォローAPIの和集合・新着の最小レコードの種蒔き・若い番組のライブサムネ追撃（doc/09 項目AD・AT・AZ・DF）。詳細APIの聞き方だけを受け取る | `mergeProgramSources`, `seedNewProgramsToStorage`, `chaseLiveThumbIfYoung` |
+| `services/endedPrograms.js` | **終了した番組を外す判断（両ページ共通）。**notifybox に居ない番組だけ詳細APIに聞き、`ended`／404 と確認できた番組を落とす（doc/09 項目BF-2・DE）。詳細APIの聞き方だけを受け取る | `EndedProgramFilter` |
+| `ui/permNotice.js` | kick.com のサイドバーの「アップデートで新しい許可が必要になりました」の判断・読み書き（doc/09 項目DE） | `shouldShowPermNotice`, `readMissingPermissions`, `readPermNoticeDismissed`, `savePermNoticeDismissed`, `PERM_NOTICE_KEY` |
 | `services/kickSource.js` | Kick の取得（SW へ依頼）と programInfo への写像、同接の平滑化。**`viewer_count` は同接なので `viewers` に入れない**（`concurrentViewers`）。`start_time` は UTC なので `+'Z'` を付けてパースする | `fetchKickPrograms`, `mapKickLivestreamToInfo`, `parseKickTimeToIso`（デバッグ用に `window.__testKickFetch` を配線） |
-| `static/sw.js` 📦 | Service Worker。**バンドルされない。**cookie 読み出し・Kick API とニコ生APIの中継・kick.com への動的登録／解除・権限変化の全タブ通知 | （`chrome.runtime.onMessage` で `kick:fetch` / `nico:followed` / `kick:status` / `kick:openOptions`） |
-| `static/options.js` 📦 | 拡張のオプションページ。**バンドルされない。**Kick 連携の ON/OFF（`chrome.permissions.request/remove`）と接続テスト | — |
+| `static/sw.js` 📦 | Service Worker。**バンドルされない。**cookie 読み出し・Kick API とニコ生APIの中継・kick.com への動的登録／解除・権限変化の全タブ通知 | （`chrome.runtime.onMessage` で `kick:fetch` / `nico:followed` / `nico:statistics` / `nico:notifybox` / `nico:programInfo` / `kick:status` / `kick:extraPermissions` / `kick:openOptions`。一覧は doc/05 の 6-3） |
+| `static/options.js` 📦 | 拡張のオプションページ。**バンドルされない。**Kick 連携の ON/OFF（`chrome.permissions.request/remove`）・後から足した許可の「追加の許可」（doc/09 項目DE）・接続テスト | — |
 | `config/constants.js` | エンドポイントURL・各種間隔/上限などの定数 | `notifyboxAPI`, `liveInfoAPI`（サムネ補完専用）, `watchPageBaseUrl`, `sidebarMinWidth`, `maxSaveProgramInfos`, `updateThumbnailInterval`, `thumbnail*`, `animatedThumbnail*`, `loadingSessionTimeoutMs` |
 | `core/AppState.js` | 全グローバル状態の集約と一括クリーンアップ | `class AppState` |
-| `services/api.js` | notifybox API の fetch（放送中番組リスト）＋番組詳細API の fetch（サムネ補完専用。ともに in-flight 重複排除つき） | `fetchLivePrograms`, `fetchProgramInfo` |
+| `services/api.js` | notifybox API の fetch（放送中番組リスト）＋番組詳細API の fetch（サムネ補完・終了確認。ともに in-flight 重複排除つき）＋**詳細APIの応答の読み方（両ページ共通）** | `fetchLivePrograms`, `fetchProgramInfo`, `fetchProgramInfoWithStatus`, `interpretProgramInfoResponse` |
 | `services/followPageSource.js` | フォロー中ページの公開フロントJSON API（`follow/v1/programs?status=onair`）をページングして全件取得し、放送中フォロー番組の詳細を内部 programInfo 形の配列で返す。ライブサムネが空の番組だけ詳細APIで選択的補完 | `fetchFollowedProgramsViaPage`, `mapApiProgramToInfo`（デバッグ用に `window.__testFollowScrape` を配線） |
 | `services/status.js` | watch ページの「番組終了ガイド」検知 | `observeProgramEnd` |
 | `services/storage.js` | `chrome.storage.local`（設定）と `localStorage`（番組キャッシュ）の読み書き | `getOptions`, `saveOptions`, `setIsOpenSidebar`, `setSidebarWidth`, `setSidebarTheme`, `getProgramInfos`, `upsertProgramInfo`, `upsertProgramInfos`（詳細API取得の全件を一括書き戻し。`setProgramInfos` は内部専用・未export） |

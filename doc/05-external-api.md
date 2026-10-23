@@ -272,6 +272,10 @@ div.program_container[id=<数値ID>, active-point=<推定同接>, data-begin-at=
 |---|---|
 | `kick:fetch` | 上記 6-1 を叩いて**生の JSON** を返す。写像は `kickSource.js` の仕事 |
 | `nico:followed` | **kick.com 上でニコ生の番組も出すため**の中継。`https://live.nicovideo.jp/front/api/pages/follow/v1/programs` を叩いて生の配列を返す。ニコ生の視聴ページでは同一オリジンなので通さない |
+| `nico:statistics` | kick.com 上で来場者数を早く取るための live2 の中継（doc/09 項目CT）。`lv` 番号だけ受け取る |
+| `nico:notifybox` | **kick.com 上で終わった番組を外すため**の中継（doc/09 項目DE）。notifybox を `rows=100`・cookie つきで叩き、`notifybox_content` の生配列を返す。終了確認の「疑い」を立てる材料 |
+| `nico:programInfo` | 同上。番組詳細API（`api.cas.nicovideo.jp/v1/services/live/programs/lv{番号}`）を1件叩いて**応答本文をそのまま**返す。🔴 **SW では読まない**（404 の読み方は `api.js` の `interpretProgramInfoResponse` の1箇所）。受け取るのは**数字だけ**で URL は SW が組む |
+| `kick:extraPermissions` | 後から足した origin（`EXTRA_ORIGINS`）のうち、まだ許可されていないものを返す。**Kick 連携が無効なら空**。サイドバーの「新しい許可」の案内が使う（doc/09 項目DE） |
 | `kick:status` | 権限の有無を返す |
 | `kick:openOptions` | オプションページを開く（コンテンツスクリプトからは `openOptionsPage()` を呼べない） |
 | `kick:stateChanged` | **SW から各タブへの通知**。権限が外れた時に Kick のカードを即座に消すため |
@@ -304,15 +308,36 @@ Rollup が分岐ごと畳んで `main.js` からは消える（＝従来の経�
 
 ```json
 "optional_permissions": ["cookies", "scripting"],
-"optional_host_permissions": ["https://kick.com/*", "https://live.nicovideo.jp/*"]
+"optional_host_permissions": [
+    "https://kick.com/*", "https://live.nicovideo.jp/*", "https://live2.nicovideo.jp/*",
+    "https://papi.live.nicovideo.jp/*", "https://api.cas.nicovideo.jp/*",
+    "https://*.dlive.nicovideo.jp/*", "https://images.kick.com/*"
+]
 ```
 
 - `cookies` … `session_token` を読む
 - `scripting` … kick.com へサイドバーを**動的登録**する
 - `live.nicovideo.jp/*` … kick.com 上でニコ生の番組を出すための中継
+- `*.dlive.nicovideo.jp/*` / `images.kick.com/*` … kick.com 上の動くサムネ用の画像中継
+- `live2.nicovideo.jp/*` … kick.com 上の来場者数（doc/09 項目CT）
+- `papi.live.nicovideo.jp/*` / `api.cas.nicovideo.jp/*` … kick.com 上の終了確認（doc/09 項目DE）
 
-🔴 **`sw.js` と `static/options.js` の `KICK_PERMISSIONS` は必ず一致させること。**
-`static/` はバンドルされないので import で共有できず、二重管理になっている。
+**集合は2つに分けてある。**
+
+| 集合 | 中身 | 使い道 |
+|---|---|---|
+| `KICK_PERMISSIONS` | `cookies` `scripting` と、最初からある4 origin | **確認（`contains`）と削除**。「Kick 連携が有効か」の唯一の判定 |
+| `EXTRA_ORIGINS` | live2・papi・api.cas（後から足した origin） | 確認は1つずつ別に行う。無くても kick.com は従来どおり動く |
+| `KICK_REQUEST_PERMISSIONS` | 上の2つを合わせたもの | **要求（`request`）だけ**に使う |
+
+🔴 **後から足す origin を `KICK_PERMISSIONS` に入れないこと。** `contains` は丸ごと照合するので、
+**既に許可済みの Kick 利用者が全員「未許可」になって連携ごと止まる。** `EXTRA_ORIGINS` に足す。
+🔴 **`EXTRA_ORIGINS` に足した origin は、既に連携を有効にしている利用者には付かない。**
+ON にし直すまで Chrome は聞かないので、kick.com のサイドバーに「アップデートで新しい許可が
+必要になりました」を出し、設定ページの「追加の許可」でまとめて聞く（doc/09 項目DE）。
+
+🔴 **`sw.js` と `static/options.js` の集合（`KICK_PERMISSIONS` / `EXTRA_ORIGINS`）は必ず一致させること。**
+`static/` はバンドルされないので import で共有できず、二重管理になっている（検査 CT・DE が突き合わせる）。
 
 ### 6-5. その他の実測事実
 
