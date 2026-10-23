@@ -23,24 +23,26 @@
 
 import './styles/main.css'
 import './styles/kickPage.css'
-import { watchTargetIdOf, buildSidebarShell, startElapsedTicker, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, syncServiceTabs, setKickNotice, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
+import { watchTargetIdOf, buildSidebarShell, startElapsedTicker, makeProgramElement, applyRankAttributes, applyProgramInfoToCard, syncServiceTabs, setKickNotice, setPermNoticeVisible, setNicoNotice, NICO_NOTICE_NONE, NICO_NOTICE_AUTH, NICO_NOTICE_UNREACHABLE, setupServiceTabHandlers, updateThumbnailsFromStorage, setAnimThumbnailFeed, setThumbnailImageProxy, flipReorder, reapplyRankAttributes, releaseThumbnailBlobs, cardIdOf, setReloadButtonLoading, shouldOpenSidebarAtStart, autoUpdateIntervalMs } from './render/sidebar.js'
 import { setAnimatedThumbnailEnabled, teardownAnimatedThumbnails, ingestAnimatedThumbnailFrame, isAnimatedThumbnailEnabled } from './render/animatedThumbnail.js'
 import { sortPrograms } from './utils/sorting.js'
 import { orderComparator } from './utils/programOrder.js'
 import { fetchKickPrograms, isKickSessionLost, kickPageImageProxy } from './services/kickSource.js'
 import { nudgeFixedOverlays, clearAllNudges } from './services/fixedOverlayNudge.js'
-// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら import ごと消すこと。**
-import { createNicoStaleState, noteNicoFetch, createDupOwnerState, noteDuplicateOwners, probeStartupLine } from './services/nicoStaleProbe.js'
 import { applyGridColumnFix, clearAllGridFixes } from './services/gridColumnFix.js'
 import { mapApiProgramToInfo } from './services/followPageSource.js'
 import { applyLiveStatistics } from './services/liveStatistics.js'
+import { EndedProgramFilter } from './services/endedPrograms.js'
+import { mergeProgramSources, seedNewProgramsToStorage, chaseLiveThumbIfYoung, needsLiveThumbChase } from './services/newPrograms.js'
+import { interpretProgramInfoResponse } from './services/api.js'
+import { PERM_NOTICE_KEY, shouldShowPermNotice, readMissingPermissions, readPermNoticeDismissed, savePermNoticeDismissed } from './ui/permNotice.js'
 import { getOptions as getOptionsFromStorage, upsertProgramInfos, getProgramInfos, setSidebarWidth } from './services/storage.js'
 import { setupOptionsHandler } from './handlers/optionsHandler.js'
 import { AppState } from './core/AppState.js'
 import { AutoNextManager } from './managers/AutoNextManager.js'
 import { observeKickProgramEnd } from './services/kickStatus.js'
 import { consumeAutoNextHopMark, takeEndedByAutoNext } from './services/status.js'
-import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints, ownerKeyOf } from './services/watchHistory.js'
+import { loadWatchHistory, recordWatch, currentOwnerKeyOnKickPage, startWatchHistorySync, isPageReload, startDwellPoints } from './services/watchHistory.js'
 import { setProgramContainerWidth, setCardSize } from './ui/layout.js'
 import { applySidebarPlacement, isOverlayPlacement, SIDEBAR_PLACEMENT_DEFAULT } from './ui/placement.js'
 import { applyShowViewerCount } from './ui/viewerCount.js'
@@ -81,9 +83,6 @@ let lastKickPrograms = []
 let lastNicoPrograms = []
 // 更新中か。定期・ボタン・開閉・設定変更の4経路から呼ばれるので多重実行を防ぐ。
 let isRefreshing = false
-// 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この2行を消すこと。**
-const nicoStaleState = createNicoStaleState()
-const dupOwnerState = createDupOwnerState()
 // document へ張るリスナーはサイドバーを差し込み直しても残るので、1度だけにする。
 let escKeyWired = false
 // ポインタのボタンが押されている間 true。**小窓を掴んで動かしている最中に押さない**ため
@@ -179,6 +178,38 @@ function insertSidebar() {
     // **設定を「ON（常に開く）」にしても効かなかった**（記憶と同じ動きになっていた）。
     setOpen(shouldOpenSidebarAtStart(options), { save: false })
     wireControls(root)
+    // 🔴 **差し込み直すたびに反映する。** 新しい器は hidden で生まれるので、
+    //    ここで読み直さないと SPA の遷移で案内が黙って消える。
+    reflectPermNotice()
+}
+
+// 最後に読んだ「まだ許可されていない origin」。×で閉じる時に、この一覧を「閉じた」として覚える。
+let lastMissingPermissions = []
+// 案内の読み直しの世代。最後に始まった1回だけが画面に反映できる。
+let permNoticeGen = 0
+
+/**
+ * 追加の許可の案内を出すかどうかを決めて反映する。**判断はここ1箇所**（doc/09 項目DE）。
+ * ⚠️ 非同期で2つ読む（足りない origin／閉じた origin）。どちらも「分からない時は出さない」に倒す。
+ */
+async function reflectPermNotice() {
+    const gen = ++permNoticeGen
+    const [missing, dismissed] = await Promise.all([readMissingPermissions(), readPermNoticeDismissed()])
+    // 🔴 **後から始まった読み直し、または×が先に済んでいたら反映しない**（2026-10-23 のレビューで直した）。
+    //    先に始まった読み直しが×の後に終わると、閉じる前の「閉じた一覧」で案内を出し直していた。
+    if (gen !== permNoticeGen) return
+    if (Array.isArray(missing)) lastMissingPermissions = missing
+    setPermNoticeVisible(shouldShowPermNotice({ missing, dismissed }))
+}
+
+/**
+ * ×で閉じる。**その時足りなかった origin では二度と出さない。**
+ * 🔴 画面を先に閉じてから保存する。保存に失敗しても押した手応えは返す。
+ */
+function dismissPermNotice() {
+    permNoticeGen++ // 走っている読み直しの結果で出し直さない（保存が済めば storage の変化で読み直す）
+    setPermNoticeVisible(false)
+    savePermNoticeDismissed(lastMissingPermissions)
 }
 
 /** いま適用されているサイドバー幅（px）。列数計算と body を寄せる量の両方がこれを使う。 */
@@ -538,6 +569,23 @@ function wireControls(root) {
     const reload = root.querySelector('#reload_programs')
     if (reload) reload.addEventListener('click', () => refreshPrograms())
 
+    // 追加の許可の案内（doc/09 項目DE）。許可そのものは設定ページでしか取れない
+    // （`chrome.permissions.request()` はコンテンツスクリプトから呼べない）ので、「確認する」は設定ページを開くだけ。
+    // ⚠️ 「確認する」では閉じない。許可されれば権限の変化（kick:stateChanged）で消える。
+    //    押しただけで閉じると、許可しないまま戻った人に二度と出なくなる。
+    const permClose = root.querySelector('#perm_notice_close')
+    if (permClose) permClose.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); dismissPermNotice() })
+    const permOpen = root.querySelector('#perm_notice_open')
+    if (permOpen) {
+        permOpen.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            try {
+                chrome.runtime.sendMessage({ type: 'kick:openOptions' }, () => { void chrome.runtime.lastError })
+            } catch (err) { /* 拡張が無効化されている */ }
+        })
+    }
+
     enableSidebarLineDrag(root)
 
     // 設定は番組リストと入れ替え表示（ニコ生側と同じ挙動）
@@ -589,10 +637,10 @@ function wireControls(root) {
 /**
  * 自動移動でニコ生から飛んできた時に、離れた（＝終了した）番組をリストから外す。
  *
- * 🔴 **ニコ生ページ側と対**（あちらは `UpdateManager._endedConfirmed`）。片方だけだと
+ * 🔴 **ニコ生ページ側と対**（あちらは `UpdateManager._isEndedByAutoNext`）。片方だけだと
  *    ニコ生 → kick.com の移動でだけカードが残る（doc/09 項目BN の型）。
- * ⚠️ **期限を切ってあること。** ここには notifybox の「鳴る罠」（消した番組が戻ってきたら
- *    印を落とす）が無いので、万一取り違えても自分で戻れるようにする。
+ * ⚠️ **期限を切ってあること。** この印は終了確認の「鳴る罠」（消した番組が notifybox に戻ってきたら
+ *    印を落とす）の対象外なので、万一取り違えても自分で戻れるようにする。
  */
 let endedByAutoNextId = ''
 let endedByAutoNextUntil = 0
@@ -601,6 +649,83 @@ function dropEndedByAutoNext(programs) {
     if (!endedByAutoNextId || Date.now() > endedByAutoNextUntil) return programs
     return programs.filter((p) => !(p && String(p.id) === endedByAutoNextId))
 }
+
+/** 自動移動で離れた番組か（期限内のみ）。終了確認に「聞くまでもない番組」として渡す。 */
+function isEndedByAutoNext(id) {
+    return !!endedByAutoNextId && Date.now() <= endedByAutoNextUntil && String(id) === endedByAutoNextId
+}
+
+/**
+ * notifybox を SW 経由で取る（doc/09 項目DE）。終了確認の「疑い」を立てる材料。
+ *
+ * 🔴 **失敗・権限なしは false**（ニコ生ページの `fetchLivePrograms` と同じ約束）。
+ *    `[]` は「放送中0件」という答えなので混ぜないこと。混ぜると全番組が疑いになる。
+ */
+async function fetchNotifyboxViaSw() {
+    try {
+        const res = await chrome.runtime.sendMessage({ type: 'nico:notifybox' })
+        return res && res.ok === true && Array.isArray(res.rows) ? res.rows : false
+    } catch (e) {
+        return false // 拡張が無効化された・SW が答えない
+    }
+}
+
+/**
+ * 詳細APIを SW 経由で1件聞く（doc/09 項目DE）。終了の「確認」に使う。
+ *
+ * 🔴 **応答の読み方は `interpretProgramInfoResponse`（ニコ生ページと同じ関数）。** 自前で読まないこと。
+ * ⚠️ 答えが得られない時は `metaStatus: 0`（＝消さない）。
+ * @param {string} liveId lv を外した数字
+ */
+async function fetchProgramInfoViaSw(liveId) {
+    try {
+        const res = await chrome.runtime.sendMessage({ type: 'nico:programInfo', id: String(liveId) })
+        if (!res || res.ok !== true) return { data: undefined, metaStatus: 0 }
+        return interpretProgramInfoResponse(res.json)
+    } catch (e) {
+        return { data: undefined, metaStatus: 0 }
+    }
+}
+
+/** 詳細APIの `data` だけを返す（ライブサムネの追撃用）。取れなければ undefined。 */
+async function fetchProgramDetailViaSw(liveId) {
+    return (await fetchProgramInfoViaSw(liveId)).data
+}
+
+// 追撃中の番組（同じ番組を重ねて聞かないための印）。サムネの周期と新着の直後の2か所から呼ぶ。
+// 🔴 **全体を1本のフラグで止めないこと**（2026-10-23 のレビューで直した）。周期の追撃が走っている間に
+//    新しいカードの追撃が来ると、まるごと捨てられて20秒待たされていた。止めるのは同じ番組だけ。
+const chasingThumbIds = new Set()
+
+/**
+ * 新着のライブサムネを詳細APIで取りに行く（doc/09 項目AZ・DF）。**ニコ生ページと同じ関数**で、
+ * 聞き方だけ SW 経由。取れた番組はその場で絵を差し替える（次のサムネ周期を待たない）。
+ * ⚠️ 候補は `needsLiveThumbChase`（部品の判定そのもの）で先に1回だけ絞る。番組ごとに storage を
+ *    読み直すと、40枚なら20秒ごとに40回 JSON を読むことになる（2026-10-23 のレビューで直した）。
+ * @param {string[]} ids カードの id（lv を外した数字）
+ * @param {Array<object>} stored storage の programInfo（呼ぶ側が既に読んだもの）
+ */
+function chaseNewNicoThumbs(ids, stored) {
+    const byId = new Map((Array.isArray(stored) ? stored : []).map((p) => [p && p.id, p]))
+    const now = Date.now()
+    const targets = ids.filter((id) => !chasingThumbIds.has(id) && needsLiveThumbChase(byId.get(`lv${id}`), now))
+    if (!targets.length) return
+    for (const id of targets) chasingThumbIds.add(id)
+    Promise.all(targets.map((id) => chaseLiveThumbIfYoung(id, fetchProgramDetailViaSw).then((ok) => (ok ? id : null), () => null)))
+        .then((done) => {
+            const patched = new Set(done.filter(Boolean))
+            if (!patched.size) return
+            const stored = getProgramInfos() || []
+            updateThumbnailsFromStorage(lastKickPrograms.length ? stored.concat(lastKickPrograms) : stored, { onlyIds: patched })
+        })
+        .catch(() => { /* 追撃の失敗で本体を止めない */ })
+        .finally(() => { for (const id of targets) chasingThumbIds.delete(id) })
+}
+
+// 終了した番組を外す判断。**ニコ生ページ（UpdateManager）と同じ部品**（doc/09 項目BF-2・DE）。
+// 🔴 **ここに判断を書かないこと。** 以前は kick.com にだけ無く、終わった番組がフォローAPIの
+//    手放すまで（実測 40〜240秒）残っていた。違うのは詳細APIの聞き方（SW 経由）だけ。
+const nicoEndedFilter = new EndedProgramFilter({ fetchStatus: fetchProgramInfoViaSw })
 
 /**
  * live2 の来場者数を SW 経由で取る（kick.com からは CORS で直接叩けないため）。
@@ -687,7 +812,8 @@ async function refreshPrograms() {
 }
 
 async function refreshProgramsInner(container) {
-    const [kickRes, nicoRes] = await Promise.all([fetchKickPrograms(), fetchNicoPrograms()])
+    // notifybox は終了確認の材料（doc/09 項目DE）。**同じ Promise.all に並べる**（待ちを増やさない）。
+    const [kickRes, nicoRes, notifyList] = await Promise.all([fetchKickPrograms(), fetchNicoPrograms(), fetchNotifyboxViaSw()])
 
     // 🔴 **取れなかったサービスは「0件」にせず、前回の結果を据え置く。**
     //    片方だけ落ちた周期でそのサービスのカードが全消えし、次の周期で戻る＝点滅する。
@@ -695,30 +821,31 @@ async function refreshProgramsInner(container) {
     const kickPrograms = kickRes.ok ? kickRes.programs : lastKickPrograms
     // 🔴 **自動移動でニコ生から飛んできた場合、離れた番組は終了している**（doc/09 項目CS）。
     //    フォローAPIはしばらくその番組を返し続けるので、外さないとカードが残る。
-    //    ⚠️ ニコ生ページ側は `_endedConfirmed` に載せて同じことをしている。**片方だけにしないこと。**
-    const nicoPrograms = dropEndedByAutoNext(nicoRes.ok ? nicoRes.programs : lastNicoPrograms)
-
-    // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この塊を消すこと。**
-    //    口①＝症状そのもの（同じ配信者が2枚）／口②＝仮説（据え置きが続いていないか）。
-    //    ⚠️ **2つとも呼ぶこと。** 1周目は口②だけで、仮説が外れた時に何も残らなかった。
-    //    ⚠️ **`kickRes.ok` を渡すこと。** 両方失敗なら画面に案内が出るので、そこでは騒がない。
-    try {
-        const dupLine = noteDuplicateOwners(dupOwnerState, {
-            entries: nicoPrograms.map((p) => ({
-                key: ownerKeyOf(p),
-                id: p && p.id,
-                beginMs: p && p.onAirTime && p.onAirTime.beginAt ? Date.parse(p.onAirTime.beginAt) : NaN,
-            })),
-            now: Date.now(),
-            fresh: nicoRes.ok,
-        })
-        if (dupLine) console.warn(dupLine)
-        const line = noteNicoFetch(nicoStaleState, {
-            ok: nicoRes.ok, reason: nicoRes.reason, now: Date.now(),
-            staleCount: lastNicoPrograms.length, kickOk: kickRes.ok,
-        })
-        if (line) console.warn(line)
-    } catch (e) { /* 診断で本体を止めない */ }
+    //    ⚠️ ニコ生ページ側は `_isEndedByAutoNext` で同じことをしている。**片方だけにしないこと。**
+    //
+    // 🔴 **終わった番組を外す**（doc/09 項目DE）。ニコ生ページと同じ部品・同じ判断で、
+    //    notifybox に居ない番組だけ詳細APIに聞き、`ended`／404 と確認できた番組を落とす。
+    //    ⚠️ 追加の許可がまだ無い利用者は notifyList が false になり、従来どおり（フォローAPIが手放すまで残る）。
+    //
+    // 🔴 **新着を早く出す**（doc/09 項目AD・DF）。notifybox とフォローAPIの**和集合**にする。
+    //    notifybox は新着をフォローAPIより 20〜101秒 早く返すので、notifybox にしか居ない番組も
+    //    すぐカードにする。**ニコ生ページと同じ関数・同じ順番**（和集合を作ってから終わった番組を外す）。
+    //    ⚠️ 順番を入れ替えないこと。先に外しても和集合が notifybox の行を足し直す。
+    //    ⚠️ 追加の許可がまだ無い利用者は notifyList が false になり、和集合はフォローAPIの結果そのまま＝従来どおり。
+    // ⚠️ **両方取れなかった周期だけ**前回の結果をそのまま据え置く（ニコ生ページの bothFailed と同じ）。
+    //    前回の結果は既にここを通っている。
+    // 🔴 **フォローAPIだけ落ちた周期は、前回のリストをフォローAPIの代わりに使う**（2026-10-23 のレビューで直した）。
+    //    notifybox は最大100件しか返さないので、notifybox と storage だけで組むと、100件を超えた番組や
+    //    notifybox に載らない番組が**その周期だけ消えて次の周期で戻る（点滅）**。前回のリストを土台にすれば
+    //    消えず、新着は notifybox から足され、終わった番組は終了確認で外れる。
+    //    ⚠️ ニコ生ページは今も notifybox と storage だけで組む（同じ点滅の形が残っている・doc/09 項目DF）。
+    const nicoFetched = nicoRes.ok ? nicoRes.programs : null
+    const nicoBothFailed = !nicoFetched && !Array.isArray(notifyList)
+    const nicoBase = nicoFetched || lastNicoPrograms
+    const nicoFresh = nicoBothFailed
+        ? lastNicoPrograms
+        : await nicoEndedFilter.apply(mergeProgramSources(notifyList, nicoBase, getProgramInfos), notifyList, isEndedByAutoNext)
+    const nicoPrograms = dropEndedByAutoNext(nicoFresh)
 
     // 両方ダメ＝未ログイン・権限なしの可能性。ニコ生ページと同じ場所に案内を出す。
     // ⚠️ **「片方でも失敗」に緩めないこと。** `#api_error` の中身はニコ生のログインリンクなので、
@@ -736,7 +863,12 @@ async function refreshProgramsInner(container) {
     //    数周期で収束するので実害は無い（初回は開始からの平均で代用される）。
     // ⚠️ 据え置き（取得失敗）の値は書かない。同じ値で上書きすると差分が 0 になり、
     //    盛り上がりの推定が実際より低く出る。
-    if (nicoRes.ok && nicoPrograms.length) upsertProgramInfos(nicoPrograms)
+    //    ⚠️ 書くのは**フォローAPIの結果だけ**（ニコ生ページと同じ）。和集合には storage の前回値が
+    //       混ざるので、それを書き戻すと同じ値で上書きして差分が 0 になる。
+    if (nicoRes.ok && nicoRes.programs.length) upsertProgramInfos(nicoRes.programs)
+    // 新着（notifybox にしか居ない番組）の最小レコードを蒔く。ライブサムネ追撃の前提で、
+    // 次の周期からは storage の前回値として拾われる（開始時刻が周期ごとに揺れない）。doc/09 項目AZ・DF。
+    if (!nicoBothFailed) seedNewProgramsToStorage(nicoPrograms)
 
     // サムネ更新ループへ渡すために控える。Kick は storage に入れていないので、
     // `getProgramInfos()` からは引けない（渡し忘れるとコマが貯まらない）。
@@ -849,6 +981,12 @@ async function refreshProgramsInner(container) {
 
     const count = document.getElementById('program_count')
     if (count) count.textContent = String(visible)
+
+    // 新しく立ったニコ生のカードは、次のサムネ周期（20秒）を待たずにライブサムネを取りに行く
+    // （ニコ生ページは新着カードの初回サムネを後ろへ倒さない＝項目BB と同じ考え方）。
+    const newNicoIds = []
+    for (const [id, el] of newElements) if (el.getAttribute('data-service') !== 'kick') newNicoIds.push(id)
+    if (newNicoIds.length) chaseNewNicoThumbs(newNicoIds, getProgramInfos() || [])
 }
 
 function startTimer() {
@@ -911,6 +1049,12 @@ function startTimer() {
             onlyIds.add(el.id)
         }
         if (onlyIds.size) updateThumbnailsFromStorage(infos, { onlyIds })
+        // 若くてライブサムネが空のニコ生の番組を追撃する（doc/09 項目AZ・DF・ニコ生ページと同じ関数）。
+        const nicoIds = []
+        for (const el of container.children) {
+            if (el && el.id && el.getAttribute('data-service') !== 'kick') nicoIds.push(el.id)
+        }
+        chaseNewNicoThumbs(nicoIds, stored)
     }, thumbMs)
 }
 
@@ -1003,9 +1147,6 @@ function teardown() {
 
 async function init() {
     if (!extensionAlive()) return
-    // 🔴 **一時的な診断（doc/09 項目DD）。原因が確定したら、この1行を消すこと。**
-    //    🔴 起動を必ず1行出す。1周目はこれが無く、**沈黙を「症状が出ていない」と読めなかった。**
-    console.warn(probeStartupLine())
     options = await getOptionsFromStorage(defaultOptions)
     // 🔴 insertSidebar より前に入れること。後だと初回だけ既定（中）の列数で並ぶ。
     setCardSize(options.cardSize)
@@ -1077,11 +1218,15 @@ async function init() {
         chrome.runtime.onMessage.addListener((msg) => {
             if (!msg || msg.type !== 'kick:stateChanged') return
             if (!msg.granted) teardown()
+            // 設定ページで追加の許可が通ったら案内を消す（doc/09 項目DE）。
+            else reflectPermNotice()
         })
     } catch (e) { /* 拡張が無効化されている */ }
 
     try {
         chrome.storage.onChanged.addListener((changes) => {
+            // 別のタブで案内を閉じたら、こちらも読み直す（doc/09 項目DE）。
+            if (changes[PERM_NOTICE_KEY]) reflectPermNotice()
             if (changes.sidebarTheme) {
                 options.sidebarTheme = changes.sidebarTheme.newValue
                 applyTheme(options.sidebarTheme)

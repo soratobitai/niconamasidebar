@@ -41,10 +41,21 @@ const KICK_PERMISSIONS = {
 //    **Kick 連携そのものが「未許可」に見えて止まる**（sw.js の hasKickPermission と対）。
 //    - live2.nicovideo.jp … kick.com 上でニコ生の来場者数を早く取るための中継（doc/09 項目CT）。
 //      無くても kick.com のリストは出る（一覧APIの値のまま＝従来どおり）。
-// ⚠️ **sw.js の KICK_REQUEST_PERMISSIONS と必ず一致させること。**
+//    - papi.live.nicovideo.jp / api.cas.nicovideo.jp … kick.com 上で**終わったニコ生の番組を
+//      すぐ外す**ための中継（doc/09 項目DE）。notifybox と詳細API。
+//      無くても kick.com のリストは出る（フォローAPIが手放すまで残る＝従来どおり）。
+// ⚠️ **sw.js の EXTRA_ORIGINS / KICK_REQUEST_PERMISSIONS と必ず一致させること**（検査 DE が突き合わせる）。
+//
+// 🔴 **ここに足した origin は、既に Kick を有効にしている利用者には付かない。**
+//    Chrome は ON にし直すまで聞かないので、下の「追加の許可」でまとめて聞く（doc/09 項目DE）。
+const EXTRA_ORIGINS = [
+    'https://live2.nicovideo.jp/*',
+    'https://papi.live.nicovideo.jp/*',
+    'https://api.cas.nicovideo.jp/*',
+]
 const KICK_REQUEST_PERMISSIONS = {
     permissions: KICK_PERMISSIONS.permissions,
-    origins: [...KICK_PERMISSIONS.origins, 'https://live2.nicovideo.jp/*'],
+    origins: [...KICK_PERMISSIONS.origins, ...EXTRA_ORIGINS],
 }
 
 // ⚠️ **表示方法（kickDisplayMode）とバランス（dwellMinutes）はここで扱わない。**
@@ -58,7 +69,12 @@ const el = {
     note: document.getElementById('kick_note'),
     test: document.getElementById('kick_test'),
     testResult: document.getElementById('kick_test_result'),
+    extra: document.getElementById('kick_extra'),
+    extraGrant: document.getElementById('kick_extra_grant'),
 }
+
+// 「追加の許可」で要求する origin。**押す前に決めておく**（下の🔴を参照）。
+let missingExtraOrigins = []
 
 /** 権限の有無。要求も削除もしない、状態を読むだけ。 */
 function hasPermission() {
@@ -80,12 +96,32 @@ function setTestResult(text, state) {
     if (state) el.testResult.classList.add(state)
 }
 
+/** origin を1つだけ確かめる。**Kick 連携の確認（hasPermission）には混ぜない。** */
+function hasOrigin(origin) {
+    return new Promise((resolve) => {
+        chrome.permissions.contains({ origins: [origin] }, (granted) => {
+            resolve(!chrome.runtime.lastError && granted === true)
+        })
+    })
+}
+
 /** 権限の実態に UI を合わせる。外部から取り消された場合もここを通る。 */
 async function syncFromPermissions() {
     const granted = await hasPermission()
     el.enabled.checked = granted
     el.sub.hidden = !granted
     if (!granted) setTestResult('')
+
+    // 追加の許可（doc/09 項目DE）。**Kick 連携が有効で、足りない origin がある時だけ出す。**
+    // 連携が無効の人には出さない（ON にする時に全部まとめて要求している）。
+    const missing = []
+    if (granted) {
+        for (const origin of EXTRA_ORIGINS) {
+            if (!(await hasOrigin(origin))) missing.push(origin)
+        }
+    }
+    missingExtraOrigins = missing
+    el.extra.hidden = missing.length === 0
     return granted
 }
 
@@ -121,6 +157,23 @@ el.enabled.addEventListener('change', async () => {
         await syncFromPermissions()
         // 拒否は異常ではない。エラー表示にしない。
         setNote(granted ? 'Kick 連携を有効にしました。' : '許可されなかったため、Kick 連携は無効のままです。')
+    })
+})
+
+el.extraGrant.addEventListener('click', () => {
+    // 🔴 **request() の前に await を挟まないこと。** ボタンを押した文脈から外れると
+    //    Chrome に拒否される。足りない origin は syncFromPermissions で先に決めてある。
+    const origins = missingExtraOrigins.slice()
+    if (!origins.length) { el.extra.hidden = true; return }
+    chrome.permissions.request({ origins }, async (granted) => {
+        if (chrome.runtime.lastError) {
+            await syncFromPermissions()
+            setNote('許可を要求できませんでした: ' + chrome.runtime.lastError.message, true)
+            return
+        }
+        await syncFromPermissions()
+        // 拒否は異常ではない。エラー表示にしない。
+        setNote(granted ? '追加の許可を受け付けました。' : '許可されなかったため、これまでどおりの動作になります。')
     })
 })
 

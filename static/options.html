@@ -31,6 +31,18 @@
                 </div>
             </div>
 
+            <!-- 追加の許可（doc/09 項目DE）。Kick 連携が有効で、後から足した許可が足りない時だけ出す。
+                 🔴 既定は hidden。出すかどうかは options.js の syncFromPermissions が決める。 -->
+            <div class="extra" id="kick_extra" hidden>
+                <p class="extra-title">追加の許可について</p>
+                <p class="extra-desc">
+                    kick.com のサイドバーでは、終わったニコ生の番組がしばらくリストに残ることがありました。
+                    番組の状態と来場者数をニコ生のページと同じ方法で取得するため、ニコニコ生放送の一部のサイトへのアクセスが必要になりました。
+                </p>
+                <p class="extra-desc">許可しなくても、これまでどおり使えます。</p>
+                <button type="button" id="kick_extra_grant">許可する</button>
+            </div>
+
             <p class="note" id="kick_note"></p>
         </section>
 

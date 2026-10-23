@@ -149,6 +149,28 @@ export function mapNotifyboxRowToInfo(row, beginAtIso) {
     }
 }
 
+/**
+ * 詳細APIの応答 JSON を `{data, metaStatus}` に読む。**読み方はここ1箇所**（doc/09 項目BF-2・DE）。
+ *
+ * ニコ生ページは自分で叩いた応答を、kick.com は SW が中継した応答を、どちらもここで読む。
+ * 🔴 **各ページで読み方を書かないこと。** 404 の扱いが1文字ずれると、片方のページだけ
+ *    放送中の番組を消す（または終わった番組を消さない）ようになる。
+ *
+ * 🔴 **数値でなければ 0（＝答えが得られなかった）に倒す。**
+ *    `Number('404')` のような緩い変換にすると、想定外の応答が「終了の答え」に化けて
+ *    **カードを消す側へ倒れる。** 失敗の方向は非対称（消しすぎ ≫ 消し足りない）なので、
+ *    削除の引き金になる値の解釈は厳しくしておく。
+ * ⚠️ `meta.status` が 200 でも `data` が無ければ data は undefined（答えとして使わない）。
+ * @param {any} json 応答本文（壊れていてもよい）
+ * @returns {{data: any|undefined, metaStatus: number}}
+ */
+export function interpretProgramInfoResponse(json) {
+    const rawStatus = json?.meta?.status
+    const metaStatus = Number.isFinite(rawStatus) ? rawStatus : 0
+    if (metaStatus !== 200 || !json.data) return { data: undefined, metaStatus }
+    return { data: json.data, metaStatus }
+}
+
 // In-flight dedupe for detail API（同時リクエストの重複防止のみ）
 // 中身は {data, metaStatus}。`fetchProgramInfo` と `fetchProgramInfoWithStatus` が
 // **同じ約束を共有する**ので、形の違う2つの入口があっても取得は1回で済む。
@@ -174,13 +196,9 @@ function requestProgramInfo(id) {
         try {
             let response = await fetch(`${liveInfoAPI}/lv${id}`)
             response = await response.json()
-            // 🔴 **数値でなければ 0（＝答えが得られなかった）に倒す。**
-            //    `Number('404')` のような緩い変換にすると、想定外の応答が「終了の答え」に化けて
-            //    **カードを消す側へ倒れる。** 失敗の方向は非対称（消しすぎ ≫ 消し足りない）なので、
-            //    削除の引き金になる値の解釈は厳しくしておく（doc/09 項目BF-2）。
-            const rawStatus = response.meta?.status
-            const metaStatus = Number.isFinite(rawStatus) ? rawStatus : 0
-            if (metaStatus !== 200 || !response.data) {
+            const { data, metaStatus } = interpretProgramInfoResponse(response)
+            const rawStatus = response?.meta?.status
+            if (!data) {
                 // 🔴 **404 は異常ではない**（2026-08-10・利用者のコンソールに出て気付いた）。
                 //    この API を叩く3箇所は、どれも「その番組がまだ在るか」を確かめる用途:
                 //      終了確認 / 放送直後のサムネ追撃 / フォローAPIの穴埋め
@@ -196,7 +214,7 @@ function requestProgramInfo(id) {
                 }
                 return { data: undefined, metaStatus }
             }
-            return { data: response.data, metaStatus }
+            return { data, metaStatus }
         } catch (error) {
             handleError(error, { api: 'fetchProgramInfo', liveId: id })
             return { data: undefined, metaStatus: 0 }

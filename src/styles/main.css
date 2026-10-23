@@ -1078,7 +1078,9 @@ html.nns-overlay body > #sidebar_line {
    🔴 **絶対配置にしない。** `.sidebar_header` は flex なので、幅100%の行として
       折り返させれば設定パネルにもリストにも重ならない。重ねると z-index と
       「設定を開いている間は隠す」処理が要る（doc/09 項目DA の「作り」を参照）。 */
-#kick_intro {
+/* 追加の許可の案内（#perm_notice・doc/09 項目DE）も同じ置き方・同じ部品で出す。 */
+#kick_intro,
+#perm_notice {
     flex: 0 0 100%;
     /* 🔴 margin ではなく padding で空ける。`.sidebar_header` の下は
        `.sidebar_body { padding-top }` が持っており、margin だと相殺する（131行目の注記と同じ罠）。 */
@@ -1086,7 +1088,8 @@ html.nns-overlay body > #sidebar_line {
     box-sizing: border-box;
     font-weight: normal;
 }
-#kick_intro[hidden] {
+#kick_intro[hidden],
+#perm_notice[hidden] {
     display: none; /* flex の子は hidden 属性だけでは消えない */
 }
 .kick_intro_inner {

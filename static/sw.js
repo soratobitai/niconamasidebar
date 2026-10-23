@@ -59,10 +59,29 @@ const LIVE2_ORIGIN = 'https://live2.nicovideo.jp/*'
 const LIVE2_STATISTICS_API = 'https://live2.nicovideo.jp/watch'
 const LIVE2_MAX_CONCURRENT = 8
 
+// kick.com 上で**終わったニコ生の番組をすぐ外す**ために要る2つ（doc/09 項目DE）。
+// ニコ生ページと同じ終了確認（notifybox から消えた番組だけ詳細APIに聞く）を kick.com でも回す。
+// どちらも live.nicovideo.jp オリジンにしか CORS を開いていないので、kick.com からはここを通す。
+//
+// 🔴 **`KICK_PERMISSIONS` に足さないこと**（live2 と同じ理由）。確認は hasOriginPermission で別に行う。
+// ⚠️ 許可が無い時は「取れない」だけにする。kick.com は従来どおり（フォローAPIが手放すまで残る）。
+const NOTIFYBOX_ORIGIN = 'https://papi.live.nicovideo.jp/*'
+const PROGRAM_INFO_ORIGIN = 'https://api.cas.nicovideo.jp/*'
+// ⚠️ src/config/constants.js の notifyboxAPI / notifyboxRows / liveInfoAPI / endCheckMaxPerCycle と
+//    同じ値にすること（検査 DE が突き合わせる）。
+const NOTIFYBOX_API = 'https://papi.live.nicovideo.jp/api/relive/notifybox.content.php'
+const NOTIFYBOX_ROWS = 100
+const PROGRAM_INFO_API = 'https://api.cas.nicovideo.jp/v1/services/live/programs'
+
+// Kick 連携の後から足した origin（要求はするが、Kick 連携そのものの確認には混ぜないもの）。
+// 🔴 **足す時はここに足すこと。** 設定ページの「追加の許可」とサイドバーの案内がこの一覧を見る。
+//    ⚠️ static/options.js の EXTRA_ORIGINS と同じ中身にすること（検査 DE が突き合わせる）。
+const EXTRA_ORIGINS = [LIVE2_ORIGIN, NOTIFYBOX_ORIGIN, PROGRAM_INFO_ORIGIN]
+
 // 権限を**要求する**時の集合。⚠️ 確認（contains）には使わない。上の 🔴 を参照。
 const KICK_REQUEST_PERMISSIONS = {
     permissions: KICK_PERMISSIONS.permissions,
-    origins: [...KICK_PERMISSIONS.origins, LIVE2_ORIGIN],
+    origins: [...KICK_PERMISSIONS.origins, ...EXTRA_ORIGINS],
 }
 
 // 画像中継で受け付ける最大サイズ。サムネは数十KBなので、これを超えるものは想定外。
@@ -179,13 +198,36 @@ async function injectIntoOpenKickTabs() {
     }
 }
 
+/**
+ * 今回増えた権限に Kick 連携そのものの権限（KICK_PERMISSIONS）が入っているか（`permissions.onAdded` の引数を見る）。
+ * Kick 連携が既に有効なら KICK_PERMISSIONS は全部そろっているので、ここが true になるのは
+ * 「連携を有効にした（またはそのために足りない分が増えた）時」だけ。
+ * ⚠️ 引数が無い・形が違う時は false（流し込まない）。流し込み損ねてもリロードすれば入るが、
+ *    二重に流し込むと取得が二重になって戻らない。壊れ方の軽い側へ倒す。
+ * @param {chrome.permissions.Permissions|undefined} added
+ */
+function addedKickPermission(added) {
+    if (!added) return false
+    const perms = Array.isArray(added.permissions) ? added.permissions : []
+    const origins = Array.isArray(added.origins) ? added.origins : []
+    return perms.some((p) => KICK_PERMISSIONS.permissions.includes(p))
+        || origins.some((o) => KICK_PERMISSIONS.origins.includes(o))
+}
+
 // 権限の増減に追従する。ユーザーは chrome://extensions からも権限を外せるので、
 // オプションページ側の処理だけに任せない。
 if (chrome.permissions && chrome.permissions.onAdded) {
-    chrome.permissions.onAdded.addListener(() => {
+    chrome.permissions.onAdded.addListener(async (added) => {
         syncKickContentScript()
         broadcastKickState()
-        injectIntoOpenKickTabs()
+        // 🔴 **流し込むのは Kick 連携が今回有効になった時だけ**（＝KICK_PERMISSIONS のどれかが増え、
+        //    その結果そろった時）。後から足した origin（EXTRA_ORIGINS）だけが増えた時は、kick.com の
+        //    タブには既にサイドバーが入っている。流し込むと**2つ目の実体が動き出し**、取得のタイマーが
+        //    二重になる（kickpage.js に二重読み込みの守りは無い）。doc/09 項目DE で気付いた。
+        // ⚠️ 「kick.com の origin が増えた時」と書かないこと（2026-10-23 のレビューで直した）。
+        //    kick.com だけ先に許可されていた人（拡張メニューのサイトアクセス等）が連携を ON にすると、
+        //    増えるのは cookies や他の origin だけで、開いているタブにサイドバーが入らなかった。
+        if (addedKickPermission(added) && await hasKickPermission()) injectIntoOpenKickTabs()
     })
     chrome.permissions.onRemoved.addListener(() => {
         syncKickContentScript()
@@ -233,6 +275,90 @@ function hasLive2Permission() {
             resolve(false)
         }
     })
+}
+
+/**
+ * origin を1つだけ確かめる。**Kick 連携の確認（hasKickPermission）には混ぜない**（上記）。
+ * @param {string} origin
+ * @returns {Promise<boolean>}
+ */
+function hasOriginPermission(origin) {
+    return new Promise((resolve) => {
+        try {
+            chrome.permissions.contains({ origins: [origin] }, (granted) => {
+                resolve(!chrome.runtime.lastError && granted === true)
+            })
+        } catch (e) {
+            resolve(false)
+        }
+    })
+}
+
+/**
+ * 後から足した origin のうち、まだ許可されていないもの（サイドバーの案内・設定ページ用）。
+ *
+ * 🔴 **Kick 連携が無効なら「足りない」とは言わない（空で返す）。** 連携を使っていない人に
+ *    「新しい許可が必要です」と出すことになる。連携を ON にする時は全部まとめて要求している。
+ * @returns {Promise<{ok: true, granted: boolean, missing: string[]}>}
+ */
+async function readExtraPermissions() {
+    const granted = await hasKickPermission()
+    if (!granted) return { ok: true, granted: false, missing: [] }
+    const missing = []
+    for (const origin of EXTRA_ORIGINS) {
+        if (!(await hasOriginPermission(origin))) missing.push(origin)
+    }
+    return { ok: true, granted: true, missing }
+}
+
+/**
+ * notifybox を中継する（**kick.com 用**・doc/09 項目DE）。終了確認の「疑い」を立てる材料。
+ *
+ * 戻り値は `{ ok: true, rows }`（notifybox_content の生配列）か `{ ok: false, reason }`。**throw しない。**
+ * ⚠️ 読み方（どれが疑いか）は持たない。**配列を返すだけ**で、判断はページ側の EndedProgramFilter
+ *    （ニコ生ページと同じ部品）がやる。
+ * ⚠️ 未ログインだと 404 の HTML が返る（2026-08-10 実測）。ok:false になるだけで、
+ *    その周期は疑いを立てない＝従来どおり。
+ */
+async function fetchNotifybox() {
+    if (!(await hasKickPermission()) || !(await hasOriginPermission(NOTIFYBOX_ORIGIN))) {
+        return { ok: false, reason: 'no-permission' }
+    }
+    let json
+    try {
+        const res = await fetch(`${NOTIFYBOX_API}?rows=${NOTIFYBOX_ROWS}`, { credentials: 'include', cache: 'no-store' })
+        json = await res.json()
+    } catch (e) {
+        return { ok: false, reason: 'network' }
+    }
+    const rows = json && json.meta && json.meta.status === 200 && json.data ? json.data.notifybox_content : null
+    if (!Array.isArray(rows)) return { ok: false, reason: 'http' }
+    return { ok: true, rows }
+}
+
+/**
+ * 番組詳細APIを1件だけ中継する（**kick.com 用**・doc/09 項目DE）。終了の「確認」に使う。
+ *
+ * 🔴 **応答本文をそのまま返す。読まない。** 404 の読み方（`meta.status` が数値の 404 だけを
+ *    「その番組は無い」と読む）は api.js の `interpretProgramInfoResponse` の1箇所にある。
+ *    ここで読むと、ニコ生ページと kick.com で消す条件がずれる。
+ * ⚠️ **任意のURLを取れる中継にしないこと。** 受け取るのは番号だけで、URLはここで組む。
+ * ⚠️ HTTP の状態は見ない（詳細APIは 404 でも JSON で答える）。JSON でなければ json: null。
+ * @param {unknown} liveId lv を外した数字
+ */
+async function fetchProgramInfoRaw(liveId) {
+    if (typeof liveId !== 'string' || !/^\d+$/.test(liveId)) return { ok: false, reason: 'bad-id' }
+    if (!(await hasKickPermission()) || !(await hasOriginPermission(PROGRAM_INFO_ORIGIN))) {
+        return { ok: false, reason: 'no-permission' }
+    }
+    try {
+        const res = await fetch(`${PROGRAM_INFO_API}/lv${liveId}`, { cache: 'no-store' })
+        let json = null
+        try { json = await res.json() } catch (e) { json = null }
+        return { ok: true, json }
+    } catch (e) {
+        return { ok: false, reason: 'network' }
+    }
 }
 
 /**
@@ -636,6 +762,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         fetchNicoFollowed().then(sendResponse, (e) => {
             sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
         })
+        return true
+    }
+
+    if (msg.type === 'nico:notifybox') {
+        fetchNotifybox().then(sendResponse, (e) => {
+            sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
+        })
+        return true
+    }
+
+    if (msg.type === 'nico:programInfo') {
+        fetchProgramInfoRaw(msg.id).then(sendResponse, (e) => {
+            sendResponse({ ok: false, reason: 'internal', message: String((e && e.message) || e) })
+        })
+        return true
+    }
+
+    if (msg.type === 'kick:extraPermissions') {
+        readExtraPermissions().then(sendResponse, () => sendResponse({ ok: false }))
         return true
     }
 

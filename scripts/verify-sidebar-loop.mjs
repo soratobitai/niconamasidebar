@@ -2575,11 +2575,16 @@ async function liveStatisticsGroup() {
     }
     check('CT 🔴 options: 確認・削除は KICK_PERMISSIONS のまま',
         /permissions\.contains\(KICK_PERMISSIONS/.test(opt) && /permissions\.remove\(KICK_PERMISSIONS/.test(opt))
+    // ⚠️ 要求用の集合は EXTRA_ORIGINS（後から足した origin の一覧）を展開する形（doc/09 項目DE）。
+    //    中身の突き合わせ（SW と options で一致・確認用に混ざっていない）は検査 DE が実際に動かして見る。
+    const reqBody = (text) => objectLiteral(text, 'KICK_REQUEST_PERMISSIONS')
     check('CT 🔴 options: 要求だけ live2 込みの集合を使う',
         /permissions\.request\(KICK_REQUEST_PERMISSIONS/.test(opt)
-        && /KICK_REQUEST_PERMISSIONS = \{[\s\S]*?live2\.nicovideo\.jp/.test(opt))
+        && /\.\.\.EXTRA_ORIGINS/.test(reqBody(opt))
+        && /const EXTRA_ORIGINS = \[[^\]]*live2\.nicovideo\.jp[^\]]*\]/.test(opt), reqBody(opt).replace(/\s+/g, ' '))
     check('CT 🔴 SW も要求用の集合を別に持つ',
-        /KICK_REQUEST_PERMISSIONS = \{[\s\S]*?LIVE2_ORIGIN/.test(sw))
+        /\.\.\.EXTRA_ORIGINS/.test(reqBody(sw)) && /const EXTRA_ORIGINS = \[[^\]]*LIVE2_ORIGIN[^\]]*\]/.test(sw),
+        reqBody(sw).replace(/\s+/g, ' '))
     check('CT 🔴 SW: live2 の許可は別に確かめる（Kick の確認に混ぜない）',
         /function hasLive2Permission\(\)/.test(sw)
         && /hasLive2Permission\(\)\)\) return \{ ok: false, reason: 'no-permission' \}/.test(sw))
@@ -2762,9 +2767,10 @@ async function endedByAutoNextGroup() {
         '後だと1回目の取得に間に合わない')
     check('CS kick.com 側は期限を切ってある（notifybox の鳴る罠が無いため）',
         /endedByAutoNextUntil/.test(kickJs) && /Date\.now\(\) > endedByAutoNextUntil/.test(kickJs))
-    // 誤って消した時の受け皿（ニコ生側）が生きていること
+    // 誤って消した時の受け皿が生きていること。判断は両ページ共有の部品にある（doc/09 項目DE）。
+    const endedSrc = stripComments(readFileSync(new URL('../src/services/endedPrograms.js', import.meta.url), 'utf8'))
     check('CS 誤りの受け皿は残っている（notifybox に戻れば印を落として警告）',
-        /_endedConfirmed\.delete\(id\)/.test(umSrc) && /warnNotifyboxResurrection\(/.test(umSrc))
+        /this\.confirmed\.delete\(id\)/.test(endedSrc) && /warnNotifyboxResurrection\(id\)/.test(endedSrc))
     check('CS 印の期限は hop の印と同じ定数を使う（別々に持たない）',
         /Date\.now\(\) - mark\.at > AUTO_NEXT_HOP_VALID_MS/.test(st))
 }
@@ -3877,6 +3883,570 @@ async function unwrapWrappedThumbnail() {
 }
 
 /**
+ * DF: kick.com でも、新しく始まったニコ生の番組を早く出す（2026-09-23・利用者要望）。
+ *
+ * ニコ生ページは notifybox とフォローAPIの和集合で、新着を 20〜101秒 早く出している（項目AD）。
+ * 新着カードの名前とアイコン（項目AT）、storage への種蒔きとライブサムネの追撃（項目AZ）まで揃って
+ * 初めて「早く・絵つきで」出る。kick.com にはどれも無かった。
+ *
+ * 🔴 **直し方は項目DE と同じく「1つにする」。** 3つの部品を `services/newPrograms.js` に置き、
+ *    両ページが同じものを使う。ここでは部品の動きと、**両ページの配線**を縛る。
+ */
+async function kickNewProgramsGroup() {
+    console.log('=== DF kick.com でも新着を早く出す ===')
+    const { readFileSync } = await import('fs')
+    const src = (f) => stripComments(readFileSync(new URL('../src/' + f, import.meta.url), 'utf8'))
+    const { mergeProgramSources, seedNewProgramsToStorage, chaseLiveThumbIfYoung } = await import('../src/services/newPrograms.js')
+    const { newProgramFastPollMs } = await import('../src/config/constants.js')
+    const saved = globalThis.localStorage.getItem('programInfos')
+    const setStored = (list) => globalThis.localStorage.setItem('programInfos', JSON.stringify(list))
+    const getStoredList = () => JSON.parse(globalThis.localStorage.getItem('programInfos') || '[]')
+    try {
+        // --- ① 和集合 ---
+        const follow = (n) => ({ id: `lv${n}`, title: `f${n}`, _source: 'followApi' })
+        const row = (n, extra = {}) => ({ id: String(n), title: `n${n}`, community_name: `配信者${n}`,
+            thumbnail_url: `https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/1/${n}.jpg`, provider_type: 'community', ...extra })
+        setStored([])
+        let m = mergeProgramSources([row(1), row(2)], [follow(1)], () => getStoredList())
+        const byId = new Map(m.map((p) => [p.id, p]))
+        check('DF フォローAPIに居る番組はフォローAPIのほうを使う', byId.get('lv1') && byId.get('lv1')._source === 'followApi')
+        const fresh = byId.get('lv2')
+        check('DF 🔴 notifybox にしか居ない番組もカードにする（新着）', !!fresh && fresh._source === 'notifybox', m.map((p) => p.id).join(','))
+        check('DF 🔴 新着カードに配信者名とアイコンが入る（項目AT）',
+            !!fresh && fresh.contentOwner && fresh.contentOwner.name === '配信者2' && !!fresh.contentOwner.icon,
+            JSON.stringify(fresh && fresh.contentOwner))
+        check('DF 🔴 新着のライブサムネ欄は空（アイコンをサムネに入れない・項目AA）', !!fresh && fresh.thumbnailUrl === '')
+
+        let asked = 0
+        m = mergeProgramSources(false, [follow(1), follow(3)], () => { asked++; return [] })
+        check('DF 🔴 notifybox が無い（権限なし・失敗）周期はフォローAPIの結果そのまま＝従来どおり',
+            m.map((p) => p.id).join(',') === 'lv1,lv3' && asked === 0, `${m.map((p) => p.id).join(',')} / storage ${asked}回`)
+
+        setStored([{ id: 'lv5', title: '前回値', _source: 'notifybox', onAirTime: { beginAt: '2026-01-01T00:00:00.000Z' } }])
+        m = mergeProgramSources([row(5)], [], () => getStoredList())
+        check('DF 🔴 2周期目からは storage の前回値を使う（開始時刻＝並び順が周期ごとに揺れない）',
+            m.length === 1 && m[0].title === '前回値' && m[0].onAirTime.beginAt === '2026-01-01T00:00:00.000Z', JSON.stringify(m[0]))
+
+        setStored([{ id: 'lv6', title: '前回値6' }])
+        m = mergeProgramSources([row(6), row(7)], null, () => getStoredList())
+        check('DF フォローAPIが落ちた周期も notifybox と前回値で描ける',
+            m.map((p) => p.id).sort().join(',') === 'lv6,lv7' && m.find((p) => p.id === 'lv6').title === '前回値6', m.map((p) => p.id).join(','))
+
+        // --- ② 種蒔き ---
+        setStored([])
+        seedNewProgramsToStorage([follow(1), { ...fresh }])
+        const afterSeed = getStoredList().map((p) => p.id)
+        check('DF 🔴 蒔くのは notifybox 由来の新着だけ（フォローAPIの記録を上書きしない）',
+            afterSeed.join(',') === 'lv2', afterSeed.join(','))
+
+        // --- ③ ライブサムネの追撃 ---
+        const SHOT = 'https://dlive.nicovideo.jp/live/9/screenshot/1.jpg'
+        const young = new Date(Date.now() - 30000).toISOString()
+        const old = new Date(Date.now() - newProgramFastPollMs - 1000).toISOString()
+        const rec = (n, extra = {}) => ({ id: `lv${n}`, providerType: 'user', isMemberOnly: false, thumbnailUrl: '',
+            onAirTime: { beginAt: young }, ...extra })
+        const detail = { liveScreenshotThumbnailUrls: { middle: SHOT } }
+        const cases = [
+            ['若い user・サムネ空 → 取る', rec(10), true],
+            ['開始から時間が経っている → 取らない', rec(11, { onAirTime: { beginAt: old } }), false],
+            ['会員限定 → 取らない', rec(12, { isMemberOnly: true }), false],
+            ['チャンネル → 取らない', rec(13, { providerType: 'channel' }), false],
+            ['既にサムネがある → 取らない', rec(14, { thumbnailUrl: SHOT }), false],
+            ['開始時刻が無い → 取らない', rec(15, { onAirTime: {} }), false],
+        ]
+        for (const [label, r, want] of cases) {
+            setStored([r])
+            let calls = 0
+            const ok = await chaseLiveThumbIfYoung(r.id.replace(/^lv/, ''), async () => { calls++; return detail })
+            const after = getStoredList()[0]
+            const got = ok === true && calls === 1 && after.thumbnailUrl === SHOT
+            const none = ok === false && calls === 0 && after.thumbnailUrl === r.thumbnailUrl
+            check(`DF 追撃: ${label}`, want ? got : none, `ok=${ok} / 聞いた ${calls}回 / ${after.thumbnailUrl}`)
+        }
+        setStored([rec(16)])
+        let ok = await chaseLiveThumbIfYoung('16', async () => undefined)
+        check('DF 追撃: 詳細APIが答えなければ書き換えない', ok === false && getStoredList()[0].thumbnailUrl === '')
+        setStored([rec(17)])
+        ok = await chaseLiveThumbIfYoung('17', async () => ({ liveScreenshotThumbnailUrls: { middle: 'https://secure-dcdn.cdn.nimg.jp/nicoaccount/usericon/1/1.jpg' } }))
+        check('DF 🔴 追撃: ライブスクショでない URL（アイコン等）は入れない', ok === false && getStoredList()[0].thumbnailUrl === '')
+        setStored([rec(18)])
+        ok = await chaseLiveThumbIfYoung('18', async () => { throw new Error('boom') })
+        check('DF 追撃: 聞き方が投げても落ちない', ok === false)
+        const { needsLiveThumbChase } = await import('../src/services/newPrograms.js')
+        const judged = cases.map(([label, r, want]) => [label, needsLiveThumbChase(r) === want])
+        check('DF 🔴 追撃の判定（needsLiveThumbChase）は追撃そのものと同じ答えを返す',
+            judged.every(([, same]) => same), judged.filter(([, same]) => !same).map(([l]) => l).join(' / '))
+        check('DF 判定: storage に無い番組は追撃しない', needsLiveThumbChase(undefined) === false)
+
+        // --- ④ 判断は1箇所。両ページが同じ部品を使う ---
+        const files = await listSrcFiles()
+        const using = (re) => files.filter((f) => re.test(stripComments(readFileSync(f, 'utf8'))))
+            .map((f) => f.replace(/\\/g, '/').replace(/^.*\/src\//, ''))
+        const mapUsers = using(/mapNotifyboxRowToInfo\(/).filter((f) => f !== 'services/api.js')
+        check('DF 🔴 notifybox の行から新着を作るのは1箇所だけ（newPrograms.js）',
+            mapUsers.length === 1 && mapUsers[0] === 'services/newPrograms.js', mapUsers.join(', '))
+        const patchUsers = using(/patchProgramThumbnail\(/).filter((f) => f !== 'services/storage.js')
+        check('DF 🔴 追撃の書き戻しも1箇所だけ（newPrograms.js）',
+            patchUsers.length === 1 && patchUsers[0] === 'services/newPrograms.js', patchUsers.join(', '))
+
+        const um = src('managers/UpdateManager.js')
+        check('DF 🔴 ニコ生ページは共通の和集合を使う',
+            /_mergeSources\(notifyList, fetched\) \{\s*return mergeProgramSources\(notifyList, fetched, getProgramInfosFromStorage\);/.test(um))
+        check('DF 🔴 ニコ生ページは共通の種蒔きを使う', /_seedNewProgramsToStorage\(programs\) \{\s*seedNewProgramsToStorage\(programs\);/.test(um))
+        check('DF 🔴 ニコ生ページは共通の追撃を使う（聞き方は自分で叩く詳細API）',
+            /_fetchLiveThumbIfPendingYoung\(id\) \{\s*await chaseLiveThumbIfYoung\(id, fetchProgramInfo\);/.test(um))
+
+        const kick = src('kickPage.js')
+        check('DF 🔴 kick.com は和集合を作ってから終わった番組を外す（ニコ生ページと同じ順番）',
+            /nicoEndedFilter\.apply\(mergeProgramSources\(notifyList, nicoBase, getProgramInfos\), notifyList, isEndedByAutoNext\)/.test(kick),
+            'ここが抜けると kick.com だけ新着がフォローAPIの拾うまで出ない')
+        check('DF 🔴 kick.com は両方取れなかった周期だけ据え置く（ニコ生ページの bothFailed と同じ）',
+            /const nicoBothFailed = !nicoFetched && !Array\.isArray\(notifyList\)/.test(kick)
+            && /nicoBothFailed\s*\?\s*lastNicoPrograms/.test(kick))
+        check('DF 🔴 kick.com はフォローAPIだけ落ちた周期に前回のリストを土台にする（notifybox の100件で切れて点滅しない）',
+            /const nicoBase = nicoFetched \|\| lastNicoPrograms/.test(kick),
+            'notifybox と storage だけで組むと、100件を超えた番組や notifybox に載らない番組がその周期だけ消える')
+        check('DF 🔴 kick.com は新着を storage に蒔く（追撃の前提）',
+            /if \(!nicoBothFailed\) seedNewProgramsToStorage\(nicoPrograms\)/.test(kick))
+        check('DF 🔴 kick.com が保存するのはフォローAPIの結果だけ（前回値を書き戻して差分を 0 にしない）',
+            /upsertProgramInfos\(nicoRes\.programs\)/.test(kick) && !/upsertProgramInfos\(nicoPrograms\)/.test(kick))
+        check('DF 🔴 kick.com の追撃は共通の関数・SW 経由の聞き方',
+            /chaseLiveThumbIfYoung\(id, fetchProgramDetailViaSw\)/.test(kick)
+            && /return \(await fetchProgramInfoViaSw\(liveId\)\)\.data/.test(kick))
+        const thumbLoop = (kick.match(/thumbTimer = setInterval\([\s\S]*?\n {4}\}, thumbMs\)/) || [''])[0]
+        check('DF （空振り防止）サムネの周期を取り出せている', thumbLoop.length > 200, `${thumbLoop.length} 文字`)
+        check('DF 🔴 kick.com はサムネの周期で追撃する', /chaseNewNicoThumbs\(nicoIds, stored\)/.test(thumbLoop))
+        check('DF 🔴 kick.com は新しく立ったカードをその場で追撃する（20秒待たせない）',
+            /chaseNewNicoThumbs\(newNicoIds, getProgramInfos\(\) \|\| \[\]\)/.test(kick) && /for \(const \[id, el\] of newElements\)/.test(kick))
+        const chaseBody = (kick.match(/function chaseNewNicoThumbs\(ids, stored\) \{[\s\S]*?\n\}/) || [''])[0]
+        check('DF （空振り防止）追撃の関数を取り出せている', chaseBody.length > 200, `${chaseBody.length} 文字`)
+        check('DF 🔴 追撃は番組ごとに重ねない（全体を1本のフラグで止めない＝新しいカードの追撃が捨てられない）',
+            /chasingThumbIds\.has\(id\)/.test(chaseBody) && /chasingThumbIds\.delete\(id\)/.test(chaseBody)
+            && !/^let chasing\w* = (false|true)/m.test(kick))
+        check('DF 🔴 追撃の候補は部品の判定（needsLiveThumbChase）で先に絞る（番組ごとに storage を読まない）',
+            /needsLiveThumbChase\(byId\.get\(`lv\$\{id\}`\), now\)/.test(chaseBody))
+        check('DF 追撃は Kick のカードを対象にしない',
+            /getAttribute\('data-service'\) !== 'kick'\) nicoIds\.push/.test(thumbLoop))
+    } finally {
+        globalThis.localStorage.setItem('programInfos', saved == null ? '[]' : saved)
+    }
+}
+
+/**
+ * DE: kick.com でも、終わったニコ生の番組をすぐ外す（2026-09-23・利用者報告）。
+ *
+ * 【症状】kick.com のサイドバーだけ、終わった番組がリストに残る。フォローAPIが手放すと消える。
+ * 【原因】終了確認（項目BF-2）がニコ生ページ（UpdateManager）にしか無かった。写し漏れ（項目DD）。
+ *
+ * 🔴 **直し方は「写す」ではなく「1つにする」。** 判断は `EndedProgramFilter` の1箇所に置き、
+ *    両ページが同じものを使う。違うのは詳細APIの聞き方（kick.com は SW 経由）だけ。
+ *    ここではそれを**両ページの配線ごと**縛る（写し漏れは「片方の配線が抜ける」形で起きる）。
+ *
+ * 🔴 **いちばん危ないのは権限の集合。** 確認用（KICK_PERMISSIONS）に origin を足すと、
+ *    既に許可済みの Kick 利用者が全員「未許可」になって連携ごと止まる（項目CT と同じ罠）。
+ */
+async function kickEndedProgramsGroup() {
+    console.log('=== DE kick.com でも終わった番組をすぐ外す ===')
+    const { readFileSync } = await import('fs')
+    const vm = await import('vm')
+    const rdRaw = (f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8')
+    const src = (f) => stripComments(rdRaw('src/' + f))
+    const { EndedProgramFilter } = await import('../src/services/endedPrograms.js')
+    const { interpretProgramInfoResponse } = await import('../src/services/api.js')
+    const { notifyboxAPI, notifyboxRows, liveInfoAPI, optionKeys } = await import('../src/config/constants.js')
+    const tick = () => new Promise((r) => setTimeout(r, 0))
+    const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+
+    // --- ① 応答の読み方（両ページ共通の1関数） ---
+    const rd404 = interpretProgramInfoResponse({ meta: { status: 404, errorCode: 'NOT_FOUND' } })
+    check('DE 数値の 404 は「その番組は無い」と読む', rd404.data === undefined && rd404.metaStatus === 404, JSON.stringify(rd404))
+    check('DE 🔴 文字列の "404" は答えとして読まない（0）',
+        interpretProgramInfoResponse({ meta: { status: '404' } }).metaStatus === 0)
+    check('DE 🔴 200 でも data が無ければ答えにしない',
+        interpretProgramInfoResponse({ meta: { status: 200 } }).data === undefined)
+    const rdOk = interpretProgramInfoResponse({ meta: { status: 200 }, data: { liveCycle: 'ended' } })
+    check('DE 200 と data があれば読む', rdOk.metaStatus === 200 && rdOk.data && rdOk.data.liveCycle === 'ended')
+    let threw = false
+    let rdNull
+    try { rdNull = interpretProgramInfoResponse(null) } catch (e) { threw = true }
+    check('DE 🔴 JSON でなかった応答（null）でも投げず、答え無し（0）にする',
+        !threw && rdNull && rdNull.metaStatus === 0 && rdNull.data === undefined, threw ? 'threw' : JSON.stringify(rdNull))
+
+    // --- ② 判断の部品（EndedProgramFilter）。kick.com の聞き方で使った時の形 ---
+    const p = (n) => ({ id: `lv${n}` })
+    const row = (n) => ({ id: String(n) })
+    const ids = (list) => list.map((x) => x.id).join(',')
+    const makeFilter = (answers) => {
+        const asked = []
+        const filter = new EndedProgramFilter({
+            fetchStatus: async (liveId) => {
+                asked.push(liveId)
+                const a = answers[liveId]
+                if (a === 'throw') throw new Error('boom')
+                return a || { data: { liveCycle: 'on_air' }, metaStatus: 200 }
+            },
+        })
+        return { filter, asked }
+    }
+
+    let t = makeFilter({ 2: { data: { liveCycle: 'ended' }, metaStatus: 200 } })
+    let out = await t.filter.apply([p(1), p(2), p(3)], [row(1), row(3)])
+    check('DE 🔴 notifybox に居ない番組を聞いて、ended なら外す', ids(out) === 'lv1,lv3', ids(out))
+    check('DE 聞くのは疑い（notifybox に居ない番組）だけ', t.asked.join(',') === '2', t.asked.join(','))
+    check('DE 🔴 lv を外した数字で聞く（SW は数字しか受け付けない）', /^\d+$/.test(t.asked[0] || ''), t.asked[0])
+
+    t = makeFilter({})
+    out = await t.filter.apply([p(1), p(2)], false)
+    check('DE 🔴 notifybox が無い（権限なし・失敗）周期は、1件も聞かず全部残す＝従来どおり',
+        ids(out) === 'lv1,lv2' && t.asked.length === 0, `${ids(out)} / 聞いた ${t.asked.length}件`)
+
+    t = makeFilter({ 2: { data: { liveCycle: 'ended' }, metaStatus: 200 } })
+    await t.filter.apply([p(1), p(2)], [row(1)])
+    out = await t.filter.apply([p(1), p(2)], false)
+    check('DE 確認済みの番組は notifybox が落ちても戻らない', ids(out) === 'lv1', ids(out))
+
+    t = makeFilter({ 2: 'throw' })
+    out = await t.filter.apply([p(1), p(2)], [row(1)])
+    check('DE 🔴 聞き方が投げても消さない（答え無しに倒す）', ids(out) === 'lv1,lv2', ids(out))
+
+    t = makeFilter({ 2: { data: undefined, metaStatus: 0 } })
+    out = await t.filter.apply([p(1), p(2)], [row(1)])
+    check('DE 🔴 答えが得られない（SW が落ちた・0）周期は消さない', ids(out) === 'lv1,lv2', ids(out))
+
+    t = makeFilter({})
+    out = await t.filter.apply([p(1), p(2)], [row(1)], (id) => id === 'lv2')
+    check('DE 自動移動で離れた番組は聞かずに外す', ids(out) === 'lv1' && t.asked.length === 0,
+        `${ids(out)} / 聞いた ${t.asked.join(',')}`)
+
+    const nf = { data: undefined, metaStatus: 404 }
+    t = makeFilter({ 2: nf, 3: nf, 4: nf })
+    out = await t.filter.apply([p(1), p(2), p(3), p(4)], [row(1)])
+    check('DE 🔴 疑いが全員404の周期は1件も消さない', ids(out) === 'lv1,lv2,lv3,lv4', ids(out))
+
+    // --- ③ 判断は1箇所。両ページが同じ部品を使う（写し漏れ対策・項目BN の型） ---
+    const endedSrc = src('services/endedPrograms.js')
+    const um = src('managers/UpdateManager.js')
+    const kick = src('kickPage.js')
+    const judgeFiles = (await listSrcFiles())
+        .filter((f) => /liveCycle\s*===\s*'ended'/.test(stripComments(readFileSync(f, 'utf8'))))
+        .map((f) => f.replace(/\\/g, '/').replace(/^.*\/src\//, ''))
+    check('DE 🔴 「ended なら外す」の判断は1箇所だけ（endedPrograms.js）',
+        judgeFiles.length === 1 && judgeFiles[0] === 'services/endedPrograms.js', judgeFiles.join(', ') || '0件')
+    check('DE （空振り防止）部品の中に判断が在る', /liveCycle === 'ended'/.test(endedSrc))
+    check('DE 🔴 ニコ生ページはこの部品で判断する（自前で持たない）',
+        /new EndedProgramFilter\(\{\s*fetchStatus:\s*fetchProgramInfoWithStatus\s*\}\)/.test(um)
+        && /this\._endedFilter\.apply\(programs, notifyList,/.test(um))
+    check('DE 🔴 kick.com もこの部品で判断する',
+        /new EndedProgramFilter\(\{\s*fetchStatus:\s*fetchProgramInfoViaSw\s*\}\)/.test(kick)
+        && /nicoEndedFilter\.apply\(mergeProgramSources\(notifyList, nicoBase, getProgramInfos\), notifyList, isEndedByAutoNext\)/.test(kick),
+        'ここが抜けると kick.com だけ終わった番組が残る（今回の不具合そのもの）')
+    const allLine = (kick.match(/const \[kickRes, nicoRes, notifyList\] = await Promise\.all\(\[[^\]]*\]\)/) || [''])[0]
+    check('DE 🔴 kick.com は notifybox を同じ取得で取る（別の await にしない）',
+        /fetchNotifyboxViaSw\(\)/.test(allLine) && /fetchNicoPrograms\(\)/.test(allLine), allLine || '見つからない')
+    check('DE 🔴 kick.com は詳細APIの応答を共通の関数で読む',
+        /return interpretProgramInfoResponse\(res\.json\)/.test(kick))
+    check('DE 🔴 kick.com の notifybox は失敗を false で返す（[] にしない＝全番組が疑いにならない）',
+        /Array\.isArray\(res\.rows\) \? res\.rows : false/.test(kick) && !/fetchNotifyboxViaSw[\s\S]{0,400}?return \[\]/.test(kick))
+    check('DE kick.com からは直接叩かない（CORS が live.nicovideo.jp にしか開いていない）',
+        !/papi\.live\.nicovideo\.jp|api\.cas\.nicovideo\.jp/.test(kick))
+
+    // --- ④ SW を実際に動かす（static/sw.js はバンドル外。vm で読む） ---
+    const swSrc = rdRaw('static/sw.js')
+    const KICK_ALL = ['cookies', 'scripting', 'https://kick.com/*', 'https://live.nicovideo.jp/*',
+        'https://*.dlive.nicovideo.jp/*', 'https://images.kick.com/*']
+    const PAPI = 'https://papi.live.nicovideo.jp/*'
+    const CAS = 'https://api.cas.nicovideo.jp/*'
+    const LIVE2 = 'https://live2.nicovideo.jp/*'
+    const loadSw = (granted, fetchImpl) => {
+        const g = new Set(granted)
+        let onMessage = null
+        let onAdded = null
+        let injected = 0
+        const fetchCalls = []
+        const noop = { addListener() {} }
+        const chrome = {
+            runtime: { onInstalled: noop, onStartup: noop, onMessage: { addListener(fn) { onMessage = fn } }, lastError: undefined, openOptionsPage() {} },
+            permissions: {
+                contains(pp, cb) {
+                    const ok = (pp.permissions || []).every((x) => g.has(x)) && (pp.origins || []).every((x) => g.has(x))
+                    queueMicrotask(() => cb(ok))
+                },
+                onAdded: { addListener(fn) { onAdded = fn } }, onRemoved: noop,
+            },
+            // kick.com のタブが1枚開いている状態。流し込み（executeScript）の回数を数える。
+            tabs: { query: async () => [{ id: 1 }], sendMessage(_id, _m, cb) { if (cb) cb() } },
+            scripting: {
+                getRegisteredContentScripts: async () => [],
+                registerContentScripts: async () => {},
+                unregisterContentScripts: async () => {},
+                insertCSS: async () => {},
+                executeScript: async () => { injected++ },
+            },
+        }
+        const ctx = vm.createContext({
+            chrome, console, setTimeout, clearTimeout, URL, queueMicrotask,
+            fetch: async (url, init) => { fetchCalls.push({ url, init }); return fetchImpl(url, init) },
+        })
+        vm.runInContext(swSrc, ctx)
+        const send = (msg) => new Promise((resolve) => {
+            const r = onMessage(msg, {}, resolve)
+            if (r !== true) resolve(undefined)
+        })
+        return { ctx, send, fetchCalls, fireAdded: (added) => onAdded(added), injected: () => injected }
+    }
+    const jsonRes = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body })
+    const htmlRes = (status) => ({ status, ok: false, json: async () => { throw new SyntaxError('not json') } })
+
+    // 定数の突き合わせ（バンドル外なので import で共有できない）
+    const sw0 = loadSw([], () => jsonRes(200, {}))
+    const swConst = (name) => vm.runInContext(name, sw0.ctx)
+    check('DE 🔴 SW の notifybox URL が constants と一致', swConst('NOTIFYBOX_API') === notifyboxAPI, swConst('NOTIFYBOX_API'))
+    check('DE 🔴 SW の notifybox 件数が constants と一致（500 で事故を起こした値）',
+        swConst('NOTIFYBOX_ROWS') === notifyboxRows, `sw=${swConst('NOTIFYBOX_ROWS')} / constants=${notifyboxRows}`)
+    check('DE 🔴 SW の詳細API URL が constants と一致', swConst('PROGRAM_INFO_API') === liveInfoAPI, swConst('PROGRAM_INFO_API'))
+
+    // 詳細APIの中継
+    let sw = loadSw([...KICK_ALL, CAS], () => jsonRes(404, { meta: { status: 404, errorCode: 'NOT_FOUND' } }))
+    let res = await sw.send({ type: 'nico:programInfo', id: '351' })
+    check('DE SW: 詳細APIを lv 付きで組んで叩く',
+        sw.fetchCalls.length === 1 && sw.fetchCalls[0].url === `${liveInfoAPI}/lv351`, sw.fetchCalls.map((c) => c.url).join(','))
+    check('DE 🔴 SW: 応答本文をそのまま返す（404 でも読まずに渡す）',
+        res && res.ok === true && res.json && res.json.meta.status === 404, JSON.stringify(res))
+    check('DE 🔴 SW の中継 → 共通の読み方で「無い」になる（両ページで消す条件が揃う）',
+        interpretProgramInfoResponse(res.json).metaStatus === 404)
+    const leaked = []
+    for (const bad of ['lv351', '35a', '', '../x', 351, null, '1/2']) {
+        sw = loadSw([...KICK_ALL, CAS], () => jsonRes(200, {}))
+        res = await sw.send({ type: 'nico:programInfo', id: bad })
+        if (!(res && res.ok === false && sw.fetchCalls.length === 0)) leaked.push(JSON.stringify(bad))
+    }
+    check('DE 🔴 SW: 数字以外の id では何も取りに行かない（任意のURLを取れる中継にしない）',
+        leaked.length === 0, '取りに行った id: ' + leaked.join(', '))
+    sw = loadSw([...KICK_ALL], () => jsonRes(200, {}))
+    res = await sw.send({ type: 'nico:programInfo', id: '351' })
+    check('DE 🔴 SW: 詳細APIの許可が無ければ取りに行かない',
+        res && res.reason === 'no-permission' && sw.fetchCalls.length === 0, JSON.stringify(res))
+    sw = loadSw([CAS], () => jsonRes(200, {}))
+    res = await sw.send({ type: 'nico:programInfo', id: '351' })
+    check('DE SW: Kick 連携が無効なら取りに行かない（origin だけ残っていても）',
+        res && res.reason === 'no-permission' && sw.fetchCalls.length === 0, JSON.stringify(res))
+    sw = loadSw([...KICK_ALL, CAS], () => htmlRes(404))
+    res = await sw.send({ type: 'nico:programInfo', id: '351' })
+    check('DE 🔴 SW: JSON でない応答（ゲートウェイの404）は json:null → 答え無し（消さない）',
+        res && res.ok === true && res.json === null && interpretProgramInfoResponse(res.json).metaStatus === 0, JSON.stringify(res))
+
+    // notifybox の中継
+    const nbBody = { meta: { status: 200 }, data: { notifybox_content: [{ id: '1' }, { id: '2' }] } }
+    sw = loadSw([...KICK_ALL, PAPI], () => jsonRes(200, nbBody))
+    res = await sw.send({ type: 'nico:notifybox' })
+    check('DE SW: notifybox の行をそのまま返す', res && res.ok === true && Array.isArray(res.rows) && res.rows.length === 2, JSON.stringify(res))
+    check('DE 🔴 SW: notifybox はログインの cookie を載せて件数つきで叩く',
+        sw.fetchCalls.length === 1 && sw.fetchCalls[0].url === `${notifyboxAPI}?rows=${notifyboxRows}`
+        && sw.fetchCalls[0].init && sw.fetchCalls[0].init.credentials === 'include',
+        JSON.stringify(sw.fetchCalls[0] || {}))
+    sw = loadSw([...KICK_ALL], () => jsonRes(200, nbBody))
+    res = await sw.send({ type: 'nico:notifybox' })
+    check('DE 🔴 SW: notifybox の許可が無ければ取りに行かない',
+        res && res.ok === false && sw.fetchCalls.length === 0, JSON.stringify(res))
+    sw = loadSw([...KICK_ALL, PAPI], () => htmlRes(404))
+    res = await sw.send({ type: 'nico:notifybox' })
+    check('DE SW: 未ログイン（404 の HTML）は ok:false（その周期は疑いを立てない）', res && res.ok === false, JSON.stringify(res))
+    sw = loadSw([...KICK_ALL, PAPI], () => jsonRes(200, { meta: { status: 500 } }))
+    res = await sw.send({ type: 'nico:notifybox' })
+    check('DE SW: meta.status が 200 でなければ ok:false', res && res.ok === false, JSON.stringify(res))
+
+    // 足りない origin
+    sw = loadSw([...KICK_ALL, LIVE2], () => jsonRes(200, {}))
+    res = await sw.send({ type: 'kick:extraPermissions' })
+    check('DE 🔴 SW: 足りない origin だけを返す',
+        res && res.ok === true && JSON.stringify(res.missing) === JSON.stringify([PAPI, CAS]), JSON.stringify(res))
+    sw = loadSw([LIVE2], () => jsonRes(200, {}))
+    res = await sw.send({ type: 'kick:extraPermissions' })
+    check('DE 🔴 SW: Kick 連携が無効な人には「足りない」と言わない',
+        res && res.ok === true && res.missing.length === 0, JSON.stringify(res))
+    sw = loadSw([...KICK_ALL, LIVE2, PAPI, CAS], () => jsonRes(200, {}))
+    res = await sw.send({ type: 'kick:extraPermissions' })
+    check('DE SW: 全部そろっていれば空', res && res.missing.length === 0, JSON.stringify(res))
+
+    // 🔴 追加の許可が通った時に kick.com へ流し込み直さないこと。kickpage.js に二重読み込みの守りは無く、
+    //    流し込むと2つ目の実体が動いて取得が二重になる（Kick 連携は ON のままなので既に入っている）。
+    sw = loadSw([...KICK_ALL, LIVE2, PAPI, CAS], () => jsonRes(200, {}))
+    await settle()
+    const injectedAtLoad = sw.injected()
+    sw.fireAdded({ permissions: [], origins: [PAPI, CAS] })
+    await settle()
+    check('DE 🔴 SW: 後から足した origin だけが増えた時は kick.com へ流し込まない（二重に動かない）',
+        sw.injected() === injectedAtLoad, `流し込み ${sw.injected() - injectedAtLoad} 回`)
+    sw.fireAdded({ permissions: ['cookies', 'scripting'], origins: [...KICK_ALL.slice(2), LIVE2, PAPI, CAS] })
+    await settle()
+    check('DE SW: Kick 連携を ON にした時は流し込む（従来どおり・空振り防止）',
+        sw.injected() === injectedAtLoad + 1, `流し込み ${sw.injected() - injectedAtLoad} 回`)
+    sw.fireAdded(undefined)
+    await settle()
+    check('DE SW: 引数が無い時は流し込まない（壊れ方の軽い側）', sw.injected() === injectedAtLoad + 1)
+
+    // 🔴 kick.com だけ先に許可されていた人が連携を ON にした時（増えるのは cookies や他の origin だけ）。
+    //    「kick.com の origin が増えた時だけ流し込む」形だと、開いているタブにサイドバーが入らなかった（2026-10-23 のレビュー）。
+    sw = loadSw([...KICK_ALL, LIVE2, PAPI, CAS], () => jsonRes(200, {}))
+    await settle()
+    const before2 = sw.injected()
+    sw.fireAdded({ permissions: ['cookies', 'scripting'], origins: KICK_ALL.slice(3).concat([LIVE2, PAPI, CAS]) })
+    await settle()
+    check('DE 🔴 SW: kick.com が先に許可済みでも、連携を ON にした時は流し込む',
+        sw.injected() === before2 + 1, `流し込み ${sw.injected() - before2} 回`)
+    // 連携の権限が1つ増えても、まだそろっていなければ流し込まない（サイドバーが動けない）
+    sw = loadSw(KICK_ALL.filter((p) => p !== 'scripting'), () => jsonRes(200, {}))
+    await settle()
+    const before3 = sw.injected()
+    sw.fireAdded({ permissions: ['cookies'], origins: [] })
+    await settle()
+    check('DE SW: 連携の権限がまだそろっていなければ流し込まない', sw.injected() === before3, `流し込み ${sw.injected() - before3} 回`)
+
+    // --- ⑤ 権限の集合（いちばん危ない罠） ---
+    const swKickPerm = vm.runInContext('KICK_PERMISSIONS', sw0.ctx)
+    const swExtra = vm.runInContext('EXTRA_ORIGINS', sw0.ctx)
+    const swReq = vm.runInContext('KICK_REQUEST_PERMISSIONS', sw0.ctx)
+    check('DE （空振り防止）SW の集合を読めている', Array.isArray(swKickPerm.origins) && swKickPerm.origins.length >= 4)
+    check('DE 🔴 SW: 確認用の KICK_PERMISSIONS に後から足した origin を混ぜない',
+        swExtra.every((o) => !swKickPerm.origins.includes(o)),
+        '混ぜると既存の Kick 利用者が全員「未許可」になって連携ごと止まる')
+    check('DE 🔴 SW: 要求する集合に papi と api.cas が入っている',
+        swReq.origins.includes(PAPI) && swReq.origins.includes(CAS) && swReq.origins.includes(LIVE2))
+    const mf = JSON.parse(rdRaw('manifest.json'))
+    const optionalHosts = mf.optional_host_permissions || []
+    check('DE 🔴 manifest: 要求する origin は全部 optional にある',
+        swReq.origins.every((o) => optionalHosts.includes(o)), swReq.origins.filter((o) => !optionalHosts.includes(o)).join(','))
+    check('DE 🔴 manifest: 必須のホスト権限にしない（更新で既存ユーザーの拡張が無効化される）',
+        !(mf.host_permissions || []).length)
+
+    // options.js を実際に動かす（DOM と chrome を差し替え）
+    const optSrc = rdRaw('static/options.js')
+    const loadOptions = (granted) => {
+        const g = new Set(granted)
+        const requests = []
+        const els = {}
+        const mk = () => ({
+            hidden: false, checked: false, textContent: '', disabled: false, handlers: {},
+            classList: { toggle() {}, add() {}, remove() {} },
+            addEventListener(type, fn) { this.handlers[type] = fn },
+        })
+        const document = { getElementById: (id) => (els[id] ||= mk()) }
+        document.getElementById('kick_extra').hidden = true // マークアップの既定
+        document.getElementById('kick_sub').hidden = true
+        const noop = { addListener() {} }
+        const chrome = {
+            runtime: { lastError: undefined, sendMessage(_m, cb) { if (cb) queueMicrotask(() => cb({ ok: true })) } },
+            permissions: {
+                contains(pp, cb) {
+                    const ok = (pp.permissions || []).every((x) => g.has(x)) && (pp.origins || []).every((x) => g.has(x))
+                    queueMicrotask(() => cb(ok))
+                },
+                request(pp, cb) { requests.push(pp); for (const o of pp.origins || []) g.add(o); queueMicrotask(() => cb(true)) },
+                remove(_pp, cb) { queueMicrotask(() => cb(true)) },
+                onAdded: noop, onRemoved: noop,
+            },
+        }
+        const ctx = vm.createContext({ chrome, document, console, queueMicrotask, setTimeout })
+        vm.runInContext(optSrc, ctx)
+        return { ctx, els, requests }
+    }
+    let op = loadOptions([...KICK_ALL, LIVE2])
+    await settle()
+    check('DE 🔴 設定ページ: Kick 有効で足りない許可がある時は「追加の許可」を出す', op.els.kick_extra.hidden === false)
+    op.els.kick_extra_grant.handlers.click()
+    // 🔴 同期で見る。await を挟んでから request すると Chrome に拒否される（ボタン操作の文脈から外れる）。
+    check('DE 🔴 設定ページ: 「許可する」で、押したその場で足りない分だけを要求する',
+        op.requests.length === 1 && JSON.stringify(op.requests[0].origins) === JSON.stringify([PAPI, CAS]),
+        JSON.stringify(op.requests))
+    await settle()
+    check('DE 設定ページ: 許可されたら「追加の許可」を隠す', op.els.kick_extra.hidden === true)
+    op = loadOptions([LIVE2])
+    await settle()
+    check('DE 🔴 設定ページ: Kick 連携が無効なら出さない', op.els.kick_extra.hidden === true)
+    op = loadOptions([...KICK_ALL, LIVE2, PAPI, CAS])
+    await settle()
+    check('DE 設定ページ: 全部そろっていれば出さない', op.els.kick_extra.hidden === true)
+    const optExtra = vm.runInContext('EXTRA_ORIGINS', op.ctx)
+    const optKickPerm = vm.runInContext('KICK_PERMISSIONS', op.ctx)
+    const optReq = vm.runInContext('KICK_REQUEST_PERMISSIONS', op.ctx)
+    check('DE 🔴 設定ページと SW で「後から足した origin」の一覧が一致',
+        JSON.stringify(optExtra) === JSON.stringify(swExtra), `options=${JSON.stringify(optExtra)} / sw=${JSON.stringify(swExtra)}`)
+    check('DE 🔴 設定ページと SW で要求する集合が一致',
+        JSON.stringify(optReq) === JSON.stringify(swReq))
+    check('DE 🔴 設定ページ: 確認用の KICK_PERMISSIONS に後から足した origin を混ぜない',
+        optExtra.every((o) => !optKickPerm.origins.includes(o)))
+    check('DE 設定ページ: マークアップの既定は hidden',
+        /<div class="extra" id="kick_extra" hidden>/.test(rdRaw('static/options.html')))
+
+    // --- ⑥ サイドバーの案内（判断・読めない時・保存） ---
+    const { shouldShowPermNotice, readMissingPermissions, readPermNoticeDismissed, savePermNoticeDismissed, PERM_NOTICE_KEY }
+        = await import('../src/ui/permNotice.js')
+    check('DE 案内: 足りない origin があって、まだ閉じていなければ出す',
+        shouldShowPermNotice({ missing: [PAPI], dismissed: [] }) === true)
+    check('DE 案内: 足りなくなければ出さない', shouldShowPermNotice({ missing: [], dismissed: [] }) === false)
+    check('DE 🔴 案内: ×で閉じた origin では二度と出さない', shouldShowPermNotice({ missing: [PAPI, CAS], dismissed: [PAPI, CAS] }) === false)
+    check('DE 🔴 案内: 閉じた後に足した origin が足りなければ、また出す',
+        shouldShowPermNotice({ missing: [PAPI, CAS], dismissed: [PAPI] }) === true)
+    check('DE 🔴 案内: 分からない値（null）では出さない',
+        shouldShowPermNotice({ missing: null, dismissed: [] }) === false
+        && shouldShowPermNotice({ missing: [PAPI], dismissed: null }) === false && shouldShowPermNotice(null) === false)
+    const savedChrome = globalThis.chrome
+    try {
+        globalThis.chrome = {
+            runtime: { id: 'x', get lastError() { return { message: 'boom' } }, sendMessage: (_m, cb) => cb(undefined) },
+            storage: { local: { get: (_k, cb) => cb(undefined) } },
+        }
+        check('DE 🔴 案内: SW が答えない時は null（＝出さない）', (await readMissingPermissions()) === null)
+        check('DE 🔴 案内: storage が読めない時は null（＝出さない）', (await readPermNoticeDismissed()) === null)
+        globalThis.chrome = undefined
+        check('DE 案内: 拡張が無効化されていても投げない',
+            (await readMissingPermissions()) === null && (await readPermNoticeDismissed()) === null)
+        const store = { [PERM_NOTICE_KEY]: [LIVE2] }
+        globalThis.chrome = {
+            runtime: { id: 'x', lastError: undefined },
+            storage: { local: {
+                get: (k, cb) => cb({ [k]: store[k] }),
+                set: (o, cb) => { Object.assign(store, o); cb() },
+            } },
+        }
+        await savePermNoticeDismissed([PAPI, CAS])
+        check('DE 🔴 案内: 閉じた分は前に閉じた分に足す（上書きすると前の案内が復活する）',
+            JSON.stringify(store[PERM_NOTICE_KEY]) === JSON.stringify([LIVE2, PAPI, CAS]), JSON.stringify(store[PERM_NOTICE_KEY]))
+        delete store[PERM_NOTICE_KEY]
+        check('DE 案内: まだ閉じていなければ空', JSON.stringify(await readPermNoticeDismissed()) === '[]')
+    } finally {
+        globalThis.chrome = savedChrome
+    }
+    check('DE 🔴 案内の保存キーは設定ではない（optionKeys に入れない）', !optionKeys.includes(PERM_NOTICE_KEY))
+
+    // --- ⑦ 案内の配線（kick.com だけ） ---
+    const sb = rdRaw('src/render/sidebar.js')
+    check('DE 🔴 案内のマークアップの既定は hidden', /<div id="perm_notice" hidden>/.test(sb))
+    check('DE 案内の文言', /アップデートで新しい許可が必要になりました/.test(sb) && /id="perm_notice_open"[^>]*>確認する</.test(sb))
+    check('DE 🔴 ×で閉じる', /perm_notice_close[\s\S]{0,200}?dismissPermNotice\(\)/.test(kick))
+    const openBlock = (kick.match(/permOpen\.addEventListener\([\s\S]*?\n {8}\}\)/) || [''])[0]
+    check('DE （空振り防止）「確認する」のハンドラを取り出せている', openBlock.length > 40, `${openBlock.length} 文字`)
+    check('DE 🔴 「確認する」は設定ページを開く', /kick:openOptions/.test(openBlock))
+    check('DE 🔴 「確認する」では閉じない（許可しないまま戻った人に二度と出なくなる）', !/dismissPermNotice/.test(openBlock))
+    check('DE 🔴 差し込み直すたびに読み直す（SPA の遷移で案内が黙って消えない）',
+        /wireControls\(root\)\s*reflectPermNotice\(\)/.test(kick))
+    check('DE 🔴 許可が通ったら消える（権限の変化で読み直す）',
+        /if \(!msg\.granted\) teardown\(\)\s*else reflectPermNotice\(\)/.test(kick))
+    check('DE 別タブで閉じたらこちらも読み直す', /changes\[PERM_NOTICE_KEY\]\) reflectPermNotice\(\)/.test(kick))
+    // 🔴 先に始まった読み直しが×の後に終わっても、閉じた案内を出し直さない（2026-10-23 のレビュー）。
+    const reflectBody = (kick.match(/async function reflectPermNotice\(\) \{[\s\S]*?\n\}/) || [''])[0]
+    const dismissBody = (kick.match(/function dismissPermNotice\(\) \{[\s\S]*?\n\}/) || [''])[0]
+    check('DE （空振り防止）読み直しと×の本体を取り出せている', reflectBody.length > 80 && dismissBody.length > 40)
+    check('DE 🔴 読み直しは最後に始まった1回だけ反映する',
+        /const gen = \+\+permNoticeGen/.test(reflectBody)
+        && reflectBody.indexOf('if (gen !== permNoticeGen) return') > reflectBody.indexOf('await Promise.all')
+        && reflectBody.indexOf('if (gen !== permNoticeGen) return') < reflectBody.indexOf('setPermNoticeVisible('))
+    check('DE 🔴 ×は走っている読み直しを無効にする', /permNoticeGen\+\+/.test(dismissBody))
+    check('DE 🔴 ニコ生ページには配線しない（足した origin はどれも kick.com 上の中継用）',
+        !/perm_notice|PermNotice/.test(src('main.js')))
+}
+
+/**
  * DA: Kick連携のお知らせ（doc/09 項目DA）。
  *
  * 🔴 **この機能の失敗は「一度消したお知らせがまた出る」**で、利用者からは
@@ -4304,14 +4874,18 @@ async function bothPagesSameSpec() {
         '両方 [] を返すと「取れなかった」が「居なかった」になる')
     check('BN kick.com は取得できなかったサービスの前回結果を据え置く',
         /kickRes\.ok \? kickRes\.programs : lastKickPrograms/.test(kpc)
-        && /nicoRes\.ok \? nicoRes\.programs : lastNicoPrograms/.test(kpc))
+        // ⚠️ ニコ生は notifybox との和集合（doc/09 項目DF）。**両方取れなかった周期だけ**据え置く
+        //    （ニコ生ページの bothFailed と同じ）。取れた周期は和集合→終了確認を通してから使う。
+        && /const nicoBothFailed = !nicoFetched && !Array\.isArray\(notifyList\)/.test(kpc)
+        && /nicoBothFailed\s*\?\s*lastNicoPrograms/.test(kpc))
     // 🔴 取れなかった周期に空へ落とすと、Kick のカードが全部消えて次の周期で戻る＝点滅する。
     //    2026-08-07 まで**ニコ生ページ側だけ**が空に落としていた（kick.com 側は据え置き）。
     check('BN ニコ生ページも Kick の取得失敗で据え置く（点滅させない）',
         /kickResult\.programs\s*:\s*\(this\._kickPrograms \|\| \[\]\)/.test(um),
         '空に落とすと、一瞬の失敗のたびに Kick のカードが消えて戻る')
     check('BN kick.com は据え置いた値で保存を上書きしない',
-        /if \(nicoRes\.ok && nicoPrograms\.length\) upsertProgramInfos/.test(kpc),
+        // ⚠️ 保存するのは取れた周期のフォローAPIの結果だけ（和集合は前回値を含む・doc/09 項目DF）。
+        /if \(nicoRes\.ok && nicoRes\.programs\.length\) upsertProgramInfos\(nicoRes\.programs\)/.test(kpc),
         '同じ値で上書きすると差分が 0 になり、盛り上がりが実際より低く出る')
 
     // --- document へ張るリスナーが積み上がらないか ---
@@ -5745,159 +6319,6 @@ async function widthRewriteSelectorGroup() {
         !css.includes(':max-w-screen'))
 }
 
-/**
- * 【一時的】DD 診断の検証。**原因が確定したら、このグループごと消す。**
- *
- * 🔴 2周目。1周目は「仮説の口」しか無く、**1行も出ないまま終わった**（doc/09 項目DD）。
- *    今回は口が3つある。**3つとも独立に検証する**（1つが黙っても他が鳴ること）。
- */
-async function nicoStaleProbeGroup() {
-    console.log('=== DD【一時】同じ配信者の新旧2番組／ニコ生だけ取得失敗 ===')
-    const { createNicoStaleState, noteNicoFetch, createDupOwnerState, noteDuplicateOwners, probeStartupLine } =
-        await import('../src/services/nicoStaleProbe.js')
-    const { readFileSync } = await import('fs')
-
-    // 🔴 **時刻は渡す。**実装の Date.now() に依存させると、経過秒の検証ができない。
-    const T0 = 1_000_000
-
-    // =====================================================================
-    // 口①（起動）: これが無いと沈黙が読めない
-    // =====================================================================
-    const startup = probeStartupLine()
-    check('DD 🔴 起動の1行が出る（沈黙を「症状なし」と読める根拠になる）',
-        typeof startup === 'string' && startup.includes('診断DD') && startup.length > 20, String(startup))
-
-    // =====================================================================
-    // 口②（本命・症状）: 同じ配信者の番組が2枚以上並んでいないか
-    // =====================================================================
-    const ent = (key, id, beginMs) => ({ key, id, beginMs })
-
-    // --- 正常な時は黙る ---
-    let d = createDupOwnerState()
-    check('DD 🔴 重複が無い間は1行も出ない',
-        noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null
-        && noteDuplicateOwners(d, { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 + 20000 }) === null)
-    check('DD 空のリストでも落ちない・鳴らない',
-        noteDuplicateOwners(d, { entries: [], now: T0 }) === null
-        && noteDuplicateOwners(d, { entries: null, now: T0 }) === null)
-
-    // --- 同じ配信者が2枚 → 1回だけ鳴る ---
-    d = createDupOwnerState()
-    const dupEntries = [ent('nico:9', 'lv100', T0 - 3600000), ent('nico:9', 'lv200', T0 - 60000), ent('nico:2', 'lv2')]
-    const dupFirst = noteDuplicateOwners(d, { entries: dupEntries, now: T0, fresh: true })
-    check('DD 🔴 同じ配信者が2枚並んだら鳴る（配信者キーと番組IDつき）',
-        !!dupFirst && dupFirst.includes('nico:9') && dupFirst.includes('lv100') && dupFirst.includes('lv200'),
-        String(dupFirst))
-    check('DD 🔴 新旧が分かるよう経過分を出す（どちらが古いか）',
-        !!dupFirst && dupFirst.includes('60分') && dupFirst.includes('1分'), String(dupFirst))
-
-    // 🔴 **ここが1周目に欠けていた1ビット。** 仮説（据え置き）を殺せる唯一の材料。
-    check('DD 🔴 取得成功中の重複は「据え置きではない」と書く（仮説を殺せる）',
-        !!dupFirst && dupFirst.includes('据え置きではありません'), String(dupFirst))
-    let d2 = createDupOwnerState()
-    const staleDup = noteDuplicateOwners(d2, { entries: dupEntries, now: T0, fresh: false })
-    check('DD 🔴 据え置き中の重複はそう書く（fresh で文面が変わる）',
-        !!staleDup && staleDup.includes('据え置き中') && !staleDup.includes('据え置きではありません'), String(staleDup))
-
-    // --- 毎周期は鳴らさない ---
-    let dupMid = null
-    for (let i = 2; i <= 9; i++) {
-        const line = noteDuplicateOwners(d, { entries: dupEntries, now: T0 + i * 20000, fresh: true })
-        if (line) dupMid = 'i=' + i + ' ' + line
-    }
-    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', dupMid === null, String(dupMid))
-    const dupTenth = noteDuplicateOwners(d, { entries: dupEntries, now: T0 + 10 * 20000, fresh: true })
-    check('DD 10周期目に途中経過を出す（経過秒つき）',
-        !!dupTenth && dupTenth.includes('200秒') && dupTenth.includes('10周期'), String(dupTenth))
-
-    // --- 消えたら「解消」を出す。**いつ直ったかが分かると原因が絞れる** ---
-    const cleared = noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv200'), ent('nico:2', 'lv2')], now: T0 + 11 * 20000 })
-    check('DD 🔴 重複が消えたら解消を出す（続いた時間つき）',
-        !!cleared && cleared.includes('解消') && cleared.includes('220秒'), String(cleared))
-    check('DD 解消後は状態が戻る（また同じ配信者で重複したら鳴る）',
-        noteDuplicateOwners(d, { entries: [ent('nico:9', 'lv200')], now: T0 + 12 * 20000 }) === null
-        && !!noteDuplicateOwners(d, { entries: dupEntries, now: T0 + 13 * 20000 }))
-
-    // --- 誤検知しない形か ---
-    // 🔴 **1件ずつ状態を作り直すこと。** 使い回すと、前の check が誤って重複を登録した時に
-    //    次の check が「解消」を受け取って落ちる＝**どれが本当の原因か読めなくなる**（変異検査で実際に起きた）。
-    check('DD 🔴 同じ番組IDが2回入っているのは重複としない（描画側の取り違えと区別する）',
-        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('nico:9', 'lv100'), ent('nico:9', 'lv100')], now: T0 }) === null)
-    check('DD 🔴 配信者キーを作れない番組は数えない（判定できないので黙る）',
-        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('', 'lv1'), ent('', 'lv2')], now: T0 }) === null)
-    check('DD 別の配信者が2人いるだけでは鳴らない',
-        noteDuplicateOwners(createDupOwnerState(), { entries: [ent('nico:1', 'lv1'), ent('nico:2', 'lv2')], now: T0 }) === null)
-
-    // =====================================================================
-    // 口③（仮説）: ニコ生の取得だけ失敗して据え置きが続いていないか
-    // =====================================================================
-
-    // --- ① 正常な時は黙る（毎周期鳴るものを配らない） ---
-    let s = createNicoStaleState()
-    check('DD 🔴 取得できている間は1行も出ない',
-        noteNicoFetch(s, { ok: true, now: T0, kickOk: true }) === null
-        && noteNicoFetch(s, { ok: true, now: T0 + 20000, kickOk: true }) === null)
-
-    // --- ② ニコ生だけ落ちたら、理由と据え置き件数を出す ---
-    s = createNicoStaleState()
-    const first = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0, staleCount: 7, kickOk: true })
-    check('DD 🔴 ニコ生だけ落ちたら1回目で鳴る（理由と据え置き件数つき）',
-        !!first && first.includes('unauthorized') && first.includes('7件'), String(first))
-
-    // --- ③ 毎周期は鳴らさない。長引いた時だけ途中経過 ---
-    let mid = null
-    for (let i = 2; i <= 9; i++) {
-        const line = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + i * 20000, staleCount: 7, kickOk: true })
-        if (line) mid = 'i=' + i + ' ' + line
-    }
-    check('DD 🔴 2〜9周期目は黙る（20秒ごとに流れない）', mid === null, String(mid))
-    const tenth = noteNicoFetch(s, { ok: false, reason: 'unauthorized', now: T0 + 10 * 20000, staleCount: 7, kickOk: true })
-    check('DD 10周期目に途中経過を出す（経過秒つき）',
-        !!tenth && tenth.includes('200秒') && tenth.includes('10周期'), String(tenth))
-
-    // --- ④ 回復も出す。**これが無いと「いつまで続いたか」が分からない** ---
-    const back = noteNicoFetch(s, { ok: true, now: T0 + 11 * 20000, kickOk: true })
-    check('DD 🔴 回復した時に、続いた時間と周期数を出す',
-        !!back && back.includes('220秒') && back.includes('10周期'), String(back))
-    check('DD 回復後は状態が戻る（次の失敗がまた1回目として鳴る）',
-        noteNicoFetch(s, { ok: true, now: T0 + 12 * 20000 }) === null
-        && !!noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 13 * 20000, staleCount: 3, kickOk: true }))
-
-    // --- ⑤ 両方落ちている間は黙る（画面に案内が出ているので） ---
-    s = createNicoStaleState()
-    check('DD 🔴 Kick も落ちている間は黙る（案内が出ているので二重に言わない）',
-        noteNicoFetch(s, { ok: false, reason: 'network', now: T0, staleCount: 5, kickOk: false }) === null
-        && noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 20000, staleCount: 5, kickOk: false }) === null)
-    // 🔴 それでも**時計は動かす**。Kick が戻った時に「いつから落ちていたか」を正しく言えること。
-    const afterKickBack = noteNicoFetch(s, { ok: false, reason: 'network', now: T0 + 40000, staleCount: 5, kickOk: true })
-    check('DD 🔴 Kick が戻ったら、ニコ生が落ち始めた時刻から数える（黙っていた間も計測している）',
-        !!afterKickBack && afterKickBack.includes('40秒'), String(afterKickBack))
-
-    // =====================================================================
-    // 撤去できる形か／両方の口が本当に繋がっているか
-    // =====================================================================
-    const kp = readFileSync(new URL('../src/kickPage.js', import.meta.url), 'utf8')
-    check('DD 🔴 呼び出しは1箇所ずつ（撤去漏れを防ぐ）',
-        (kp.match(/noteNicoFetch\(/g) || []).length === 1
-        && (kp.match(/noteDuplicateOwners\(/g) || []).length === 1
-        && (kp.match(/probeStartupLine\(\)/g) || []).length === 1)
-    // 🔴 **1周目の失敗をここで縛る。** 症状の口を繋ぎ忘れたら、また何も取れずに終わる。
-    check('DD 🔴 症状の口（重複）が本当に繋がっている',
-        /noteDuplicateOwners\(dupOwnerState/.test(kp) && /ownerKeyOf\(/.test(kp))
-    check('DD 🔴 起動の1行が init で出る（載っているか分かるように）',
-        /console\.warn\(probeStartupLine\(\)\)/.test(kp))
-    check('DD 🔴 fresh に nicoRes.ok を渡している（据え置きかどうかを取り違えない）',
-        /fresh:\s*nicoRes\.ok/.test(kp))
-    check('DD 🔴 kickRes.ok を渡している（渡さないと両方失敗でも鳴る）',
-        /kickOk:\s*kickRes\.ok/.test(kp))
-    check('DD 🔴 撤去の目印が両方に入っている（doc/09 項目DD）',
-        kp.includes('項目DD')
-        && readFileSync(new URL('../src/services/nicoStaleProbe.js', import.meta.url), 'utf8').includes('項目DD'))
-    // ⚠️ **診断が載ったまま公開しないための綱。** version_name が目印。
-    check('DD 🔴 診断が載っている間は manifest に version_name の目印がある',
-        /"version_name":\s*"[^"]*diag-DD/.test(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8')))
-}
-
 async function gridColumnFixGroup() {
     console.log('=== CA カードの列数を「使える幅」で決め直す ===')
     const { columnsOf, minWidthOf, pickColumns, planGridColumns, planFromMeasurement, collectColumnRules,
@@ -7193,6 +7614,8 @@ if (real) {
     await programEndConfirmation()
     await endedByAutoNextGroup()
     await liveStatisticsGroup()
+    await kickEndedProgramsGroup()
+    await kickNewProgramsGroup()
     await taintedFrameNotFed()
     await watchPointsResetGroup()
     await elapsedTimeGroup()
@@ -7229,7 +7652,6 @@ if (real) {
     await autoNextTarget()
     await kickAutoNext()
     await fixedOverlayNudgeGroup()
-    await nicoStaleProbeGroup()
     await gridColumnFixGroup()
     await widthRewriteSelectorGroup()
     await sidebarPlacementGroup()
